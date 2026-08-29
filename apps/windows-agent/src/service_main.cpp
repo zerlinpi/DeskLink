@@ -5,11 +5,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cwchar>
 #include <cwctype>
 #include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
+
+#include "protected_credential_store.h"
 
 namespace {
 
@@ -18,6 +21,7 @@ constexpr wchar_t kServiceDisplayName[] = L"DeskLink Remote Desktop";
 constexpr wchar_t kServiceDescription[] =
     L"Keeps the DeskLink remote desktop agent running in the active Windows user session.";
 constexpr DWORD kNoSession = 0xFFFFFFFF;
+constexpr wchar_t kDeviceCredentialPrefix[] = L"DESKLINK_DEVICE_CREDENTIAL=";
 
 SERVICE_STATUS_HANDLE g_status_handle = nullptr;
 SERVICE_STATUS g_status{};
@@ -123,6 +127,99 @@ std::wstring OutputIndexArgument() {
     if (!std::iswdigit(ch)) return {};
   }
   return value;
+}
+
+void SecureWipe(std::wstring* value) {
+  if (!value || value->empty()) return;
+  SecureZeroMemory(value->data(), value->size() * sizeof(wchar_t));
+  value->clear();
+}
+
+void SecureWipe(std::vector<wchar_t>* value) {
+  if (!value || value->empty()) return;
+  SecureZeroMemory(value->data(), value->size() * sizeof(wchar_t));
+  value->clear();
+}
+
+std::vector<wchar_t> BuildEnvironmentWithDeviceCredential(
+    LPVOID base_environment,
+    const std::wstring& credential) {
+  std::vector<wchar_t> result;
+  constexpr size_t prefix_length =
+      (sizeof(kDeviceCredentialPrefix) / sizeof(kDeviceCredentialPrefix[0])) - 1;
+
+  const auto* cursor = static_cast<const wchar_t*>(base_environment);
+  while (cursor && *cursor != L'\0') {
+    const size_t length = std::wcslen(cursor);
+    const bool is_device_credential =
+        length >= prefix_length &&
+        _wcsnicmp(cursor, kDeviceCredentialPrefix, prefix_length) == 0;
+    if (!is_device_credential) {
+      result.insert(result.end(), cursor, cursor + length + 1);
+    }
+    cursor += length + 1;
+  }
+
+  result.insert(
+      result.end(),
+      kDeviceCredentialPrefix,
+      kDeviceCredentialPrefix + prefix_length);
+  result.insert(result.end(), credential.begin(), credential.end());
+  result.push_back(L'\0');
+  result.push_back(L'\0');
+  return result;
+}
+
+bool ReadCredentialFromConsole(std::wstring* credential) {
+  if (!credential) return false;
+  credential->clear();
+
+  HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD original_mode = 0;
+  const bool has_console_mode =
+      input != INVALID_HANDLE_VALUE && input != nullptr && GetConsoleMode(input, &original_mode);
+  if (has_console_mode) {
+    SetConsoleMode(input, original_mode & ~ENABLE_ECHO_INPUT);
+  }
+
+  std::wcout << L"Enter DeskLink dc1 device credential: " << std::flush;
+  std::getline(std::wcin, *credential);
+
+  if (has_console_mode) {
+    SetConsoleMode(input, original_mode);
+  }
+  std::wcout << L"\n";
+  return !credential->empty();
+}
+
+int StoreDeviceCredentialCommand() {
+  std::wstring credential;
+  if (!ReadCredentialFromConsole(&credential)) {
+    std::wcerr << L"No credential was entered.\n";
+    return 1;
+  }
+
+  std::wstring error;
+  const bool stored = desklink::StoreProtectedDeviceCredential(credential, &error);
+  SecureWipe(&credential);
+  if (!stored) {
+    std::wcerr << L"Unable to store device credential: " << error << L"\n";
+    return 1;
+  }
+
+  std::wcout << L"Device credential stored with machine-scope DPAPI protection.\n"
+             << L"Restart the DeskLink service to launch a new Agent with it.\n";
+  return 0;
+}
+
+int ClearDeviceCredentialCommand() {
+  std::wstring error;
+  if (!desklink::DeleteProtectedDeviceCredential(&error)) {
+    std::wcerr << L"Unable to clear protected device credential: " << error << L"\n";
+    return 1;
+  }
+  std::wcout << L"Protected device credential removed.\n";
+  return 0;
 }
 
 void CloseAgentStopEvent() {
@@ -237,7 +334,39 @@ bool LaunchAgent(DWORD session_id) {
   LPVOID environment = nullptr;
   const BOOL has_environment = CreateEnvironmentBlock(&environment, user_token, FALSE);
 
+  std::wstring protected_credential;
+  std::wstring credential_error;
+  const desklink::ProtectedCredentialStatus credential_status =
+      desklink::LoadProtectedDeviceCredential(&protected_credential, &credential_error);
+  if (credential_status == desklink::ProtectedCredentialStatus::Error) {
+    if (has_environment) DestroyEnvironmentBlock(environment);
+    CloseHandle(user_token);
+    LogEvent(
+        EVENTLOG_ERROR_TYPE,
+        L"Protected device credential could not be loaded: " + credential_error);
+    return false;
+  }
+  if (credential_status == desklink::ProtectedCredentialStatus::Loaded && !has_environment) {
+    SecureWipe(&protected_credential);
+    CloseHandle(user_token);
+    LogEvent(
+        EVENTLOG_ERROR_TYPE,
+        L"CreateEnvironmentBlock failed; refusing to expose protected credential through fallback environment");
+    return false;
+  }
+
+  std::vector<wchar_t> protected_environment;
+  LPVOID child_environment = has_environment ? environment : nullptr;
+  if (credential_status == desklink::ProtectedCredentialStatus::Loaded) {
+    protected_environment = BuildEnvironmentWithDeviceCredential(
+        environment,
+        protected_credential);
+    child_environment = protected_environment.data();
+  }
+
   if (!CreateAgentStopEvent(session_id)) {
+    SecureWipe(&protected_credential);
+    SecureWipe(&protected_environment);
     if (has_environment) DestroyEnvironmentBlock(environment);
     CloseHandle(user_token);
     return false;
@@ -258,7 +387,7 @@ bool LaunchAgent(DWORD session_id) {
 
   PROCESS_INFORMATION process{};
   DWORD creation_flags = CREATE_NO_WINDOW;
-  if (has_environment) creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+  if (child_environment) creation_flags |= CREATE_UNICODE_ENVIRONMENT;
 
   const std::wstring working_directory = agent_path.parent_path().wstring();
   const BOOL created = CreateProcessAsUserW(
@@ -269,12 +398,14 @@ bool LaunchAgent(DWORD session_id) {
       nullptr,
       FALSE,
       creation_flags,
-      has_environment ? environment : nullptr,
+      child_environment,
       working_directory.c_str(),
       &startup,
       &process);
   const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
 
+  SecureWipe(&protected_credential);
+  SecureWipe(&protected_environment);
   if (has_environment) DestroyEnvironmentBlock(environment);
   CloseHandle(user_token);
 
@@ -309,7 +440,10 @@ bool LaunchAgent(DWORD session_id) {
   g_agent_session = session_id;
   LogEvent(
       EVENTLOG_INFORMATION_TYPE,
-      L"Started desklink-agent.exe in session " + std::to_wstring(session_id));
+      L"Started desklink-agent.exe in session " + std::to_wstring(session_id) +
+          (credential_status == desklink::ProtectedCredentialStatus::Loaded
+               ? L" with DPAPI-protected device credential"
+               : L""));
   return true;
 }
 
@@ -574,8 +708,12 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring command = argv[1];
     if (command == L"--install") return InstallService();
     if (command == L"--uninstall") return UninstallService();
+    if (command == L"--store-device-credential") return StoreDeviceCredentialCommand();
+    if (command == L"--clear-device-credential") return ClearDeviceCredentialCommand();
     if (command != L"--service") {
-      std::wcerr << L"Usage: desklink-service.exe --install | --uninstall | --service\n";
+      std::wcerr
+          << L"Usage: desklink-service.exe --install | --uninstall | --service | "
+             L"--store-device-credential | --clear-device-credential\n";
       return 2;
     }
   }
