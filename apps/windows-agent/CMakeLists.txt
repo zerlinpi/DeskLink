@@ -48,6 +48,8 @@ FetchContent_MakeAvailable(libdatachannel)
 
 add_executable(desklink-agent
   src/main.cpp
+  src/clipboard_win32.cpp
+  src/clipboard_win32.h
   src/desktop_capture.cpp
   src/desktop_capture.h
   src/gpu_color_converter.cpp
