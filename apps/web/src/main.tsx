@@ -56,6 +56,9 @@ function App() {
   const pointerRafRef = useRef<number | null>(null);
   const statsTimerRef = useRef<number | null>(null);
   const statsBaselineRef = useRef<StatsBaseline | null>(null);
+  const offerSentRef = useRef(false);
+  const pendingLocalIceRef = useRef<RTCIceCandidateInit[]>([]);
+  const pendingRemoteIceRef = useRef<RTCIceCandidateInit[]>([]);
 
   const sendSignal = (type: string, payload: any = {}) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) return;
@@ -196,6 +199,10 @@ function App() {
   };
 
   const createPeer = () => {
+    offerSentRef.current = false;
+    pendingLocalIceRef.current = [];
+    pendingRemoteIceRef.current = [];
+
     const pc = new RTCPeerConnection({
       iceServers: ICE_SERVERS,
       bundlePolicy: "max-bundle",
@@ -208,7 +215,13 @@ function App() {
       void videoRef.current.play().catch(() => undefined);
     };
     pc.onicecandidate = (event) => {
-      if (event.candidate) sendSignal("ice", event.candidate.toJSON());
+      if (!event.candidate) return;
+      const candidate = event.candidate.toJSON();
+      if (offerSentRef.current) {
+        sendSignal("ice", candidate);
+      } else {
+        pendingLocalIceRef.current.push(candidate);
+      }
     };
     pc.onconnectionstatechange = () => {
       setStatus(pc.connectionState);
@@ -239,6 +252,9 @@ function App() {
     if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
     pointerRafRef.current = null;
     pendingMoveRef.current = null;
+    offerSentRef.current = false;
+    pendingLocalIceRef.current = [];
+    pendingRemoteIceRef.current = [];
     controlRef.current?.close();
     pointerRef.current?.close();
     pcRef.current?.close();
@@ -275,11 +291,20 @@ function App() {
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+
+      // The host intentionally ignores ICE for sessions that have not passed the
+      // access-code gate yet. Send the offer first, then flush candidates over the
+      // same ordered WebSocket so no LAN candidate can race ahead and be dropped.
       sendSignal("offer", {
         type: offer.type,
         sdp: offer.sdp,
         accessCode,
       });
+      offerSentRef.current = true;
+      for (const candidate of pendingLocalIceRef.current) {
+        sendSignal("ice", candidate);
+      }
+      pendingLocalIceRef.current = [];
     };
 
     ws.onmessage = async (event) => {
@@ -289,8 +314,26 @@ function App() {
 
       if (msg.type === "answer" && msg.payload) {
         await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);
+        const pending = pendingRemoteIceRef.current;
+        pendingRemoteIceRef.current = [];
+        for (const candidate of pending) {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (error) {
+            console.debug("DeskLink queued remote ICE rejected", error);
+          }
+        }
       } else if (msg.type === "ice" && msg.payload) {
-        await pc.addIceCandidate(msg.payload as RTCIceCandidateInit);
+        const candidate = msg.payload as RTCIceCandidateInit;
+        if (pc.remoteDescription) {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (error) {
+            console.debug("DeskLink remote ICE rejected", error);
+          }
+        } else {
+          pendingRemoteIceRef.current.push(candidate);
+        }
       } else if (msg.type === "peer-offline") {
         disconnect("peer offline");
       } else if (msg.type === "auth-rejected") {
@@ -299,8 +342,17 @@ function App() {
       }
     };
 
-    ws.onerror = () => setStatus("signal error");
-    ws.onclose = () => setStatus((current) => (current === "idle" ? current : "disconnected"));
+    ws.onerror = () => {
+      if (pcRef.current?.connectionState !== "connected") setStatus("signal error");
+    };
+    ws.onclose = () => {
+      const pc = pcRef.current;
+      if (pc?.connectionState === "connected") {
+        setStatus("control ready · signaling offline");
+      } else {
+        setStatus((current) => (current === "idle" ? current : "disconnected"));
+      }
+    };
   };
 
   const canConnect = status === "idle" && Boolean(targetId.trim()) && Boolean(accessCode);
