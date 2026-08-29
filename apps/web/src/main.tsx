@@ -37,6 +37,7 @@ const ICE_SERVERS: RTCIceServer[] = [
 function App() {
   const localId = useMemo(() => `web-${crypto.randomUUID().slice(0, 8)}`, []);
   const [targetId, setTargetId] = useState("");
+  const [accessCode, setAccessCode] = useState("");
   const [status, setStatus] = useState("idle");
   const videoRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -120,7 +121,7 @@ function App() {
     return pc;
   };
 
-  const disconnect = () => {
+  const disconnect = (nextStatus = "idle") => {
     if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
     pointerRafRef.current = null;
     pendingMoveRef.current = null;
@@ -134,11 +135,11 @@ function App() {
     wsRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     sessionRef.current = crypto.randomUUID();
-    setStatus("idle");
+    setStatus(nextStatus);
   };
 
   const connect = async () => {
-    if (!targetId.trim() || status !== "idle") return;
+    if (!targetId.trim() || !accessCode || status !== "idle") return;
     setStatus("signaling");
 
     const ws = new WebSocket(`${SIGNAL_URL}?deviceId=${encodeURIComponent(localId)}`);
@@ -160,7 +161,11 @@ function App() {
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      sendSignal("offer", offer);
+      sendSignal("offer", {
+        type: offer.type,
+        sdp: offer.sdp,
+        accessCode,
+      });
     };
 
     ws.onmessage = async (event) => {
@@ -173,13 +178,18 @@ function App() {
       } else if (msg.type === "ice" && msg.payload) {
         await pc.addIceCandidate(msg.payload as RTCIceCandidateInit);
       } else if (msg.type === "peer-offline") {
-        setStatus("peer offline");
+        disconnect("peer offline");
+      } else if (msg.type === "auth-rejected") {
+        const reason = msg.payload?.reason;
+        disconnect(reason === "host-unconfigured" ? "host access code not configured" : "access code rejected");
       }
     };
 
     ws.onerror = () => setStatus("signal error");
     ws.onclose = () => setStatus((current) => (current === "idle" ? current : "disconnected"));
   };
+
+  const canConnect = status === "idle" && Boolean(targetId.trim()) && Boolean(accessCode);
 
   return (
     <main className="shell">
@@ -196,12 +206,24 @@ function App() {
           value={targetId}
           onChange={(e) => setTargetId(e.target.value)}
           placeholder="Remote device ID"
+          autoComplete="off"
           disabled={status !== "idle"}
         />
+        <input
+          type="password"
+          value={accessCode}
+          onChange={(e) => setAccessCode(e.target.value)}
+          placeholder="Access code"
+          autoComplete="current-password"
+          disabled={status !== "idle"}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && canConnect) void connect();
+          }}
+        />
         {status === "idle" ? (
-          <button onClick={connect}>Connect</button>
+          <button onClick={() => void connect()} disabled={!canConnect}>Connect</button>
         ) : (
-          <button onClick={disconnect}>Disconnect</button>
+          <button onClick={() => disconnect()}>Disconnect</button>
         )}
       </section>
 
@@ -237,7 +259,7 @@ function App() {
             }
           }}
         />
-        {status === "idle" && <div className="empty">Enter a device ID to start a low-latency session.</div>}
+        {status === "idle" && <div className="empty">Enter the device ID and access code to start a low-latency session.</div>}
       </section>
     </main>
   );
