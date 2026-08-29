@@ -214,11 +214,16 @@ int wmain(int argc, wchar_t** argv) {
   desklink::SessionConfig session_config;
   session_config.signal_url = EnvOr("DESKLINK_SIGNAL_URL", session_config.signal_url);
   session_config.device_id = EnvOr("DESKLINK_DEVICE_ID", DefaultDeviceId());
+  session_config.access_code = EnvOr("DESKLINK_ACCESS_CODE", "");
   session_config.stun_url = EnvOr("DESKLINK_STUN_URL", session_config.stun_url);
   session_config.turn_host = EnvOr("DESKLINK_TURN_HOST", session_config.turn_host);
   session_config.turn_port = EnvPortOr("DESKLINK_TURN_PORT", session_config.turn_port);
   session_config.turn_username = EnvOr("DESKLINK_TURN_USERNAME", session_config.turn_username);
   session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);
+
+  if (session_config.access_code.empty()) {
+    std::wcerr << L"SECURITY: DESKLINK_ACCESS_CODE is not set; incoming remote-control offers will be rejected.\n";
+  }
 
   rtc::InitLogger(rtc::LogLevel::Info);
   desklink::WebRtcSession session(std::move(session_config));
