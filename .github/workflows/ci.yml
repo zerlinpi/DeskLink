@@ -24,6 +24,10 @@ jobs:
       - run: go mod download
       - run: go test ./...
       - run: go build ./...
+      - name: Validate device credential provisioning tool
+        env:
+          DESKLINK_DEVICE_AUTH_SECRET: ci-device-auth-secret
+        run: go run ../../tools/auth/mint-device-credential.go ci-windows-host >/dev/null
 
   web:
     runs-on: ubuntu-latest
