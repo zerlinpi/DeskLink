@@ -16,11 +16,12 @@ std::wstring ServiceStopEventName() {
   if (!argv) return {};
 
   constexpr wchar_t kPrefix[] = L"--service-stop-event=";
+  constexpr size_t kPrefixLength = (sizeof(kPrefix) / sizeof(kPrefix[0])) - 1;
   std::wstring result;
   for (int i = 1; i < argc; ++i) {
     const std::wstring argument(argv[i]);
     if (argument.rfind(kPrefix, 0) == 0) {
-      result = argument.substr(std::size(kPrefix) - 1);
+      result = argument.substr(kPrefixLength);
       break;
     }
   }
@@ -68,7 +69,10 @@ class ServiceShutdownBridge {
   }
 
   ~ServiceShutdownBridge() {
-    if (worker_.joinable()) worker_.request_stop();
+    if (worker_.joinable()) {
+      worker_.request_stop();
+      worker_.join();
+    }
     if (event_) {
       CloseHandle(event_);
       event_ = nullptr;
