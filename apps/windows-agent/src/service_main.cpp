@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <sddl.h>
 #include <userenv.h>
 #include <wtsapi32.h>
 
@@ -24,8 +25,11 @@ HANDLE g_stop_event = nullptr;
 HANDLE g_session_event = nullptr;
 HANDLE g_agent_process = nullptr;
 HANDLE g_agent_job = nullptr;
+HANDLE g_agent_stop_event = nullptr;
+std::wstring g_agent_stop_event_name;
 DWORD g_agent_session = kNoSession;
 DWORD g_checkpoint = 1;
+uint64_t g_stop_event_counter = 0;
 
 void LogEvent(WORD type, const std::wstring& message) {
   OutputDebugStringW((L"DeskLink Service: " + message + L"\n").c_str());
@@ -121,24 +125,94 @@ std::wstring OutputIndexArgument() {
   return value;
 }
 
+void CloseAgentStopEvent() {
+  if (g_agent_stop_event) {
+    CloseHandle(g_agent_stop_event);
+    g_agent_stop_event = nullptr;
+  }
+  g_agent_stop_event_name.clear();
+}
+
+bool CreateAgentStopEvent(DWORD session_id) {
+  CloseAgentStopEvent();
+
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  // LocalSystem may signal the event; authenticated users may only wait on it.
+  // The unpredictable suffix prevents accidental/cross-session name collisions.
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          L"D:P(A;;GA;;;SY)(A;;GR;;;AU)",
+          SDDL_REVISION_1,
+          &descriptor,
+          nullptr)) {
+    LogEvent(EVENTLOG_ERROR_TYPE, L"Unable to create Agent shutdown event security descriptor");
+    return false;
+  }
+
+  const uint64_t nonce = ++g_stop_event_counter;
+  g_agent_stop_event_name =
+      L"Global\\DeskLink.AgentStop." + std::to_wstring(session_id) + L"." +
+      std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetTickCount64()) + L"." +
+      std::to_wstring(nonce);
+
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.lpSecurityDescriptor = descriptor;
+  attributes.bInheritHandle = FALSE;
+
+  SetLastError(ERROR_SUCCESS);
+  g_agent_stop_event = CreateEventW(
+      &attributes,
+      TRUE,
+      FALSE,
+      g_agent_stop_event_name.c_str());
+  const DWORD create_error = GetLastError();
+  LocalFree(descriptor);
+
+  if (!g_agent_stop_event || create_error == ERROR_ALREADY_EXISTS) {
+    if (g_agent_stop_event) CloseHandle(g_agent_stop_event);
+    g_agent_stop_event = nullptr;
+    g_agent_stop_event_name.clear();
+    LogEvent(EVENTLOG_ERROR_TYPE, L"Unable to create unique Agent shutdown event");
+    return false;
+  }
+  return true;
+}
+
 bool AgentAlive() {
   return g_agent_process && WaitForSingleObject(g_agent_process, 0) == WAIT_TIMEOUT;
 }
 
 void StopAgent() {
-  if (g_agent_job) {
-    TerminateJobObject(g_agent_job, 0);
-    CloseHandle(g_agent_job);
-    g_agent_job = nullptr;
-  } else if (g_agent_process && AgentAlive()) {
-    TerminateProcess(g_agent_process, 0);
+  bool exited_gracefully = false;
+  if (g_agent_process && AgentAlive() && g_agent_stop_event) {
+    if (SetEvent(g_agent_stop_event)) {
+      exited_gracefully = WaitForSingleObject(g_agent_process, 5000) == WAIT_OBJECT_0;
+    }
   }
 
-  if (g_agent_process) {
+  if (g_agent_process && AgentAlive()) {
+    if (!exited_gracefully) {
+      LogEvent(
+          EVENTLOG_WARNING_TYPE,
+          L"Agent did not exit within the graceful shutdown window; forcing termination");
+    }
+    if (g_agent_job) {
+      TerminateJobObject(g_agent_job, 0);
+    } else {
+      TerminateProcess(g_agent_process, 0);
+    }
     WaitForSingleObject(g_agent_process, 3000);
+  }
+
+  if (g_agent_job) {
+    CloseHandle(g_agent_job);
+    g_agent_job = nullptr;
+  }
+  if (g_agent_process) {
     CloseHandle(g_agent_process);
     g_agent_process = nullptr;
   }
+  CloseAgentStopEvent();
   g_agent_session = kNoSession;
 }
 
@@ -163,9 +237,17 @@ bool LaunchAgent(DWORD session_id) {
   LPVOID environment = nullptr;
   const BOOL has_environment = CreateEnvironmentBlock(&environment, user_token, FALSE);
 
+  if (!CreateAgentStopEvent(session_id)) {
+    if (has_environment) DestroyEnvironmentBlock(environment);
+    CloseHandle(user_token);
+    return false;
+  }
+
   std::wstring command = L"\"" + agent_path.wstring() + L"\"";
-  const std::wstring output_index = OutputIndexArgument();
-  if (!output_index.empty()) command += L" " + output_index;
+  std::wstring output_index = OutputIndexArgument();
+  if (output_index.empty()) output_index = L"0";
+  command += L" " + output_index;
+  command += L" --service-stop-event=\"" + g_agent_stop_event_name + L"\"";
   std::vector<wchar_t> command_line(command.begin(), command.end());
   command_line.push_back(L'\0');
 
@@ -197,6 +279,7 @@ bool LaunchAgent(DWORD session_id) {
   CloseHandle(user_token);
 
   if (!created) {
+    CloseAgentStopEvent();
     LogEvent(
         EVENTLOG_ERROR_TYPE,
         L"CreateProcessAsUser failed for session " + std::to_wstring(session_id) +
