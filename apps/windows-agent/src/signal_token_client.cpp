@@ -105,10 +105,11 @@ bool FetchRuntimeSignalToken(
   }
   *signal_token = {};
 
-  // A Service-launched Agent never needs the long-lived device credential. The
-  // LocalSystem Service owns it and returns only a short-lived token over a PID-
-  // bound named pipe. Direct/manual Agent launches fall through to HTTPS below.
-  if (ServiceAuthBrokerConfigured()) {
+  // Only reroute signal-token refresh when the Service explicitly enabled that
+  // broker capability. A Service Pipe may exist solely to deliver a protected
+  // access code, in which case direct/manual signal-token behavior must remain
+  // unchanged.
+  if (ServiceSignalTokenBrokerConfigured()) {
     return FetchServiceBrokerSignalToken(signal_token, error);
   }
 
@@ -202,26 +203,24 @@ bool FetchRuntimeSignalToken(
     return false;
   }
 
-  std::wstring credential_w = Utf8ToWide(device_credential);
+  const std::wstring credential_w = Utf8ToWide(device_credential);
   if (credential_w.empty()) {
     SetError(error, "device credential is not valid UTF-8");
     return false;
   }
-  std::wstring headers =
+  const std::wstring headers =
       L"Authorization: Bearer " + credential_w +
       L"\r\nAccept: application/json\r\nCache-Control: no-cache\r\n";
 
-  const BOOL sent = WinHttpSendRequest(
-      request.get(),
-      headers.c_str(),
-      static_cast<DWORD>(headers.size()),
-      WINHTTP_NO_REQUEST_DATA,
-      0,
-      0,
-      0);
-  SecureWipe(&credential_w);
-  SecureWipe(&headers);
-  if (!sent || !WinHttpReceiveResponse(request.get(), nullptr)) {
+  if (!WinHttpSendRequest(
+          request.get(),
+          headers.c_str(),
+          static_cast<DWORD>(headers.size()),
+          WINHTTP_NO_REQUEST_DATA,
+          0,
+          0,
+          0) ||
+      !WinHttpReceiveResponse(request.get(), nullptr)) {
     SetError(error, "signal token request failed");
     return false;
   }
