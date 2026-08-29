@@ -8,10 +8,13 @@ services:
     environment:
       DESKLINK_SIGNAL_ADDR: :8080
       DESKLINK_ALLOW_ANY_ORIGIN: "1"
-      # Empty keeps local development backward-compatible. Production should
-      # inject a long random secret only after clients receive short-lived
-      # registration tokens from a trusted provisioning service.
+      # Empty values keep local development backward-compatible. Production
+      # should inject independent long random secrets from a secret manager.
+      DESKLINK_DEVICE_AUTH_SECRET: ${DESKLINK_DEVICE_AUTH_SECRET:-}
       DESKLINK_SIGNAL_AUTH_SECRET: ${DESKLINK_SIGNAL_AUTH_SECRET:-}
+      DESKLINK_SIGNAL_TOKEN_TTL: ${DESKLINK_SIGNAL_TOKEN_TTL:-15m}
+      DESKLINK_TURN_AUTH_SECRET: ${DESKLINK_TURN_AUTH_SECRET:-}
+      DESKLINK_TURN_CREDENTIAL_TTL_SECONDS: ${DESKLINK_TURN_CREDENTIAL_TTL_SECONDS:-43200}
     ports:
       - "8080:8080"
 
