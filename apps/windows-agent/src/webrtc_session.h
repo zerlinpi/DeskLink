@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -35,20 +36,28 @@ class WebRtcSession {
   bool connected() const;
   std::string controller_id() const;
 
+  // Encoded access units must be Annex-B (00 00 01 / 00 00 00 01 separated NAL units).
+  // timestamp100ns is the capture/encode presentation timestamp in 100-ns units.
+  bool SendH264AccessUnit(const uint8_t* data, size_t size, uint64_t timestamp100ns);
+
  private:
   void HandleSignal(const std::string& text);
   void HandleOffer(const std::string& from, const std::string& session, const nlohmann::json& payload);
   void HandleIce(const nlohmann::json& payload);
-  void CreatePeer(const std::string& controller, const std::string& session);
+  void CreatePeer(const std::string& controller, const std::string& session, uint8_t h264_payload_type);
   void AttachControlChannel(const std::shared_ptr<rtc::DataChannel>& channel);
   void HandleControl(const std::string& text);
   void SendSignal(const std::string& type, const nlohmann::json& payload);
+
+  static uint8_t FindH264PayloadType(const std::string& sdp);
 
   SessionConfig config_;
   InputInjector input_;
   std::shared_ptr<rtc::WebSocket> websocket_;
   std::shared_ptr<rtc::PeerConnection> peer_;
   std::shared_ptr<rtc::DataChannel> control_;
+  std::shared_ptr<rtc::Track> video_track_;
+  uint64_t video_timestamp_base100ns_{0};
 
   mutable std::mutex mutex_;
   std::string controller_id_;
