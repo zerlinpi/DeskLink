@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	defaultHandshakeRate      = 4.0
-	defaultHandshakeBurst     = 16.0
+	defaultHandshakeRate       = 4.0
+	defaultHandshakeBurst      = 16.0
 	defaultMaxConnectionsPerIP = 12
-	authFailureBlockThreshold = 6
-	authFailureBlockDuration  = 45 * time.Second
-	ipStateTTL                = 10 * time.Minute
+	authFailureBlockThreshold  = 6
+	authFailureBlockDuration   = 45 * time.Second
+	ipStateTTL                 = 10 * time.Minute
 )
 
 type ipGuardState struct {
@@ -132,26 +132,36 @@ func (g *ipGuard) sweepLocked(now time.Time) {
 	}
 }
 
+func normalizedIP(value string) string {
+	parsed := net.ParseIP(strings.TrimSpace(value))
+	if parsed == nil {
+		return ""
+	}
+	return parsed.String()
+}
+
 func requestClientIP(r *http.Request) string {
 	if os.Getenv("DESKLINK_TRUST_PROXY_HEADERS") == "1" {
 		for _, header := range []string{"CF-Connecting-IP", "X-Real-IP"} {
-			if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			if value := normalizedIP(r.Header.Get(header)); value != "" {
 				return value
 			}
 		}
 		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
+			if first := normalizedIP(strings.Split(forwarded, ",")[0]); first != "" {
 				return first
 			}
 		}
 	}
 
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && host != "" {
-		return host
+	if err == nil {
+		if value := normalizedIP(host); value != "" {
+			return value
+		}
 	}
-	if r.RemoteAddr != "" {
-		return r.RemoteAddr
+	if value := normalizedIP(r.RemoteAddr); value != "" {
+		return value
 	}
 	return "unknown"
 }
