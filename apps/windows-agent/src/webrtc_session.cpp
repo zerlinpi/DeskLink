@@ -30,6 +30,19 @@ double JsonNumber(const json& object, const char* key, double fallback = 0.0) {
   return it->get<double>();
 }
 
+std::string EnvString(const char* name) {
+  char* value = nullptr;
+  size_t length = 0;
+  if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) {
+    if (value) std::free(value);
+    return {};
+  }
+
+  std::string result(value);
+  std::free(value);
+  return result;
+}
+
 uint32_t EnvUIntOr(
     const char* name,
     uint32_t fallback,
@@ -168,8 +181,14 @@ void WebRtcSession::ConnectSignaling() {
   }
 
   const char separator = config_.signal_url.find('?') == std::string::npos ? '?' : '&';
-  const std::string url = config_.signal_url + separator + "deviceId=" + config_.device_id;
-  std::cout << "Connecting signaling: " << url << "\n";
+  std::string url = config_.signal_url + separator + "deviceId=" + config_.device_id;
+  const std::string signal_auth_token = EnvString("DESKLINK_SIGNAL_AUTH_TOKEN");
+  if (!signal_auth_token.empty()) {
+    url += "&auth=" + signal_auth_token;
+  }
+  std::cout << "Connecting signaling as " << config_.device_id
+            << (signal_auth_token.empty() ? " without registration token" : " with registration token")
+            << "\n";
   ws->open(url);
 }
 
@@ -217,7 +236,6 @@ void WebRtcSession::Stop() {
   if (stopping_.exchange(true, std::memory_order_relaxed)) return;
 
   input_.ReleaseAll();
-
   {
     std::scoped_lock lock(reconnect_mutex_);
     reconnect_requested_ = false;
@@ -473,6 +491,21 @@ void WebRtcSession::CreatePeer(
         config_.turn_username,
         config_.turn_password,
         rtc::IceServer::RelayType::TurnTcp);
+
+    const uint32_t turn_tls_port = EnvUIntOr(
+        "DESKLINK_TURN_TLS_PORT",
+        5349,
+        0,
+        65535);
+    if (turn_tls_port > 0) {
+      rtc_config.iceServers.emplace_back(
+          config_.turn_host,
+          static_cast<uint16_t>(turn_tls_port),
+          config_.turn_username,
+          config_.turn_password,
+          rtc::IceServer::RelayType::TurnTls);
+      std::cout << "TURN TLS fallback enabled on port " << turn_tls_port << "\n";
+    }
   }
 
   auto peer = std::make_shared<rtc::PeerConnection>(rtc_config);
