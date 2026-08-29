@@ -192,7 +192,8 @@ jobs:
           foreach ($binary in @(
             "build/windows-agent/Release/DeskLink.exe",
             "build/windows-agent/Release/desklink-agent.exe",
-            "build/windows-agent/Release/desklink-service.exe"
+            "build/windows-agent/Release/desklink-service.exe",
+            "build/windows-agent/Release/desklink-media-probe.exe"
           )) {
             if (-not (Test-Path $binary)) { throw "missing artifact binary: $binary" }
             $dependencyText = (& $dumpbin.FullName /DEPENDENTS $binary) -join "`n"
@@ -220,6 +221,7 @@ jobs:
           Copy-Item "build/windows-agent/Release/DeskLink.exe" $packageRoot
           Copy-Item "build/windows-agent/Release/desklink-agent.exe" $packageRoot
           Copy-Item "build/windows-agent/Release/desklink-service.exe" $packageRoot
+          Copy-Item "build/windows-agent/Release/desklink-media-probe.exe" $packageRoot
           Copy-Item "packaging/windows/install-service.ps1" $packageRoot
           Copy-Item "packaging/windows/uninstall-service.ps1" $packageRoot
           Copy-Item "packaging/windows/README.txt" $packageRoot
