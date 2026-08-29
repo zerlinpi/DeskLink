@@ -1,6 +1,12 @@
 const STATUS_SELECTOR = ".status";
 const CARD_SELECTOR = ".connect-card";
 
+type ConnectionGuidance = {
+  level: "warning" | "error";
+  title: string;
+  text: string;
+};
+
 function friendlyStatus(value: string) {
   const normalized = value.trim().toLowerCase();
   if (!normalized || normalized === "idle") return "未连接";
@@ -23,6 +29,41 @@ function friendlyStatus(value: string) {
   return value;
 }
 
+function guidanceForStatus(value: string): ConnectionGuidance | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes("access code rejected")) {
+    return { level: "error", title: "访问码不正确", text: "确认被控端 DeskLink.exe 中设置的访问码，再重新连接。" };
+  }
+  if (normalized.includes("host access code not configured")) {
+    return { level: "error", title: "远端未设置访问码", text: "在远端电脑打开 DeskLink.exe，设置无人值守访问码并应用配置。" };
+  }
+  if (normalized.includes("device revoked")) {
+    return { level: "error", title: "设备授权已撤销", text: "该设备已被服务端撤销，需要重新生成并配置有效的设备凭证。" };
+  }
+  if (normalized.includes("controller authorization rejected")) {
+    return { level: "error", title: "控制端无权访问该设备", text: "检查控制端账号、密钥以及服务端 AllowedDevices 授权范围。" };
+  }
+  if (normalized.includes("turn credential error")) {
+    return { level: "error", title: "TURN 凭证获取失败", text: "检查 TURN Credential API、HTTPS 证书以及服务端共享密钥配置。" };
+  }
+  if (normalized.includes("signal error")) {
+    return { level: "error", title: "无法连接信令服务", text: "检查 Signal 地址、WSS 证书、反向代理 WebSocket 升级以及服务器防火墙。" };
+  }
+  if (normalized.includes("host authentication unavailable")) {
+    return { level: "error", title: "远端认证暂不可用", text: "远端 Service/Agent 可能没有正常启动；请在远端 DeskLink.exe 中运行连接诊断。" };
+  }
+  if (normalized.includes("host offline")) {
+    return { level: "warning", title: "远端当前离线", text: "确认远端 Windows 已开机、DeskLink Service 正在运行，并且 Signal 服务可访问。" };
+  }
+  if (normalized.includes("unsupported host authentication challenge")) {
+    return { level: "error", title: "控制端与远端版本不兼容", text: "请将 Windows Host 和 Web 控制端升级到同一版本。" };
+  }
+  if (normalized.includes("failed") || normalized.includes("error")) {
+    return { level: "error", title: "连接没有完成", text: "先检查远端 DeskLink.exe 的连接诊断，再确认 Signal / STUN / TURN 配置。" };
+  }
+  return null;
+}
+
 function setText(element: Element | null, value: string) {
   if (element && element.textContent !== value) element.textContent = value;
 }
@@ -38,6 +79,11 @@ function configureInput(
   if (input.placeholder !== placeholder) input.placeholder = placeholder;
   input.setAttribute("aria-label", label);
   input.title = label;
+}
+
+function rawConnectionStatus() {
+  const status = document.querySelector<HTMLElement>(STATUS_SELECTOR);
+  return status?.dataset.rawStatus ?? status?.textContent ?? "idle";
 }
 
 function syncHeader() {
@@ -63,6 +109,31 @@ function syncHeader() {
   status.dataset.state = friendly === "已连接" ? "ready" : (friendly === "未连接" ? "idle" : "busy");
 }
 
+function syncConnectionGuidance(card: HTMLElement) {
+  const guidance = guidanceForStatus(rawConnectionStatus());
+  let panel = card.querySelector<HTMLDivElement>(".connection-help");
+  if (!guidance) {
+    panel?.remove();
+    return;
+  }
+
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.className = "connection-help";
+    panel.setAttribute("role", "status");
+    panel.setAttribute("aria-live", "polite");
+    card.append(panel);
+  }
+  panel.dataset.level = guidance.level;
+  panel.replaceChildren();
+
+  const title = document.createElement("strong");
+  title.textContent = guidance.title;
+  const text = document.createElement("span");
+  text.textContent = guidance.text;
+  panel.append(title, text);
+}
+
 function syncConnectionCard() {
   const card = document.querySelector<HTMLElement>(CARD_SELECTOR);
   if (!card) return;
@@ -84,15 +155,15 @@ function syncConnectionCard() {
   const primary = Array.from(card.querySelectorAll<HTMLButtonElement>("button"))
     .find((button) => !button.closest(".recent-devices"));
   if (primary) {
-    const status = document.querySelector<HTMLElement>(STATUS_SELECTOR)?.dataset.rawStatus
-      ?? document.querySelector<HTMLElement>(STATUS_SELECTOR)?.textContent
-      ?? "idle";
+    const status = rawConnectionStatus();
     const idle = status.trim().toLowerCase() === "idle" || status === "未连接";
     primary.dataset.connectionAction = idle ? "connect" : "disconnect";
     primary.setAttribute("aria-label", idle ? "连接远程设备" : "断开远程设备");
     setText(primary, idle ? "连接设备" : "断开连接");
     primary.classList.toggle("is-disconnect", !idle);
   }
+
+  syncConnectionGuidance(card);
 
   const empty = document.querySelector<HTMLElement>(".stage .empty");
   if (empty) {
