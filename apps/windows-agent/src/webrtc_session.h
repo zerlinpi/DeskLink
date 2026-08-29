@@ -106,6 +106,7 @@ class WebRtcSession {
   std::unordered_map<std::string, std::chrono::steady_clock::time_point> authorized_offer_sessions_;
 
   std::atomic_bool stopping_{true};
+  std::atomic_bool registration_revoked_{false};
   std::atomic_uint32_t reconnect_attempt_{0};
   std::mutex reconnect_mutex_;
   std::condition_variable reconnect_cv_;
