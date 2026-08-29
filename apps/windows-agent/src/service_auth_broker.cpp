@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -17,7 +18,6 @@
 namespace desklink {
 namespace {
 
-constexpr wchar_t kPipeDacl[] = L"D:P(A;;GA;;;SY)(A;;GRGW;;;AU)";
 constexpr DWORD kPipeBufferBytes = 16 * 1024;
 constexpr DWORD kMaxRequestBytes = 128;
 constexpr int64_t kTokenReuseSafetySeconds = 90;
@@ -88,13 +88,78 @@ class LocalHandle {
   HANDLE handle_{nullptr};
 };
 
+bool ProcessUserSidString(
+    uint32_t process_id,
+    std::wstring* sid_string,
+    std::wstring* error) {
+  if (!sid_string || process_id == 0) {
+    SetError(error, L"Invalid Agent process for local authentication ACL");
+    return false;
+  }
+  sid_string->clear();
+
+  LocalHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id));
+  if (!process) {
+    SetError(error, L"Unable to open Agent process for local authentication ACL", GetLastError());
+    return false;
+  }
+
+  HANDLE raw_token = nullptr;
+  if (!OpenProcessToken(process.get(), TOKEN_QUERY, &raw_token)) {
+    SetError(error, L"Unable to read Agent process token", GetLastError());
+    return false;
+  }
+  LocalHandle token(raw_token);
+
+  DWORD required = 0;
+  GetTokenInformation(token.get(), TokenUser, nullptr, 0, &required);
+  if (required == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    SetError(error, L"Unable to size Agent user token information", GetLastError());
+    return false;
+  }
+
+  std::vector<BYTE> token_buffer(required);
+  if (!GetTokenInformation(
+          token.get(),
+          TokenUser,
+          token_buffer.data(),
+          required,
+          &required)) {
+    SetError(error, L"Unable to read Agent user token information", GetLastError());
+    return false;
+  }
+
+  const auto* token_user = reinterpret_cast<const TOKEN_USER*>(token_buffer.data());
+  LPWSTR raw_sid = nullptr;
+  if (!ConvertSidToStringSidW(token_user->User.Sid, &raw_sid) || !raw_sid) {
+    SetError(error, L"Unable to format Agent user SID", GetLastError());
+    return false;
+  }
+  *sid_string = raw_sid;
+  LocalFree(raw_sid);
+  return !sid_string->empty();
+}
+
 LocalHandle CreateBrokerPipe(
     const std::wstring& pipe_name,
+    const std::wstring& client_sid,
     bool first_instance,
     std::wstring* error = nullptr) {
+  if (client_sid.empty()) {
+    SetError(error, L"Agent user SID is required for local authentication pipe");
+    return {};
+  }
+
+  // LocalSystem owns the server side. Only the exact Windows user identity that
+  // owns the launched Agent gets read/write access. PID verification is still
+  // performed after connection, so the SID ACL is an additional boundary rather
+  // than a replacement for process identity checking.
+  const std::wstring pipe_dacl =
+      L"D:P(A;;GA;;;SY)(A;;GRGW;;;" + client_sid + L")";
+
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          kPipeDacl,
+          pipe_dacl.c_str(),
           SDDL_REVISION_1,
           &descriptor,
           nullptr)) {
@@ -164,6 +229,7 @@ void WakeBroker(const std::wstring& pipe_name) {
 void BrokerLoop(
     std::stop_token stop_token,
     std::wstring pipe_name,
+    std::wstring client_sid,
     HANDLE initial_pipe,
     uint32_t expected_client_pid,
     std::string endpoint,
@@ -177,7 +243,7 @@ void BrokerLoop(
     if (ready_pipe) {
       pipe = std::move(ready_pipe);
     } else {
-      pipe = CreateBrokerPipe(pipe_name, false);
+      pipe = CreateBrokerPipe(pipe_name, client_sid, false);
       if (!pipe) break;
     }
 
@@ -266,11 +332,17 @@ bool StartServiceAuthBroker(
 
   StopServiceAuthBroker();
 
+  std::wstring client_sid;
+  if (!ProcessUserSidString(expected_client_pid, &client_sid, error)) {
+    SecureWipe(&device_credential);
+    return false;
+  }
+
   // Reserve and validate the first named-pipe instance synchronously. This makes
   // StartServiceAuthBroker fail closed if the object cannot be created or if a
   // conflicting instance already exists, rather than reporting success merely
   // because the worker thread was launched.
-  LocalHandle first_pipe = CreateBrokerPipe(pipe_name, true, error);
+  LocalHandle first_pipe = CreateBrokerPipe(pipe_name, client_sid, true, error);
   if (!first_pipe) {
     SecureWipe(&device_credential);
     return false;
@@ -283,6 +355,7 @@ bool StartServiceAuthBroker(
     g_broker_thread = std::jthread(
         BrokerLoop,
         pipe_name,
+        client_sid,
         first_pipe_handle,
         expected_client_pid,
         signal_token_endpoint,
