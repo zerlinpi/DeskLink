@@ -69,6 +69,8 @@ const TURN_CREDENTIALS_URL = import.meta.env.VITE_TURN_CREDENTIALS_URL ?? "";
 const TURN_RUNTIME_REQUIRED = import.meta.env.VITE_TURN_RUNTIME_REQUIRED === "1";
 const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
 const CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS = 90;
+const HOST_WAIT_REFRESH_SAFETY_MS = 5000;
+const HOST_WAIT_REFRESH_MAX_MS = 10 * 60 * 1000;
 const SIGNAL_PROTOCOL = "desklink-v1";
 const CONTROLLER_AUTH_PROTOCOL_PREFIX = "desklink-auth.";
 const HOST_SCOPED_SIGNAL_TYPES = new Set([
@@ -181,6 +183,7 @@ function App() {
   const iceRestartInFlightRef = useRef(false);
   const signalReconnectTimerRef = useRef<number | null>(null);
   const signalReconnectAttemptRef = useRef(0);
+  const hostWaitRefreshTimerRef = useRef<number | null>(null);
   const manualDisconnectRef = useRef(false);
   const initialPeerStartingRef = useRef(false);
   const controllerTokenRef = useRef(STATIC_SIGNAL_AUTH_TOKEN);
@@ -275,6 +278,40 @@ function App() {
     signalReconnectTimerRef.current = null;
   };
 
+  const clearHostWaitRefreshTimer = () => {
+    if (hostWaitRefreshTimerRef.current !== null) {
+      window.clearTimeout(hostWaitRefreshTimerRef.current);
+    }
+    hostWaitRefreshTimerRef.current = null;
+  };
+
+  const scheduleHostWaitRefresh = (expiresInMs: unknown) => {
+    clearHostWaitRefreshTimer();
+    const advertised = Number(expiresInMs);
+    if (!Number.isFinite(advertised) || advertised <= 0) return;
+
+    const cappedLifetime = Math.min(HOST_WAIT_REFRESH_MAX_MS, advertised);
+    const delay = Math.max(1000, cappedLifetime - HOST_WAIT_REFRESH_SAFETY_MS);
+    const expectedSession = sessionRef.current;
+    const expectedTarget = targetId.trim();
+
+    hostWaitRefreshTimerRef.current = window.setTimeout(() => {
+      hostWaitRefreshTimerRef.current = null;
+      if (manualDisconnectRef.current ||
+          pcRef.current ||
+          wsRef.current?.readyState !== WebSocket.OPEN ||
+          sessionRef.current !== expectedSession ||
+          targetId.trim() !== expectedTarget) {
+        return;
+      }
+
+      setStatus("host offline · refreshing wait");
+      if (!sendSignal("auth-request", { version: 1 })) {
+        setStatus("reconnecting signaling");
+      }
+    }, delay);
+  };
+
   useEffect(() => {
     const releaseAll = () => sendReliable({ t: "release-all" });
     const onVisibilityChange = () => {
@@ -289,6 +326,7 @@ function App() {
       clearIceRestartTimer();
       clearIceRestartWatchdog();
       clearSignalReconnectTimer();
+      clearHostWaitRefreshTimer();
       clearRuntimeControllerSession();
     };
   }, []);
@@ -539,6 +577,7 @@ function App() {
   };
 
   const createPeer = (iceServers: RTCIceServer[]) => {
+    clearHostWaitRefreshTimer();
     offerSentRef.current = false;
     negotiationPendingRef.current = false;
     pendingLocalIceRef.current = [];
@@ -653,6 +692,7 @@ function App() {
     }
 
     if (msg.type === "auth-challenge") {
+      clearHostWaitRefreshTimer();
       const algorithm = msg.payload?.algorithm;
       const nonce = msg.payload?.nonce;
       if (algorithm !== accessProofAlgorithm() || typeof nonce !== "string") {
@@ -680,11 +720,13 @@ function App() {
     }
 
     if (msg.type === "auth-accepted") {
+      clearHostWaitRefreshTimer();
       await startInitialPeer();
       return;
     }
 
     if (msg.type === "auth-rejected") {
+      clearHostWaitRefreshTimer();
       const reason = msg.payload?.reason;
       if (reason === "host-unconfigured") {
         disconnect("host access code not configured");
@@ -701,9 +743,13 @@ function App() {
     if (msg.type === "peer-offline") {
       const pc = pcRef.current;
       if (!pc) {
-        setStatus(msg.payload?.authQueued === true
-          ? "host offline · waiting for host"
-          : "host offline");
+        if (msg.payload?.authQueued === true) {
+          scheduleHostWaitRefresh(msg.payload?.expiresInMs);
+          setStatus("host offline · waiting for host");
+        } else {
+          clearHostWaitRefreshTimer();
+          setStatus("host offline");
+        }
         return;
       }
       if (pc.connectionState === "connected") {
@@ -716,6 +762,7 @@ function App() {
     }
 
     if (msg.type === "error" && msg.message?.includes("authorization scope")) {
+      clearHostWaitRefreshTimer();
       disconnect("controller authorization rejected");
       return;
     }
@@ -780,6 +827,7 @@ function App() {
       authToken = await ensureSignalAuthToken(false);
     } catch (error) {
       console.debug("DeskLink controller authorization failed", error);
+      clearHostWaitRefreshTimer();
       setStatus(error instanceof Error ? error.message : "controller authorization failed");
       manualDisconnectRef.current = true;
       return;
@@ -803,6 +851,7 @@ function App() {
       clearSignalReconnectTimer();
 
       if (initial) {
+        clearHostWaitRefreshTimer();
         setStatus("authorizing host");
         if (!sendSignal("auth-request", { version: 1 })) {
           disconnect("host authentication signaling failed");
@@ -812,6 +861,7 @@ function App() {
 
       const pc = pcRef.current;
       if (!pc) {
+        clearHostWaitRefreshTimer();
         setStatus("authorizing host");
         if (!sendSignal("auth-request", { version: 1 })) {
           disconnect("host authentication signaling failed");
@@ -837,13 +887,15 @@ function App() {
       if (manualDisconnectRef.current) return;
 
       const pc = pcRef.current;
+      clearHostWaitRefreshTimer();
       if (pc && pc.connectionState !== "closed") {
         setStatus(pc.connectionState === "connected"
           ? "control ready · signaling reconnecting"
           : "reconnecting signaling");
         scheduleSignalReconnect();
       } else {
-        setStatus("disconnected");
+        setStatus("reconnecting signaling");
+        scheduleSignalReconnect();
       }
     };
   };
@@ -855,6 +907,7 @@ function App() {
     clearIceRestartTimer();
     clearIceRestartWatchdog();
     clearSignalReconnectTimer();
+    clearHostWaitRefreshTimer();
     iceRestartInFlightRef.current = false;
     negotiationPendingRef.current = false;
     signalReconnectAttemptRef.current = 0;
