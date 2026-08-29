@@ -274,6 +274,7 @@ func main() {
 		p := newPeer(id, conn, scope)
 		h.put(p)
 		defer func() {
+			pendingHostAuthRequests.removeSource(p)
 			h.remove(id, p)
 			_ = conn.Close()
 		}()
@@ -369,7 +370,7 @@ func main() {
 				if shouldQueuePendingHostAuth(p, msg.Type) {
 					if pendingHostAuthRequests.enqueue(
 						msg.Target,
-						id,
+						p,
 						msg.Session,
 						msg.Payload,
 						time.Now(),
@@ -404,7 +405,7 @@ func main() {
 					if shouldQueuePendingHostAuth(p, msg.Type) {
 						if pendingHostAuthRequests.enqueue(
 							msg.Target,
-							id,
+							p,
 							msg.Session,
 							msg.Payload,
 							time.Now(),
