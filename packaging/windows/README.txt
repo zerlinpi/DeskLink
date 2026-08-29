@@ -41,6 +41,40 @@ v1.0.1 起，Windows 发布包提供原生 DeskLink.exe 设置管理器。
 “复制诊断”可以把不包含访问码和 dc2 明文的诊断结果复制出来，方便排查。
 “复制设备 ID”可以直接复制当前被控端 ID，减少手工输入错误。
 
+GPU / 画面媒体自检
+------------------
+
+新版 Windows 发布包还包含：
+
+  desklink-media-probe.exe
+
+在远端电脑已经登录到正常桌面的情况下，可以双击或在 PowerShell 中运行：
+
+  .\desklink-media-probe.exe
+
+它不会连接 Signal/TURN，也不会接受远程控制，只在本机实际检查 DeskLink 视频管线：
+
+  1. 创建 D3D11 硬件设备并显示当前 GPU；
+  2. 初始化 DXGI Desktop Duplication；
+  3. 枚举显示器并尝试取得真实桌面帧；
+  4. 使用 D3D11 Video Processor 做 BGRA -> NV12 GPU 转换；
+  5. 初始化 Media Foundation 硬件 H.264 编码器；
+  6. 实际编码一个 H.264 access unit。
+
+成功时最后会输出：
+
+  MEDIA_PROBE_OK
+
+如果失败，程序会输出对应的 [FAIL] 阶段并返回非 0 退出码。典型意义：
+
+  20  D3D11 硬件设备不可用 / 显卡驱动问题
+  30  DXGI Desktop Duplication 不可用 / 非交互桌面会话
+  40  GPU Video Processor / NV12 转换不可用
+  50  没有兼容的硬件 H.264 Media Foundation 编码器
+  51  编码器初始化成功但无法真正产出 H.264 数据
+
+如果 Web 能连接并控制鼠标键盘、但始终没有画面，优先运行此探针。
+
 访问码和设备凭证不会写进命令行或普通环境变量，而是通过 Windows
 machine-scope DPAPI 加密保存在 %ProgramData%\DeskLink。
 
@@ -51,11 +85,12 @@ machine-scope DPAPI 加密保存在 %ProgramData%\DeskLink。
 发布包内容
 ----------
 
-  DeskLink.exe            Windows 图形化设置/管理器与连接诊断（推荐入口）
-  desklink-agent.exe      被控端实时采集、编码、WebRTC 与输入处理进程
-  desklink-service.exe    LocalSystem 无人值守后台服务
-  install-service.ps1     管理员/自动化安装脚本
-  uninstall-service.ps1   卸载脚本
+  DeskLink.exe                 Windows 图形化设置/管理器与连接诊断（推荐入口）
+  desklink-agent.exe           被控端实时采集、编码、WebRTC 与输入处理进程
+  desklink-service.exe         LocalSystem 无人值守后台服务
+  desklink-media-probe.exe     本机 DXGI/D3D11/H.264 视频管线自检
+  install-service.ps1          管理员/自动化安装脚本
+  uninstall-service.ps1        卸载脚本
 
 命令行 / 自动化安装
 ------------------
@@ -96,7 +131,7 @@ Windows “未知发布者 / Windows 已保护你的电脑”提示
 
   1. 购买或申请受 Windows 信任链认可的 OV/EV 代码签名证书；
   2. 在 CI 发布时使用 signtool 对 DeskLink.exe、desklink-agent.exe、
-     desklink-service.exe 进行 Authenticode SHA-256 签名；
+     desklink-service.exe、desklink-media-probe.exe 进行 Authenticode SHA-256 签名；
   3. 使用可信时间戳服务；
   4. 保持稳定发布者身份逐步建立 SmartScreen reputation。
 
