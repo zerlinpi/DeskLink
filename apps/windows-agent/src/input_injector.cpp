@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <vector>
 
 namespace desklink {
 namespace {
@@ -113,7 +114,15 @@ bool InputInjector::PointerButton(int button, bool down) const {
   INPUT input{};
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = flag;
-  return Send(input);
+  if (!Send(input)) return false;
+
+  std::scoped_lock lock(pressed_mutex_);
+  if (down) {
+    pressed_buttons_.insert(button);
+  } else {
+    pressed_buttons_.erase(button);
+  }
+  return true;
 }
 
 bool InputInjector::PointerWheel(int delta) const {
@@ -176,7 +185,48 @@ bool InputInjector::Key(const std::string& code, bool down) const {
   input.ki.wVk = vk;
   input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
   if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-  return Send(input);
+  if (!Send(input)) return false;
+
+  std::scoped_lock lock(pressed_mutex_);
+  if (down) {
+    pressed_keys_.insert(vk);
+  } else {
+    pressed_keys_.erase(vk);
+  }
+  return true;
+}
+
+bool InputInjector::ReleaseAll() const {
+  std::vector<unsigned short> keys;
+  std::vector<int> buttons;
+  {
+    std::scoped_lock lock(pressed_mutex_);
+    keys.assign(pressed_keys_.begin(), pressed_keys_.end());
+    buttons.assign(pressed_buttons_.begin(), pressed_buttons_.end());
+    pressed_keys_.clear();
+    pressed_buttons_.clear();
+  }
+
+  bool all_released = true;
+  for (const unsigned short vk : keys) {
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    all_released = Send(input) && all_released;
+  }
+
+  for (const int button : buttons) {
+    const DWORD flag = MouseButtonFlag(button, false);
+    if (flag == 0) continue;
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = flag;
+    all_released = Send(input) && all_released;
+  }
+
+  return all_released;
 }
 
 }  // namespace desklink
