@@ -29,6 +29,10 @@ add_executable(desklink-agent
   src/main.cpp
   src/desktop_capture.cpp
   src/desktop_capture.h
+  src/gpu_color_converter.cpp
+  src/gpu_color_converter.h
+  src/h264_encoder.cpp
+  src/h264_encoder.h
   src/input_injector.cpp
   src/input_injector.h
   src/webrtc_session.cpp
@@ -47,6 +51,7 @@ target_link_libraries(
     mfplat
     mf
     mfuuid
+    strmiids
     user32
     ole32
 )
