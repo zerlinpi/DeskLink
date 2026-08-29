@@ -21,6 +21,7 @@
 #include <rtc/rtcpnackresponder.hpp>
 
 #include "clipboard_win32.h"
+#include "file_transfer_receiver.h"
 #include "signal_token_client.h"
 #include "turn_credential_client.h"
 
@@ -470,6 +471,7 @@ void WebRtcSession::Stop() {
   {
     std::scoped_lock lock(mutex_);
     control_.reset();
+    file_transfer_receiver_.reset();
     video_track_.reset();
     video_timestamp_base100ns_ = 0;
     peer = std::move(peer_);
@@ -586,6 +588,7 @@ void WebRtcSession::HandleSignal(const std::string& text) {
     {
       std::scoped_lock lock(mutex_);
       control_.reset();
+      file_transfer_receiver_.reset();
       video_track_.reset();
       video_timestamp_base100ns_ = 0;
       peer = std::move(peer_);
@@ -1011,6 +1014,7 @@ void WebRtcSession::CreatePeer(
     previous = std::move(peer_);
     peer_ = peer;
     control_.reset();
+    file_transfer_receiver_.reset();
     video_track_ = video_track;
     video_timestamp_base100ns_ = 0;
     controller_id_ = controller;
@@ -1034,9 +1038,30 @@ void WebRtcSession::CreatePeer(
         "ice",
         json{{"candidate", std::string(candidate)}, {"sdpMid", candidate.mid()}});
   });
-  peer->onDataChannel([this](std::shared_ptr<rtc::DataChannel> channel) {
+
+  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
+  peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {
+    auto owner = weak_peer.lock();
+    if (!owner || !channel) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (peer_ != owner) return;
+    }
+
     if (channel->label() == "control" || channel->label() == "pointer") {
       AttachControlChannel(channel);
+      return;
+    }
+
+    if (channel->label() == "file-transfer") {
+      auto receiver = FileTransferReceiver::Create(channel);
+      if (!receiver) return;
+      {
+        std::scoped_lock lock(mutex_);
+        if (peer_ != owner) return;
+        file_transfer_receiver_ = receiver;
+      }
+      receiver->Start();
     }
   });
 }
