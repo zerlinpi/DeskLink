@@ -19,6 +19,8 @@
 
 namespace desklink {
 
+class FileTransferReceiver;
+
 struct NetworkFeedback {
   double loss_ratio{0.0};
   double jitter_ms{0.0};
@@ -110,6 +112,7 @@ class WebRtcSession {
   std::shared_ptr<rtc::WebSocket> websocket_;
   std::shared_ptr<rtc::PeerConnection> peer_;
   std::shared_ptr<rtc::DataChannel> control_;
+  std::shared_ptr<FileTransferReceiver> file_transfer_receiver_;
   std::shared_ptr<rtc::Track> video_track_;
   uint64_t video_timestamp_base100ns_{0};
 
