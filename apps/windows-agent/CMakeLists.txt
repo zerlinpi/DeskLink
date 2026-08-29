@@ -11,6 +11,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # installed Visual C++ Redistributable merely to start.
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+  # FindOpenSSL honors these hints on MSVC. Prefer both static OpenSSL libraries
+  # and their /MT build so libdatachannel does not introduce libssl/libcrypto
+  # runtime DLLs or a CRT mismatch into the portable artifact.
+  set(OPENSSL_USE_STATIC_LIBS TRUE CACHE BOOL "" FORCE)
+  set(OPENSSL_MSVC_STATIC_RT TRUE CACHE BOOL "" FORCE)
 endif()
 
 include(FetchContent)
