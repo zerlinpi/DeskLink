@@ -194,6 +194,17 @@ func originAllowed(origin string) bool {
 	return false
 }
 
+func peerOfflineSignal(target string, authQueued bool) map[string]any {
+	message := map[string]any{"type": "peer-offline", "target": target}
+	if authQueued {
+		message["payload"] = map[string]any{
+			"authQueued":  true,
+			"expiresInMs": pendingHostAuthTTL.Milliseconds(),
+		}
+	}
+	return message
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -361,12 +372,13 @@ func main() {
 				continue
 			}
 			if targetRevoked {
-				_ = p.write(map[string]any{"type": "peer-offline", "target": msg.Target})
+				_ = p.write(peerOfflineSignal(msg.Target, false))
 				continue
 			}
 
 			target := h.get(msg.Target)
 			if target == nil {
+				authQueued := false
 				if shouldQueuePendingHostAuth(p, msg.Type) {
 					if pendingHostAuthRequests.enqueue(
 						msg.Target,
@@ -375,12 +387,13 @@ func main() {
 						msg.Payload,
 						time.Now(),
 					) {
+						authQueued = true
 						metrics.pendingHostAuthQueued.Add(1)
 					} else {
 						metrics.pendingHostAuthDropped.Add(1)
 					}
 				}
-				_ = p.write(map[string]any{"type": "peer-offline", "target": msg.Target})
+				_ = p.write(peerOfflineSignal(msg.Target, authQueued))
 				continue
 			}
 
@@ -400,6 +413,7 @@ func main() {
 				"payload": msg.Payload,
 			}
 			if err := target.write(forward); err != nil {
+				authQueued := false
 				if claimedHostAuth {
 					hostAuthDispatches.release(msg.Target, p, msg.Session)
 					if shouldQueuePendingHostAuth(p, msg.Type) {
@@ -410,6 +424,7 @@ func main() {
 							msg.Payload,
 							time.Now(),
 						) {
+							authQueued = true
 							metrics.pendingHostAuthQueued.Add(1)
 						} else {
 							metrics.pendingHostAuthDropped.Add(1)
@@ -418,7 +433,7 @@ func main() {
 				}
 				h.remove(msg.Target, target)
 				_ = target.conn.Close()
-				_ = p.write(map[string]any{"type": "peer-offline", "target": msg.Target})
+				_ = p.write(peerOfflineSignal(msg.Target, authQueued))
 				log.Printf("forward %s -> %s: %v", id, msg.Target, err)
 			} else {
 				metrics.messagesForwarded.Add(1)
