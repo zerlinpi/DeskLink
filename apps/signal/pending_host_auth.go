@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	pendingHostAuthTTL           = 30 * time.Second
-	maxPendingHostAuthGlobal     = 512
-	maxPendingHostAuthPerTarget  = 32
+	pendingHostAuthTTL          = 30 * time.Second
+	hostAuthDispatchDedupeTTL   = 3 * time.Second
+	maxPendingHostAuthGlobal    = 512
+	maxPendingHostAuthPerTarget = 32
 )
 
 type pendingHostAuthSignal struct {
@@ -115,7 +116,51 @@ func (q *pendingHostAuthQueue) size(now time.Time) int {
 	return q.total
 }
 
-var pendingHostAuthRequests = newPendingHostAuthQueue()
+type hostAuthDispatchKey struct {
+	target  string
+	session string
+	source  *peer
+}
+
+type hostAuthDispatchGuard struct {
+	mu      sync.Mutex
+	recent  map[hostAuthDispatchKey]time.Time
+}
+
+func newHostAuthDispatchGuard() *hostAuthDispatchGuard {
+	return &hostAuthDispatchGuard{recent: make(map[hostAuthDispatchKey]time.Time)}
+}
+
+func (g *hostAuthDispatchGuard) claim(
+	target string,
+	source *peer,
+	session string,
+	now time.Time,
+) bool {
+	if target == "" || source == nil || session == "" {
+		return false
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for key, expiresAt := range g.recent {
+		if !expiresAt.After(now) {
+			delete(g.recent, key)
+		}
+	}
+
+	key := hostAuthDispatchKey{target: target, session: session, source: source}
+	if expiresAt, exists := g.recent[key]; exists && expiresAt.After(now) {
+		return false
+	}
+	g.recent[key] = now.Add(hostAuthDispatchDedupeTTL)
+	return true
+}
+
+var (
+	pendingHostAuthRequests = newPendingHostAuthQueue()
+	hostAuthDispatches      = newHostAuthDispatchGuard()
+)
 
 func flushPendingHostAuthRequests(h *hub, target *peer, metrics *signalMetrics) {
 	requests := pendingHostAuthRequests.take(target.id, time.Now())
@@ -129,6 +174,10 @@ func flushPendingHostAuthRequests(h *hub, target *peer, metrics *signalMetrics) 
 		revoked, err := deviceRevoked(target.id)
 		if err != nil || revoked {
 			metrics.pendingHostAuthDropped.Add(1)
+			continue
+		}
+		if !hostAuthDispatches.claim(target.id, source, request.session, time.Now()) {
+			metrics.hostAuthDuplicatesSuppressed.Add(1)
 			continue
 		}
 
