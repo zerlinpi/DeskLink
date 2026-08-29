@@ -75,6 +75,15 @@ func turnCredentialHandler() http.HandlerFunc {
 			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
+		revoked, err := deviceRevoked(deviceID)
+		if err != nil {
+			http.Error(w, "device revocation state unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if revoked {
+			http.Error(w, "device revoked", http.StatusForbidden)
+			return
+		}
 
 		now := time.Now()
 		if !validateSignalAuthToken(
