@@ -5,10 +5,17 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+const (
+	pongWait   = 75 * time.Second
+	pingPeriod = 30 * time.Second
+	writeWait  = 8 * time.Second
 )
 
 type envelope struct {
@@ -58,16 +65,46 @@ func (h *hub) get(id string) *peer {
 func (p *peer) write(v any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_ = p.conn.SetWriteDeadline(time.Now().Add(8 * time.Second))
+	_ = p.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	return p.conn.WriteJSON(v)
+}
+
+func (p *peer) ping() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
+}
+
+func validDeviceID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func originAllowed(origin string) bool {
+	if os.Getenv("DESKLINK_ALLOW_ANY_ORIGIN") == "1" || origin == "" {
+		return true
+	}
+	for _, allowed := range strings.Split(os.Getenv("DESKLINK_ALLOWED_ORIGINS"), ",") {
+		if strings.TrimSpace(allowed) == origin {
+			return true
+		}
+	}
+	return false
 }
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
-		// Development default. In production, restrict this to the controller origins.
-		return os.Getenv("DESKLINK_ALLOW_ANY_ORIGIN") == "1" || r.Header.Get("Origin") == ""
+		return originAllowed(r.Header.Get("Origin"))
 	},
 }
 
@@ -81,8 +118,8 @@ func main() {
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("deviceId")
-		if id == "" {
-			http.Error(w, "deviceId is required", http.StatusBadRequest)
+		if !validDeviceID(id) {
+			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
 
@@ -91,6 +128,7 @@ func main() {
 			log.Printf("upgrade: %v", err)
 			return
 		}
+
 		p := &peer{id: id, conn: conn}
 		h.put(p)
 		defer func() {
@@ -99,21 +137,44 @@ func main() {
 		}()
 
 		conn.SetReadLimit(1 << 20)
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(pongWait))
+		})
+
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			ticker := time.NewTicker(pingPeriod)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if err := p.ping(); err != nil {
+						_ = conn.Close()
+						return
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
+
 		_ = p.write(map[string]any{"type": "registered", "deviceId": id})
 
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(70 * time.Second))
 			var msg envelope
 			if err := conn.ReadJSON(&msg); err != nil {
 				return
 			}
+			_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 
 			if msg.Type == "ping" {
 				_ = p.write(map[string]any{"type": "pong", "ts": time.Now().UnixMilli()})
 				continue
 			}
-			if msg.Target == "" {
-				_ = p.write(map[string]any{"type": "error", "message": "target is required"})
+			if msg.Target == "" || !validDeviceID(msg.Target) {
+				_ = p.write(map[string]any{"type": "error", "message": "valid target is required"})
 				continue
 			}
 
