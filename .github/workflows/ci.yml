@@ -44,6 +44,35 @@ jobs:
             echo "registry must contain only the credential hash, not the plaintext credential" >&2
             exit 1
           fi
+          if go run ../../tools/auth/rotate-device-registry-credential.go "$registry" '主机' >/dev/null 2>&1; then
+            echo "device provisioning tool accepted an ID rejected by the signaling service" >&2
+            exit 1
+          fi
+      - name: Validate controller registry provisioning tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="$(mktemp -u)/controllers.json"
+          first="$(go run ../../tools/auth/set-controller-registry-key.go "$registry" ci-controller ci-windows-host ci-laptop)"
+          second="$(go run ../../tools/auth/set-controller-registry-key.go "$registry" ci-controller ci-windows-host)"
+          test -n "$first"
+          test -n "$second"
+          test "$first" != "$second"
+          grep -q '"version": 1' "$registry"
+          grep -q '"ci-controller"' "$registry"
+          grep -q '"ci-windows-host"' "$registry"
+          if grep -q "$second" "$registry"; then
+            echo "controller registry must contain only the key hash, not the plaintext key" >&2
+            exit 1
+          fi
+          if go run ../../tools/auth/set-controller-registry-key.go "$registry" '管理员' ci-windows-host >/dev/null 2>&1; then
+            echo "controller provisioning tool accepted an account ID rejected by the signaling service" >&2
+            exit 1
+          fi
+          if go run ../../tools/auth/set-controller-registry-key.go "$registry" ci-controller '主机' >/dev/null 2>&1; then
+            echo "controller provisioning tool accepted a device ID rejected by the signaling service" >&2
+            exit 1
+          fi
 
   web:
     runs-on: ubuntu-latest
