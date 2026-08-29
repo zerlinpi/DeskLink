@@ -1,11 +1,14 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json_fwd.hpp>
 #include <rtc/rtc.hpp>
@@ -54,6 +57,9 @@ class WebRtcSession {
   bool SendH264AccessUnit(const uint8_t* data, size_t size, uint64_t timestamp100ns);
 
  private:
+  void ConnectSignaling();
+  void RequestSignalingReconnect();
+  void SignalingReconnectLoop(std::stop_token stop_token);
   void HandleSignal(const std::string& text);
   void HandleOffer(const std::string& from, const std::string& session, const nlohmann::json& payload);
   void HandleIce(const nlohmann::json& payload);
@@ -81,6 +87,13 @@ class WebRtcSession {
   mutable std::mutex mutex_;
   std::string controller_id_;
   std::string session_id_;
+
+  std::atomic_bool stopping_{true};
+  std::atomic_uint32_t reconnect_attempt_{0};
+  std::mutex reconnect_mutex_;
+  std::condition_variable reconnect_cv_;
+  bool reconnect_requested_{false};
+  std::jthread reconnect_thread_;
 };
 
 }  // namespace desklink
