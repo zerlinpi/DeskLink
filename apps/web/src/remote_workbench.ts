@@ -35,7 +35,17 @@ function currentStatus() {
 }
 
 function sessionActive() {
-  return currentStatus() !== "idle";
+  const value = currentStatus().toLowerCase();
+  if (["new", "connecting", "connected", "disconnected", "checking"].includes(value)) return true;
+  return [
+    "signaling",
+    "authorizing",
+    "proving host access",
+    "negotiating",
+    "reconnecting",
+    "control ready",
+    "host offline",
+  ].some((marker) => value.includes(marker));
 }
 
 function friendlyStatus(value: string) {
@@ -45,6 +55,7 @@ function friendlyStatus(value: string) {
   if (value.includes("host offline")) return "远端离线";
   if (value.includes("reconnecting")) return "正在重连";
   if (value.includes("authorizing")) return "正在验证";
+  if (value.includes("proving host access")) return "正在验证访问码";
   if (value.includes("negotiating")) return "正在建立画面";
   if (value.includes("device revoked")) return "设备已撤销";
   if (value.includes("rejected")) return "连接被拒绝";
@@ -60,6 +71,10 @@ function compactNetworkLabel() {
   const rtt = spans.find((node) => node.textContent?.startsWith("RTT "))?.textContent?.replace("RTT ", "").trim();
   if (rtt && rtt !== "-") return `网络 · ${rtt}`;
   return route ? `网络 · ${route}` : "网络";
+}
+
+function setText(element: HTMLElement | null, value: string) {
+  if (element && element.textContent !== value) element.textContent = value;
 }
 
 function makeButton(label: string, className = "workbench-button") {
@@ -90,9 +105,6 @@ function updateVideoScale(stage: HTMLElement) {
       stage.clientHeight / video.videoHeight,
     );
   } else if (viewMode === "actual") {
-    // 1 CSS pixel per remote video pixel. The stage keeps overflow clipped, so
-    // a large desktop behaves like a centered 1:1 viewport rather than changing
-    // object-fit and breaking pointer-coordinate math in the React controller.
     requestedScale = 1;
   }
 
@@ -101,14 +113,13 @@ function updateVideoScale(stage: HTMLElement) {
 }
 
 function applyViewMode(stage: HTMLElement) {
-  stage.dataset.viewMode = viewMode;
+  if (stage.dataset.viewMode !== viewMode) stage.dataset.viewMode = viewMode;
   updateVideoScale(stage);
-  if (displayButton) displayButton.textContent = `显示 · ${VIEW_LABELS[viewMode]}`;
+  setText(displayButton, `显示 · ${VIEW_LABELS[viewMode]}`);
 }
 
 function syncFullscreenButton() {
-  if (!fullscreenButton) return;
-  fullscreenButton.textContent = document.fullscreenElement ? "退出全屏" : "全屏";
+  setText(fullscreenButton, document.fullscreenElement ? "退出全屏" : "全屏");
   if (boundStage) updateVideoScale(boundStage);
 }
 
@@ -162,6 +173,10 @@ function createWorkbench(stage: HTMLElement) {
   const existing = stage.querySelector<HTMLDivElement>(".remote-workbench");
   if (existing) {
     toolbar = existing;
+    statusText = existing.querySelector<HTMLSpanElement>(".workbench-status");
+    displayButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='display']");
+    networkButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='network']");
+    fullscreenButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='fullscreen']");
     return existing;
   }
 
@@ -176,6 +191,7 @@ function createWorkbench(stage: HTMLElement) {
   statusText = brand.querySelector(".workbench-status");
 
   displayButton = makeButton("显示 · 适应");
+  displayButton.dataset.workbenchAction = "display";
   displayButton.title = "切换适应窗口、铺满窗口和 1:1 显示";
   displayButton.addEventListener("click", () => {
     const index = VIEW_ORDER.indexOf(viewMode);
@@ -186,6 +202,7 @@ function createWorkbench(stage: HTMLElement) {
   });
 
   networkButton = makeButton("网络");
+  networkButton.dataset.workbenchAction = "network";
   networkButton.title = "查看实时延迟、丢包、抖动、帧率和可用带宽";
   networkButton.addEventListener("click", () => {
     networkExpanded = !networkExpanded;
@@ -202,6 +219,7 @@ function createWorkbench(stage: HTMLElement) {
   });
 
   fullscreenButton = makeButton("全屏");
+  fullscreenButton.dataset.workbenchAction = "fullscreen";
   fullscreenButton.addEventListener("click", async () => {
     try {
       if (document.fullscreenElement) {
@@ -253,11 +271,13 @@ function syncWorkbench() {
     viewMode = "fit";
   }
 
+  const rawStatus = currentStatus();
   if (statusText) {
-    statusText.textContent = friendlyStatus(currentStatus());
-    statusText.dataset.state = currentStatus().includes("control ready") ? "ready" : "busy";
+    setText(statusText, friendlyStatus(rawStatus));
+    const state = rawStatus.includes("control ready") ? "ready" : "busy";
+    if (statusText.dataset.state !== state) statusText.dataset.state = state;
   }
-  if (networkButton) networkButton.textContent = compactNetworkLabel();
+  setText(networkButton, compactNetworkLabel());
   applyViewMode(stage);
   syncFullscreenButton();
   if (active) revealToolbar();
@@ -267,7 +287,17 @@ function start() {
   const root = query<HTMLElement>(ROOT_SELECTOR);
   if (!root) return;
 
-  const observer = new MutationObserver(syncWorkbench);
+  let syncQueued = false;
+  const scheduleSync = () => {
+    if (syncQueued) return;
+    syncQueued = true;
+    requestAnimationFrame(() => {
+      syncQueued = false;
+      syncWorkbench();
+    });
+  };
+
+  const observer = new MutationObserver(scheduleSync);
   observer.observe(root, {
     subtree: true,
     childList: true,
