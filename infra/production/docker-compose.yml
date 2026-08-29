@@ -6,6 +6,10 @@ services:
       DESKLINK_SIGNAL_ADDR: :8080
       DESKLINK_ALLOW_ANY_ORIGIN: "0"
       DESKLINK_ALLOWED_ORIGINS: https://${DESKLINK_DOMAIN}
+      # Public traffic reaches Signal only through Caddy -> Nginx. Nginx strips
+      # spoofable CF/X-Real-IP headers and forwards Caddy's sanitized XFF chain,
+      # so Signal can safely apply handshake/auth limits per real client IP.
+      DESKLINK_TRUST_PROXY_HEADERS: "1"
       DESKLINK_DEVICE_CREDENTIALS_FILE: /run/desklink-secrets/devices.json
       DESKLINK_CONTROLLER_CREDENTIALS_FILE: /run/desklink-secrets/controllers.json
       DESKLINK_SIGNAL_AUTH_SECRET: ${DESKLINK_SIGNAL_AUTH_SECRET}
