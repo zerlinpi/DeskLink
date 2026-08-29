@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 #include <rtc/h264rtppacketizer.hpp>
+#include <rtc/plihandler.hpp>
 #include <rtc/rtcpsrreporter.hpp>
 #include <rtc/rtcpnackresponder.hpp>
 
@@ -301,6 +302,14 @@ void WebRtcSession::CreatePeer(
         rtp_config);
     packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtp_config));
     packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+
+    if (config_.on_keyframe_requested) {
+      const auto on_keyframe_requested = config_.on_keyframe_requested;
+      packetizer->addToChain(std::make_shared<rtc::PliHandler>([on_keyframe_requested]() {
+        on_keyframe_requested();
+      }));
+    }
+
     video_track->setMediaHandler(packetizer);
     video_track->onOpen([]() {
       std::cout << "H264 video track open\n";
