@@ -4,6 +4,7 @@
 #include <sddl.h>
 
 #include <chrono>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,6 +20,7 @@ namespace {
 constexpr wchar_t kPipeDacl[] = L"D:P(A;;GA;;;SY)(A;;GRGW;;;AU)";
 constexpr DWORD kPipeBufferBytes = 16 * 1024;
 constexpr DWORD kMaxRequestBytes = 128;
+constexpr int64_t kTokenReuseSafetySeconds = 90;
 
 std::mutex g_broker_mutex;
 std::jthread g_broker_thread;
@@ -28,6 +30,18 @@ void SecureWipe(std::string* value) {
   if (!value || value->empty()) return;
   SecureZeroMemory(value->data(), value->size());
   value->clear();
+}
+
+void WipeToken(RuntimeSignalToken* token) {
+  if (!token) return;
+  SecureWipe(&token->token);
+  token->expires_at = 0;
+}
+
+bool TokenFreshEnough(const RuntimeSignalToken& token) {
+  if (token.token.empty() || token.expires_at <= 0) return false;
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  return token.expires_at > now + kTokenReuseSafetySeconds;
 }
 
 void SetError(std::wstring* error, const std::wstring& message, DWORD code = ERROR_SUCCESS) {
@@ -117,16 +131,21 @@ LocalHandle CreateBrokerPipe(
 }
 
 bool WriteJsonResponse(HANDLE pipe, const nlohmann::json& response) {
-  const std::string payload = response.dump();
-  if (payload.empty() || payload.size() > kPipeBufferBytes) return false;
+  std::string payload = response.dump();
+  if (payload.empty() || payload.size() > kPipeBufferBytes) {
+    SecureWipe(&payload);
+    return false;
+  }
   DWORD written = 0;
-  return WriteFile(
-             pipe,
-             payload.data(),
-             static_cast<DWORD>(payload.size()),
-             &written,
-             nullptr) &&
-         written == payload.size();
+  const bool ok = WriteFile(
+                      pipe,
+                      payload.data(),
+                      static_cast<DWORD>(payload.size()),
+                      &written,
+                      nullptr) &&
+                  written == payload.size();
+  SecureWipe(&payload);
+  return ok;
 }
 
 void WakeBroker(const std::wstring& pipe_name) {
@@ -151,6 +170,7 @@ void BrokerLoop(
     std::string device_id,
     std::string device_credential) {
   LocalHandle ready_pipe(initial_pipe);
+  RuntimeSignalToken cached_token;
 
   while (!stop_token.stop_requested()) {
     LocalHandle pipe;
@@ -193,32 +213,37 @@ void BrokerLoop(
       continue;
     }
 
-    RuntimeSignalToken token;
-    std::string fetch_error;
-    if (!FetchRuntimeSignalToken(
-            endpoint,
-            device_id,
-            device_credential,
-            &token,
-            &fetch_error)) {
-      WriteJsonResponse(
-          pipe.get(),
-          nlohmann::json{{"ok", false}, {"error", "signal token exchange failed: " + fetch_error}});
-      DisconnectNamedPipe(pipe.get());
-      continue;
+    if (!TokenFreshEnough(cached_token)) {
+      RuntimeSignalToken fresh_token;
+      std::string fetch_error;
+      if (!FetchRuntimeSignalToken(
+              endpoint,
+              device_id,
+              device_credential,
+              &fresh_token,
+              &fetch_error)) {
+        WriteJsonResponse(
+            pipe.get(),
+            nlohmann::json{{"ok", false}, {"error", "signal token exchange failed: " + fetch_error}});
+        DisconnectNamedPipe(pipe.get());
+        continue;
+      }
+      WipeToken(&cached_token);
+      cached_token = std::move(fresh_token);
     }
 
     WriteJsonResponse(
         pipe.get(),
         nlohmann::json{
             {"ok", true},
-            {"token", token.token},
-            {"expiresAt", token.expires_at},
+            {"token", cached_token.token},
+            {"expiresAt", cached_token.expires_at},
         });
     FlushFileBuffers(pipe.get());
     DisconnectNamedPipe(pipe.get());
   }
 
+  WipeToken(&cached_token);
   SecureWipe(&device_credential);
 }
 
