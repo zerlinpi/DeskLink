@@ -6,9 +6,10 @@ DeskLink is a low-latency remote desktop project targeting a Sunlogin / NetEase 
 
 - **Controller:** Web (React + TypeScript) first, so macOS/Windows/mobile browsers can control a remote device without installing a controller.
 - **Windows host agent:** Native C++20 using DXGI Desktop Duplication, D3D11 GPU scaling/color conversion, Media Foundation hardware H.264, and Win32 `SendInput`.
+- **Windows supervisor:** Native Windows Service keeps a per-user Agent running in the active logged-in session.
 - **Realtime transport:** WebRTC (ICE/STUN/TURN, DTLS-SRTP, RTP, DataChannels) with P2P preferred and TURN relay fallback.
-- **Signaling:** Go WebSocket/HTTP service. It only coordinates sessions; media does not flow through signaling.
-- **Relay:** coturn.
+- **Signaling:** Go WebSocket/HTTP service. It only coordinates sessions and issues short-lived relay credentials; media does not flow through signaling.
+- **Relay:** coturn with UDP/TCP/TLS support and TURN REST temporary credentials.
 - **Future native controllers:** Swift/Kotlin/native desktop controllers can reuse the protocol and signaling layer.
 
 > No remote-control product can guarantee zero stutter on every network. DeskLink is designed to prioritize input responsiveness and low media latency, reducing bitrate/FPS/resolution before allowing long media queues to build.
@@ -18,8 +19,14 @@ DeskLink is a low-latency remote desktop project targeting a Sunlogin / NetEase 
 Implemented on `main`:
 
 - Device registration and WebSocket offer/answer/ICE signaling.
-- Signaling Ping/Pong keepalive plus automatic reconnect with exponential backoff.
-- STUN plus TURN UDP/TCP fallback, with P2P preferred.
+- Optional HMAC-based short-lived signaling registration tokens bound to an exact device ID.
+- Signaling Ping/Pong keepalive, graceful server shutdown and automatic reconnect with exponential backoff.
+- Signaling message-size/type/session validation, per-connection throttling, cross-connection/IP handshake limiting and authentication-failure backoff.
+- Optional protected signaling metrics endpoint.
+- STUN plus TURN UDP/TCP/TLS fallback, with P2P preferred.
+- Authenticated TURN REST temporary-credential endpoint; responses are short-lived and `no-store`.
+- Windows Agent runtime TURN credential retrieval over WinHTTP before each new PeerConnection, with optional fail-closed mode.
+- Browser runtime TURN credential retrieval before initial connection and refresh before ICE restart, with optional fail-closed mode.
 - Browser H.264 receive negotiation and hardware-decoded video rendering where supported.
 - Separate reliable `control` and unreliable/unordered `pointer` DataChannels to reduce head-of-line blocking.
 - Windows DXGI Desktop Duplication capture.
@@ -36,28 +43,27 @@ Implemented on `main`:
 - Win32 mouse/keyboard injection with stuck-key/mouse-button release protection.
 - Per-device access code checked before a new PeerConnection is created.
 - WebRTC diagnostics HUD showing Direct P2P/TURN route, protocol, RTT, loss, jitter, decode FPS and estimated available bitrate.
-- Signaling message-size/type/session validation, connection rate limiting and Go tests.
 - Windows scheduling tuning: above-normal process priority, MMCSS capture priority and 1 ms timer period (can be disabled).
-- CI for signaling, browser and Windows native builds, including stale-run cancellation and Windows native build caching.
+- `desklink-service.exe` starts/restarts the Agent in the active logged-in Windows user session and reacts to session changes.
+- CI for signaling, browser and Windows native builds, including stale-run cancellation, native dependency caching and downloadable Windows Agent/Service artifacts.
 
 Still required before calling the project production-ready:
 
 - Real Windows GPU/runtime validation across representative Intel / NVIDIA / AMD hardware and drivers.
 - Browser/H.264 compatibility testing across Chrome/Edge/Safari and mobile browsers.
-- Production HTTPS/WSS deployment and certificate handling.
-- Account/device authentication stronger than the current development access-code flow.
-- TURN REST temporary credentials instead of static development credentials.
-- Regional TURN deployment and real WAN latency measurements.
-- Windows Service + per-session Agent for unattended logon/UAC/secure-desktop scenarios.
+- Production HTTPS/WSS deployment and certificate/reverse-proxy validation.
+- A real account/device service that authenticates users and issues short-lived browser/device registration tokens at runtime. Build-time `VITE_SIGNAL_AUTH_TOKEN` is only suitable for controlled testing.
+- Regional TURN deployment, relay health/routing policy and real WAN latency measurements.
+- Windows logon-screen and UAC Secure Desktop capture/control through a tightly scoped privileged broker. The current Service covers logged-in unattended persistence only.
 - Audio, clipboard/file transfer and native mobile UX.
 
 ## Repository layout
 
 ```text
 apps/
-  signal/         Go signaling service
+  signal/         Go signaling + temporary TURN credential service
   web/            Browser controller
-  windows-agent/  Native Windows host
+  windows-agent/  Native Windows host + Windows Service
 infra/
   coturn/         TURN configuration
   docker-compose.yml
@@ -66,6 +72,8 @@ packages/
 docs/
   ARCHITECTURE.md
   NETWORK_TESTING.md
+  PRODUCTION_NETWORK.md
+  WINDOWS_SERVICE.md
 ```
 
 ## Local development
@@ -96,6 +104,8 @@ cmake -S apps/windows-agent -B build/windows-agent -A x64
 cmake --build build/windows-agent --config Release --parallel
 ```
 
+The Release directory contains both `desklink-agent.exe` and `desklink-service.exe`. Successful GitHub Actions Windows jobs also upload both files as a `desklink-windows-<commit>` artifact.
+
 Configure the host before starting it:
 
 ```powershell
@@ -109,6 +119,8 @@ $env:DESKLINK_TURN_PASSWORD = "CHANGE_ME_NOW"
 
 .\build\windows-agent\Release\desklink-agent.exe
 ```
+
+The static TURN username/password above are development fallback values. A production Agent should instead configure a short-lived signaling token and runtime TURN endpoint as documented in `docs/PRODUCTION_NETWORK.md`.
 
 Optional video/performance tuning:
 
@@ -127,6 +139,14 @@ $env:DESKLINK_PERFORMANCE_TUNING = "1"
 ```
 
 If `DESKLINK_ACCESS_CODE` is not set, the host remains registered but rejects every incoming remote-control offer.
+
+To install logged-in unattended persistence from an elevated shell:
+
+```powershell
+.\build\windows-agent\Release\desklink-service.exe --install
+```
+
+See `docs/WINDOWS_SERVICE.md` for limitations and uninstall instructions.
 
 ### 3. Start the browser controller
 
@@ -148,6 +168,8 @@ VITE_TURN_PASSWORD=CHANGE_ME_NOW
 
 Open the page, enter the Windows host's `DESKLINK_DEVICE_ID` and matching `DESKLINK_ACCESS_CODE`, then connect.
 
+For production-style runtime relay credentials, configure `VITE_TURN_CREDENTIALS_URL` and a short-lived signaling registration token; see `docs/PRODUCTION_NETWORK.md` and `apps/web/.env.restrictive.example`.
+
 ## Public/WAN deployment notes
 
 Do not rely on the development defaults for a public deployment. In particular:
@@ -157,18 +179,20 @@ Do not rely on the development defaults for a public deployment. In particular:
 - Use multiple regional relay nodes once users are geographically distributed; a single relay cannot provide low latency everywhere.
 - Use HTTPS/WSS and valid public certificates.
 - Configure coturn `external-ip` correctly when the relay is behind NAT.
-- Replace static TURN credentials with short-lived TURN REST credentials.
-- Restrict signaling origins, rate-limit authentication/session creation and keep audit metadata without logging keyboard content or access codes.
+- Enable TURN REST temporary credentials and keep the coturn shared secret server-side only.
+- Restrict signaling origins, require short-lived registration tokens, rate-limit authentication/session creation and keep audit metadata without logging keyboard content or access codes.
 
 ## Recommended validation order
 
 1. Same Windows machine / browser, then same LAN, with firewall rules verified.
 2. Two different LANs using Direct P2P where possible.
 3. Force TURN/UDP relay and verify the diagnostics HUD reports `TURN relay`.
-4. Test TURN/TCP separately as a restrictive-network fallback.
-5. Add controlled loss/latency/bandwidth limits and verify quality drops before control responsiveness degrades.
-6. Switch network paths during a session and verify signaling reconnect + ICE restart recover without manual reconnect.
-7. Test Intel, NVIDIA and AMD hardware encoders independently.
+4. Test TURN/TCP and TURN/TLS separately as restrictive-network fallbacks.
+5. Enable runtime TURN credentials and verify a newly issued credential is used for initial connection and ICE restart.
+6. Add controlled loss/latency/bandwidth limits and verify quality drops before control responsiveness degrades.
+7. Switch network paths during a session and verify signaling reconnect + ICE restart recover without manual reconnect.
+8. Install the Windows Service and test logon, logout, fast-user/session changes and Agent crash recovery.
+9. Test Intel, NVIDIA and AMD hardware encoders independently.
 
 See `docs/NETWORK_TESTING.md` for a repeatable weak-network test matrix.
 
@@ -176,7 +200,7 @@ See `docs/NETWORK_TESTING.md` for a repeatable weak-network test matrix.
 
 1. **M0 — complete:** signaling, browser UI, WebRTC negotiation, input protocol, TURN fallback.
 2. **M1 — implemented, runtime validation ongoing:** Windows GPU capture/encode, browser playback, mouse/keyboard input, access-code authorization.
-3. **M2 — performance core implemented:** adaptive bitrate/FPS/resolution, PLI/NACK recovery, RTP pacing, reconnect/ICE restart, multi-monitor and diagnostics. Clipboard/file transfer/audio remain.
-4. **M3 — planned:** macOS host, Android/iOS controllers, unattended Windows service/session-agent architecture and hardened account/device authentication.
+3. **M2 — performance core implemented:** adaptive bitrate/FPS/resolution, PLI/NACK recovery, RTP pacing, reconnect/ICE restart, multi-monitor and diagnostics.
+4. **M3 — in progress:** logged-in unattended Windows Service and hardened signaling/TURN credentials are implemented; account/device token issuance, Secure Desktop broker, clipboard/file transfer/audio, macOS and native mobile clients remain.
 
 See `docs/ARCHITECTURE.md` for the detailed technical decisions.
