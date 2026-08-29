@@ -167,6 +167,8 @@ void WebRtcSession::SignalingReconnectLoop(std::stop_token stop_token) {
 void WebRtcSession::Stop() {
   if (stopping_.exchange(true, std::memory_order_relaxed)) return;
 
+  input_.ReleaseAll();
+
   {
     std::scoped_lock lock(reconnect_mutex_);
     reconnect_requested_ = false;
@@ -347,6 +349,7 @@ void WebRtcSession::HandleOffer(
   }
 
   std::cout << "Authorized remote-control session from " << from << "\n";
+  input_.ReleaseAll();
   CreatePeer(from, session, h264_payload_type);
 
   std::shared_ptr<rtc::PeerConnection> peer;
@@ -487,7 +490,8 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
   channel->onOpen([label]() {
     std::cout << label << " DataChannel open\n";
   });
-  channel->onClosed([label]() {
+  channel->onClosed([this, label]() {
+    if (label == "control") input_.ReleaseAll();
     std::cout << label << " DataChannel closed\n";
   });
   channel->onMessage([this](rtc::message_variant data) {
@@ -502,6 +506,11 @@ void WebRtcSession::HandleControl(const std::string& text) {
   if (event.is_discarded() || !event.is_object()) return;
 
   const std::string type = event.value("t", "");
+  if (type == "release-all") {
+    input_.ReleaseAll();
+    return;
+  }
+
   if (type == "telemetry") {
     if (config_.on_network_feedback) {
       NetworkFeedback feedback;
