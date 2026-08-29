@@ -1,6 +1,6 @@
 const STORAGE_KEY = "desklink.recentDevices.v1";
 const MAX_RECENT_DEVICES = 6;
-const TARGET_PLACEHOLDER = "Remote device ID";
+const TARGET_PLACEHOLDERS = new Set(["Remote device ID", "远程设备 ID"]);
 
 function readRecentDevices(): string[] {
   try {
@@ -31,7 +31,7 @@ function rememberDevice(id: string) {
 
 function targetInput() {
   return Array.from(document.querySelectorAll<HTMLInputElement>(".connect-card input"))
-    .find((input) => input.placeholder === TARGET_PLACEHOLDER) ?? null;
+    .find((input) => input.dataset.role === "target-device" || TARGET_PLACEHOLDERS.has(input.placeholder)) ?? null;
 }
 
 function applyTarget(id: string) {
@@ -104,7 +104,8 @@ function bindForm() {
   card.addEventListener("click", (event) => {
     const button = (event.target as Element | null)?.closest("button");
     if (!button || button.closest(".recent-devices")) return;
-    if (button.textContent?.trim() === "Connect") {
+    const text = button.textContent?.trim();
+    if (text === "Connect" || text === "连接设备") {
       rememberDevice(input.value);
       renderHistory();
     }
