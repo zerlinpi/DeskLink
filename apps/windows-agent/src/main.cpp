@@ -33,6 +33,14 @@ struct VideoSize {
   uint32_t height;
 };
 
+struct VideoProfileLimits {
+  uint32_t best_resolution_tier;
+  uint32_t worst_resolution_tier;
+  uint32_t max_fps;
+  uint32_t max_bitrate_bps;
+  const char* name;
+};
+
 BOOL WINAPI ConsoleHandler(DWORD signal) {
   if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT || signal == CTRL_CLOSE_EVENT) {
     g_running = false;
@@ -151,6 +159,32 @@ uint32_t BitrateCapForResolutionTier(
       static_cast<uint32_t>(std::min<uint64_t>(scaled, target_bitrate)),
       min_bitrate,
       target_bitrate);
+}
+
+VideoProfileLimits LimitsForVideoProfile(
+    desklink::VideoProfile profile,
+    uint32_t target_fps,
+    uint32_t target_bitrate,
+    uint32_t min_bitrate) {
+  auto bitrate_cap = [&](uint32_t preferred) {
+    return std::max<uint32_t>(min_bitrate, std::min<uint32_t>(target_bitrate, preferred));
+  };
+
+  switch (profile) {
+    case desklink::VideoProfile::Original:
+      // Keep the full configured resolution. Weak-network protection may still
+      // reduce bitrate/FPS, but it will not silently lower spatial resolution.
+      return {0, 0, target_fps, target_bitrate, "original"};
+    case desklink::VideoProfile::High:
+      // A stable high-definition profile: 900p-class, up to 45 fps / 8 Mbps.
+      return {1, 3, std::min<uint32_t>(target_fps, 45), bitrate_cap(8'000'000), "high"};
+    case desklink::VideoProfile::Clear:
+      // Bandwidth-friendly profile: 720p-class, up to 30 fps / 4 Mbps.
+      return {2, 3, std::min<uint32_t>(target_fps, 30), bitrate_cap(4'000'000), "clear"};
+    case desklink::VideoProfile::Auto:
+    default:
+      return {0, 3, target_fps, target_bitrate, "auto"};
+  }
 }
 
 }  // namespace
@@ -299,6 +333,10 @@ int wmain(int argc, wchar_t** argv) {
   std::atomic<uint32_t> requested_bitrate{target_bitrate};
   std::atomic<uint32_t> requested_fps{target_fps};
   std::atomic<uint32_t> requested_resolution_tier{0};
+  std::atomic<uint32_t> profile_max_bitrate{target_bitrate};
+  std::atomic<uint32_t> profile_max_fps{target_fps};
+  std::atomic<uint32_t> profile_best_resolution_tier{0};
+  std::atomic<uint32_t> profile_worst_resolution_tier{3};
   std::atomic_bool keyframe_requested{false};
   std::mutex adaptation_mutex;
   auto last_bitrate_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
@@ -321,11 +359,51 @@ int wmain(int argc, wchar_t** argv) {
   session_config.on_keyframe_requested = [&]() {
     keyframe_requested.store(true, std::memory_order_relaxed);
   };
+  session_config.on_video_profile_requested = [&](desklink::VideoProfile profile) {
+    std::scoped_lock lock(adaptation_mutex);
+    const VideoProfileLimits limits = LimitsForVideoProfile(
+        profile,
+        target_fps,
+        target_bitrate,
+        min_bitrate);
+
+    profile_max_bitrate.store(limits.max_bitrate_bps, std::memory_order_relaxed);
+    profile_max_fps.store(limits.max_fps, std::memory_order_relaxed);
+    profile_best_resolution_tier.store(limits.best_resolution_tier, std::memory_order_relaxed);
+    profile_worst_resolution_tier.store(limits.worst_resolution_tier, std::memory_order_relaxed);
+    requested_bitrate.store(limits.max_bitrate_bps, std::memory_order_relaxed);
+    requested_fps.store(limits.max_fps, std::memory_order_relaxed);
+    requested_resolution_tier.store(limits.best_resolution_tier, std::memory_order_relaxed);
+
+    severe_feedback_streak = 0;
+    healthy_feedback_streak = 0;
+    resolution_pressure_streak = 0;
+    resolution_healthy_streak = 0;
+    const auto now = std::chrono::steady_clock::now();
+    last_bitrate_change = now;
+    last_fps_change = now;
+    last_resolution_change = now;
+    keyframe_requested.store(true, std::memory_order_relaxed);
+
+    std::cout << "Controller video profile: " << limits.name
+              << ", fps<= " << limits.max_fps
+              << ", bitrate<= " << (limits.max_bitrate_bps / 1'000'000.0)
+              << " Mbps, resolution-tier " << limits.best_resolution_tier
+              << ".." << limits.worst_resolution_tier << "\n";
+  };
   session_config.on_network_feedback = [&](const desklink::NetworkFeedback& feedback) {
     std::scoped_lock lock(adaptation_mutex);
     const auto now = std::chrono::steady_clock::now();
     const auto since_change = now - last_bitrate_change;
-    const uint32_t current = requested_bitrate.load(std::memory_order_relaxed);
+    const uint32_t bitrate_ceiling = profile_max_bitrate.load(std::memory_order_relaxed);
+    const uint32_t fps_ceiling = profile_max_fps.load(std::memory_order_relaxed);
+    const uint32_t best_resolution_tier =
+        profile_best_resolution_tier.load(std::memory_order_relaxed);
+    const uint32_t worst_resolution_tier =
+        profile_worst_resolution_tier.load(std::memory_order_relaxed);
+    const uint32_t current = std::min<uint32_t>(
+        requested_bitrate.load(std::memory_order_relaxed),
+        bitrate_ceiling);
     uint32_t next = current;
 
     const bool capacity_severe = feedback.available_incoming_bitrate_bps > 0.0 &&
@@ -357,7 +435,7 @@ int wmain(int argc, wchar_t** argv) {
       next = std::max<uint32_t>(min_bitrate, static_cast<uint32_t>(current * 0.82));
     } else if (healthy && since_change >= std::chrono::seconds(5)) {
       const uint32_t increase = std::max<uint32_t>(250'000, current / 12);
-      next = std::min<uint32_t>(target_bitrate, current + increase);
+      next = std::min<uint32_t>(bitrate_ceiling, current + increase);
     }
 
     if (feedback.available_incoming_bitrate_bps > 0.0 &&
@@ -368,7 +446,7 @@ int wmain(int argc, wchar_t** argv) {
       next = std::min(next, capacity_target);
     }
 
-    next = std::clamp(next, min_bitrate, target_bitrate);
+    next = std::clamp(next, min_bitrate, bitrate_ceiling);
     if (next != current) {
       requested_bitrate.store(next, std::memory_order_relaxed);
       last_bitrate_change = now;
@@ -388,10 +466,12 @@ int wmain(int argc, wchar_t** argv) {
       healthy_feedback_streak = 0;
     }
 
-    const uint32_t current_fps = requested_fps.load(std::memory_order_relaxed);
+    const uint32_t current_fps = std::min<uint32_t>(
+        requested_fps.load(std::memory_order_relaxed),
+        fps_ceiling);
     if (severe_feedback_streak >= 3 &&
         now - last_fps_change >= std::chrono::seconds(3)) {
-      const uint32_t lower = LowerFpsTier(current_fps, target_fps);
+      const uint32_t lower = LowerFpsTier(current_fps, fps_ceiling);
       if (lower < current_fps) {
         requested_fps.store(lower, std::memory_order_relaxed);
         last_fps_change = now;
@@ -399,7 +479,7 @@ int wmain(int argc, wchar_t** argv) {
       severe_feedback_streak = 0;
     } else if (healthy_feedback_streak >= 8 &&
                now - last_fps_change >= std::chrono::seconds(8)) {
-      const uint32_t higher = RaiseFpsTier(current_fps, target_fps);
+      const uint32_t higher = RaiseFpsTier(current_fps, fps_ceiling);
       if (higher > current_fps) {
         requested_fps.store(higher, std::memory_order_relaxed);
         last_fps_change = now;
@@ -408,10 +488,10 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     const uint32_t adaptive_fps = requested_fps.load(std::memory_order_relaxed);
-    const uint32_t fps_floor = std::min<uint32_t>(target_fps, 24);
+    const uint32_t fps_floor = std::min<uint32_t>(fps_ceiling, 24);
     const uint32_t bitrate_pressure_floor = std::max<uint32_t>(
         min_bitrate,
-        static_cast<uint32_t>(static_cast<uint64_t>(target_bitrate) * 45 / 100));
+        static_cast<uint32_t>(static_cast<uint64_t>(bitrate_ceiling) * 45 / 100));
     const bool resolution_exhausted = adaptive_fps <= fps_floor &&
                                       next <= bitrate_pressure_floor;
 
@@ -421,26 +501,29 @@ int wmain(int argc, wchar_t** argv) {
       resolution_pressure_streak = 0;
     }
 
-    const uint32_t recovery_fps = std::min<uint32_t>(target_fps, 45);
+    const uint32_t recovery_fps = std::min<uint32_t>(fps_ceiling, 45);
     const uint32_t recovery_bitrate = std::max<uint32_t>(
         min_bitrate,
-        static_cast<uint32_t>(static_cast<uint64_t>(target_bitrate) * 60 / 100));
+        static_cast<uint32_t>(static_cast<uint64_t>(bitrate_ceiling) * 60 / 100));
     if (healthy && adaptive_fps >= recovery_fps && next >= recovery_bitrate) {
       resolution_healthy_streak = std::min<uint32_t>(resolution_healthy_streak + 1, 120);
     } else {
       resolution_healthy_streak = 0;
     }
 
-    const uint32_t current_tier = requested_resolution_tier.load(std::memory_order_relaxed);
+    const uint32_t current_tier = std::clamp<uint32_t>(
+        requested_resolution_tier.load(std::memory_order_relaxed),
+        best_resolution_tier,
+        worst_resolution_tier);
     if (resolution_pressure_streak >= 4 &&
         now - last_resolution_change >= std::chrono::seconds(8) &&
-        current_tier < 3) {
+        current_tier < worst_resolution_tier) {
       requested_resolution_tier.store(current_tier + 1, std::memory_order_relaxed);
       last_resolution_change = now;
       resolution_pressure_streak = 0;
     } else if (resolution_healthy_streak >= 12 &&
                now - last_resolution_change >= std::chrono::seconds(15) &&
-               current_tier > 0) {
+               current_tier > best_resolution_tier) {
       requested_resolution_tier.store(current_tier - 1, std::memory_order_relaxed);
       last_resolution_change = now;
       resolution_healthy_streak = 0;
@@ -514,7 +597,9 @@ int wmain(int argc, wchar_t** argv) {
   };
 
   auto rebuild_video_pipeline = [&](uint32_t tier, const wchar_t* reason, bool force) -> bool {
-    tier = std::min<uint32_t>(tier, 3);
+    const uint32_t best_tier = profile_best_resolution_tier.load(std::memory_order_relaxed);
+    const uint32_t worst_tier = profile_worst_resolution_tier.load(std::memory_order_relaxed);
+    tier = std::clamp<uint32_t>(tier, best_tier, worst_tier);
     const VideoSize limit = ResolutionLimitForTier(tier, max_width, max_height);
     const VideoSize next_size = FitWithin(
         source_width,
@@ -528,15 +613,16 @@ int wmain(int argc, wchar_t** argv) {
       return true;
     }
 
-    const uint32_t bitrate_cap = BitrateCapForResolutionTier(
-        target_bitrate,
-        min_bitrate,
-        tier);
+    const uint32_t profile_bitrate_ceiling =
+        profile_max_bitrate.load(std::memory_order_relaxed);
+    const uint32_t bitrate_cap = std::min<uint32_t>(
+        profile_bitrate_ceiling,
+        BitrateCapForResolutionTier(target_bitrate, min_bitrate, tier));
     const uint32_t restart_bitrate = std::min<uint32_t>(
         std::clamp(
             requested_bitrate.load(std::memory_order_relaxed),
             min_bitrate,
-            target_bitrate),
+            profile_bitrate_ceiling),
         bitrate_cap);
 
     encoder.Reset();
@@ -578,19 +664,31 @@ int wmain(int argc, wchar_t** argv) {
     if (connected && !was_connected && encoder_ready) {
       keyframe_requested.store(true, std::memory_order_relaxed);
     } else if (!connected && was_connected) {
-      requested_fps.store(target_fps, std::memory_order_relaxed);
-      requested_resolution_tier.store(0, std::memory_order_relaxed);
-      if (encoder_ready && active_bitrate != target_bitrate) {
-        if (encoder.SetBitrate(target_bitrate)) {
-          active_bitrate = target_bitrate;
-          requested_bitrate.store(target_bitrate, std::memory_order_relaxed);
+      const VideoProfileLimits automatic = LimitsForVideoProfile(
+          desklink::VideoProfile::Auto,
+          target_fps,
+          target_bitrate,
+          min_bitrate);
+      profile_max_bitrate.store(automatic.max_bitrate_bps, std::memory_order_relaxed);
+      profile_max_fps.store(automatic.max_fps, std::memory_order_relaxed);
+      profile_best_resolution_tier.store(automatic.best_resolution_tier, std::memory_order_relaxed);
+      profile_worst_resolution_tier.store(automatic.worst_resolution_tier, std::memory_order_relaxed);
+      requested_fps.store(automatic.max_fps, std::memory_order_relaxed);
+      requested_resolution_tier.store(automatic.best_resolution_tier, std::memory_order_relaxed);
+      requested_bitrate.store(automatic.max_bitrate_bps, std::memory_order_relaxed);
+      if (encoder_ready && active_bitrate != automatic.max_bitrate_bps) {
+        if (encoder.SetBitrate(automatic.max_bitrate_bps)) {
+          active_bitrate = automatic.max_bitrate_bps;
         }
       }
     }
     was_connected = connected;
 
+    const uint32_t fps_ceiling = connected
+        ? profile_max_fps.load(std::memory_order_relaxed)
+        : target_fps;
     const uint32_t desired_fps = connected
-        ? requested_fps.load(std::memory_order_relaxed)
+        ? std::min<uint32_t>(requested_fps.load(std::memory_order_relaxed), fps_ceiling)
         : target_fps;
     if (desired_fps != active_fps) {
       active_fps = std::clamp<uint32_t>(desired_fps, 15, target_fps);
@@ -599,13 +697,17 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     if (connected) {
-      const uint32_t desired_resolution_tier =
-          requested_resolution_tier.load(std::memory_order_relaxed);
+      const uint32_t best_tier = profile_best_resolution_tier.load(std::memory_order_relaxed);
+      const uint32_t worst_tier = profile_worst_resolution_tier.load(std::memory_order_relaxed);
+      const uint32_t desired_resolution_tier = std::clamp<uint32_t>(
+          requested_resolution_tier.load(std::memory_order_relaxed),
+          best_tier,
+          worst_tier);
       if (desired_resolution_tier != active_resolution_tier) {
         const uint32_t previous_tier = active_resolution_tier;
         if (!rebuild_video_pipeline(
                 desired_resolution_tier,
-                L"Adaptive resolution changed",
+                L"Video profile/adaptive resolution changed",
                 false)) {
           std::wcerr << L"\nAdaptive resolution rebuild failed; restoring previous profile.\n";
           if (!rebuild_video_pipeline(previous_tier, L"Restored previous profile", true)) {
@@ -617,10 +719,14 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     if (connected && encoder_ready) {
-      const uint32_t bitrate_cap = BitrateCapForResolutionTier(
-          target_bitrate,
-          min_bitrate,
-          active_resolution_tier);
+      const uint32_t profile_bitrate_ceiling =
+          profile_max_bitrate.load(std::memory_order_relaxed);
+      const uint32_t bitrate_cap = std::min<uint32_t>(
+          profile_bitrate_ceiling,
+          BitrateCapForResolutionTier(
+              target_bitrate,
+              min_bitrate,
+              active_resolution_tier));
       const uint32_t desired_bitrate = std::min<uint32_t>(
           requested_bitrate.load(std::memory_order_relaxed),
           bitrate_cap);
@@ -667,9 +773,11 @@ int wmain(int argc, wchar_t** argv) {
         const uint32_t previous_tier = active_resolution_tier;
         if (!rebuild_video_pipeline(previous_tier, L"Display changed", true)) {
           std::wcerr << L"\nDisplay changed but the current video profile could not be rebuilt.\n";
-          if (previous_tier != 0 &&
-              rebuild_video_pipeline(0, L"Fallback full-resolution profile", true)) {
-            requested_resolution_tier.store(0, std::memory_order_relaxed);
+          const uint32_t profile_best_tier =
+              profile_best_resolution_tier.load(std::memory_order_relaxed);
+          if (previous_tier != profile_best_tier &&
+              rebuild_video_pipeline(profile_best_tier, L"Fallback profile resolution", true)) {
+            requested_resolution_tier.store(profile_best_tier, std::memory_order_relaxed);
           } else if (!encoder_ready) {
             std::wcerr << L"Video disabled after display change; remote input remains active.\n";
           }
