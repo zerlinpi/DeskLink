@@ -15,7 +15,31 @@ v1.0.1 起，Windows 发布包提供原生 DeskLink.exe 设置管理器。
    - STUN/TURN：公网远控建议填写你自己的 TURN 服务
    - 信令令牌接口 / TURN 凭证接口 / dc2 设备凭证：生产鉴权部署时填写
 4. 点击“安装 / 更新并启动”。
-5. 服务状态显示“运行中”后，在 Web 控制端输入设备 ID 和访问码连接。
+5. 服务状态显示“运行中”后，点击“连接诊断”。
+6. 诊断没有 [失败] 项后，再在 Web 控制端输入设备 ID 和访问码连接。
+
+连接诊断
+--------
+
+新版 DeskLink.exe 可直接检查：
+
+  - DeskLink Windows Service 是否正在运行；
+  - 设备 ID 格式；
+  - 无人值守访问码是否已用 DPAPI 保存；
+  - Signal /healthz 是否可访问；
+  - 公网 Signal 是否仍在使用不安全的 ws://；
+  - STUN 是否已配置；
+  - TURN 主机 DNS 与 TCP 端口是否可达；
+  - Signal Token 模式是否已配置 dc2 设备凭证；
+  - 是否已配置短期 TURN Credential API。
+
+诊断结果分为 [通过] / [警告] / [失败]。
+
+  [失败] 代表会直接阻断当前远控链路，应先修复。
+  [警告] 代表当前可能能用，但跨公网、复杂 NAT 或正式生产环境存在风险。
+
+“复制诊断”可以把不包含访问码和 dc2 明文的诊断结果复制出来，方便排查。
+“复制设备 ID”可以直接复制当前被控端 ID，减少手工输入错误。
 
 访问码和设备凭证不会写进命令行或普通环境变量，而是通过 Windows
 machine-scope DPAPI 加密保存在 %ProgramData%\DeskLink。
@@ -27,7 +51,7 @@ machine-scope DPAPI 加密保存在 %ProgramData%\DeskLink。
 发布包内容
 ----------
 
-  DeskLink.exe            Windows 图形化设置/管理器（推荐入口）
+  DeskLink.exe            Windows 图形化设置/管理器与连接诊断（推荐入口）
   desklink-agent.exe      被控端实时采集、编码、WebRTC 与输入处理进程
   desklink-service.exe    LocalSystem 无人值守后台服务
   install-service.ps1     管理员/自动化安装脚本
