@@ -116,7 +116,8 @@
 .clipboard-panel[hidden],
 .file-transfer-panel[hidden],
 .monitor-tabs[hidden],
-.file-drop-overlay[hidden] { display: none; }
+.file-drop-overlay[hidden],
+.download-progress-container[hidden] { display: none; }
 
 .quality-menu,
 .clipboard-panel,
@@ -296,7 +297,8 @@
 
 .clipboard-actions button,
 .transfer-toolbar button,
-.transfer-item-footer button {
+.transfer-item-footer button,
+.remote-file-item button {
   min-height: 31px;
   padding: 6px 8px;
   border-radius: 8px;
@@ -308,10 +310,16 @@
 
 .clipboard-actions button:hover,
 .transfer-toolbar button:hover,
-.transfer-item-footer button:hover {
+.transfer-item-footer button:hover,
+.remote-file-item button:hover {
   background: rgba(103, 119, 255, .15);
   color: #fff;
   filter: none;
+}
+
+.remote-file-item button:disabled {
+  opacity: .42;
+  cursor: not-allowed;
 }
 
 .clipboard-status,
@@ -329,14 +337,18 @@
 .transfer-item-footer .is-error { color: #efa0a0; }
 
 .file-transfer-panel {
-  width: min(450px, calc(100vw - 28px));
+  width: min(480px, calc(100vw - 28px));
+  max-height: min(760px, calc(100vh - 100px));
+  overflow-y: auto;
   padding: 11px;
+  scrollbar-width: thin;
 }
 
 .transfer-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 8px;
+  margin-bottom: 9px;
 }
 
 .transfer-toolbar button:first-child {
@@ -344,10 +356,20 @@
   color: #f0f2ff;
 }
 
-.transfer-list {
+.transfer-section-label {
+  display: block;
+  margin: 9px 1px 6px;
+  color: #9da9bc;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .01em;
+}
+
+.transfer-list,
+.remote-file-list {
   display: grid;
   gap: 6px;
-  max-height: min(330px, 48vh);
+  max-height: min(250px, 31vh);
   overflow-y: auto;
   padding-right: 2px;
   scrollbar-width: thin;
@@ -363,7 +385,8 @@
   text-align: center;
 }
 
-.transfer-item {
+.transfer-item,
+.remote-file-item {
   display: grid;
   gap: 7px;
   padding: 9px;
@@ -383,7 +406,8 @@
 }
 
 .transfer-item-header,
-.transfer-item-footer {
+.transfer-item-footer,
+.remote-file-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -391,7 +415,8 @@
   min-width: 0;
 }
 
-.transfer-item-header strong {
+.transfer-item-header strong,
+.remote-file-item strong {
   min-width: 0;
   overflow: hidden;
   color: #e0e6f0;
@@ -402,11 +427,27 @@
 }
 
 .transfer-item-header span,
-.transfer-item-footer span {
+.transfer-item-footer span,
+.remote-file-item span {
   flex: 0 0 auto;
   color: #8490a4;
   font-size: 9px;
   white-space: nowrap;
+}
+
+.remote-file-item > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.remote-file-item > div span {
+  justify-self: start;
+}
+
+.remote-file-item button {
+  flex: 0 0 auto;
+  min-height: 28px;
 }
 
 .transfer-item-footer span:first-child {
@@ -434,6 +475,15 @@
   border-radius: inherit;
   background: linear-gradient(90deg, rgba(103, 119, 255, .78), rgba(76, 186, 255, .88));
   transition: width .12s linear;
+}
+
+.download-progress-container {
+  margin: 0 0 7px;
+}
+
+.download-item {
+  border-color: rgba(76, 186, 255, .2);
+  background: rgba(76, 186, 255, .055);
 }
 
 .transfer-destination {
@@ -494,6 +544,7 @@
     bottom: 16px;
     left: 12px;
     width: auto;
+    max-height: calc(100vh - 32px);
   }
   .file-drop-overlay { inset: 118px 10px 10px; }
 }
