@@ -48,6 +48,40 @@
   filter: none;
 }
 
+[data-workbench-action="network"]::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 999px;
+  vertical-align: 1px;
+  background: #7c879b;
+  box-shadow: 0 0 0 3px rgba(124, 135, 155, .08);
+}
+
+[data-workbench-action="network"][data-quality="excellent"]::before {
+  background: #35d47c;
+  box-shadow: 0 0 0 3px rgba(53, 212, 124, .11);
+}
+
+[data-workbench-action="network"][data-quality="good"]::before {
+  background: #72d66b;
+}
+
+[data-workbench-action="network"][data-quality="fair"]::before {
+  background: #eeb94c;
+}
+
+[data-workbench-action="network"][data-quality="poor"]::before {
+  background: #ef6a6a;
+}
+
+[data-workbench-action="network"][data-quality="relay"]::before {
+  background: #f0a84d;
+  box-shadow: 0 0 0 3px rgba(240, 168, 77, .1);
+}
+
 @media (max-width: 760px) {
   .recent-devices { padding-top: 4px; }
 }
