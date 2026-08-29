@@ -48,6 +48,8 @@ struct SessionConfig {
   uint32_t media_pacing_interval_ms{5};
   std::function<void(const NetworkFeedback&)> on_network_feedback;
   std::function<void(VideoProfile)> on_video_profile_requested;
+  std::function<void()> on_monitor_state_requested;
+  std::function<void(uint32_t)> on_monitor_switch_requested;
   std::function<void()> on_keyframe_requested;
 };
 
@@ -64,6 +66,10 @@ class WebRtcSession {
   bool connected() const;
   std::string controller_id() const;
   void SetControlledDesktopRect(long left, long top, long width, long height);
+
+  // Sends an application event to the currently authorized reliable control
+  // channel. Returns false when no control channel is open.
+  bool SendControlMessage(const std::string& text);
 
   // Encoded access units must be Annex-B (00 00 01 / 00 00 00 01 separated NAL units).
   // timestamp100ns is the capture/encode presentation timestamp in 100-ns units.
