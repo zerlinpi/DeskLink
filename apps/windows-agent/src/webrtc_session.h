@@ -47,6 +47,7 @@ class WebRtcSession {
   void Stop();
   bool connected() const;
   std::string controller_id() const;
+  void SetControlledDesktopRect(long left, long top, long width, long height);
 
   // Encoded access units must be Annex-B (00 00 01 / 00 00 00 01 separated NAL units).
   // timestamp100ns is the capture/encode presentation timestamp in 100-ns units.
