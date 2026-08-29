@@ -167,7 +167,9 @@ func validSessionID(id string) bool {
 
 func allowedSignalType(messageType string) bool {
 	switch messageType {
-	case "offer", "answer", "ice", "session-request", "session-accept":
+	case "offer", "answer", "ice",
+		"auth-request", "auth-challenge", "auth-proof", "auth-accepted", "auth-rejected",
+		"session-request", "session-accept":
 		return true
 	default:
 		return false
