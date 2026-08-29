@@ -117,8 +117,10 @@ jobs:
         shell: pwsh
         run: |
           $service = Resolve-Path "build/windows-agent/Release/desklink-service.exe"
-          "dc1.CI_DPAPI_SMOKE_TEST_0123456789" | & $service --store-device-credential
-          if ($LASTEXITCODE -ne 0) { throw "DPAPI device credential store failed with exit code $LASTEXITCODE" }
+          "dc1.CI_DPAPI_LEGACY_SMOKE_0123456789" | & $service --store-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI legacy dc1 store failed with exit code $LASTEXITCODE" }
+          "dc2.CI_DPAPI_REGISTRY_SMOKE_0123456789" | & $service --store-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI registry dc2 store failed with exit code $LASTEXITCODE" }
           "CI-Access-Code-Smoke-0123456789!" | & $service --store-access-code
           if ($LASTEXITCODE -ne 0) { throw "DPAPI access-code store failed with exit code $LASTEXITCODE" }
           & $service --clear-access-code
