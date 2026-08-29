@@ -175,10 +175,15 @@ jobs:
         with:
           path: build/windows-agent
           key: desklink-windows-${{ runner.os }}-${{ hashFiles('apps/windows-agent/CMakeLists.txt') }}
-          restore-keys: |
-            desklink-windows-${{ runner.os }}-
       - name: Configure
-        run: cmake -S apps/windows-agent -B build/windows-agent -A x64
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+      - name: Validate static OpenSSL selection
+        shell: pwsh
+        run: |
+          $cache = Get-Content "build/windows-agent/CMakeCache.txt" -Raw
+          if ($cache -match '(?im)^OPENSSL_(CRYPTO|SSL)_LIBRARY[^=]*=.*[\\/]MDd?[\\/]') {
+            throw "CMake selected an OpenSSL /MD library instead of the portable /MT/static variant"
+          }
       - name: Build
         run: cmake --build build/windows-agent --config Release --parallel
       - name: Validate portable Windows dependencies
@@ -203,12 +208,18 @@ jobs:
             $dependencies = & $dumpbin.FullName /DEPENDENTS $binary
             if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $binary" }
             $dependencyText = $dependencies -join "`n"
-            Write-Host "Dependencies for $binary:"
+            Write-Host "Dependencies for ${binary}:"
             Write-Host $dependencyText
             if ($dependencyText -match $forbidden) {
               throw "$binary has an external runtime dependency that must be bundled or statically linked"
             }
           }
+      - name: Validate H264 Annex-B normalization
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-h264-annexb-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "H264 Annex-B smoke failed with exit code $LASTEXITCODE" }
       - name: Validate Access Code proof vector
         shell: pwsh
         run: |
