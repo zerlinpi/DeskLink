@@ -5,16 +5,24 @@ services:
     command: sh -c "go mod download && go run ."
     volumes:
       - ../apps/signal:/src
+      # Optional production-style secret files. Keep this directory out of source
+      # control, owned by the administrator, with registry files mode 0600.
+      - ./secrets:/run/desklink-secrets:ro
     environment:
       DESKLINK_SIGNAL_ADDR: :8080
-      DESKLINK_ALLOW_ANY_ORIGIN: "1"
+      DESKLINK_ALLOW_ANY_ORIGIN: ${DESKLINK_ALLOW_ANY_ORIGIN:-1}
+      DESKLINK_ALLOWED_ORIGINS: ${DESKLINK_ALLOWED_ORIGINS:-}
       # Empty values keep local development backward-compatible. Production
       # should inject independent long random secrets from a secret manager.
       DESKLINK_DEVICE_AUTH_SECRET: ${DESKLINK_DEVICE_AUTH_SECRET:-}
+      DESKLINK_DEVICE_CREDENTIALS_FILE: ${DESKLINK_DEVICE_CREDENTIALS_FILE:-}
+      DESKLINK_CONTROLLER_CREDENTIALS_FILE: ${DESKLINK_CONTROLLER_CREDENTIALS_FILE:-}
+      DESKLINK_CONTROLLER_SESSION_TTL: ${DESKLINK_CONTROLLER_SESSION_TTL:-15m}
       DESKLINK_SIGNAL_AUTH_SECRET: ${DESKLINK_SIGNAL_AUTH_SECRET:-}
       DESKLINK_SIGNAL_TOKEN_TTL: ${DESKLINK_SIGNAL_TOKEN_TTL:-15m}
       DESKLINK_TURN_AUTH_SECRET: ${DESKLINK_TURN_AUTH_SECRET:-}
       DESKLINK_TURN_CREDENTIAL_TTL_SECONDS: ${DESKLINK_TURN_CREDENTIAL_TTL_SECONDS:-43200}
+      DESKLINK_REVOKED_DEVICE_IDS_FILE: ${DESKLINK_REVOKED_DEVICE_IDS_FILE:-}
     ports:
       - "8080:8080"
 
