@@ -6,7 +6,8 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
-#include <limits>
+
+#include "h264_annexb.h"
 
 namespace desklink {
 namespace {
@@ -27,24 +28,6 @@ bool SetCodecBool(ICodecAPI* codec, const GUID& key, bool value) {
   variant.vt = VT_BOOL;
   variant.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
   return SUCCEEDED(codec->SetValue(&key, &variant));
-}
-
-bool StartsWithParameterSet(const std::vector<uint8_t>& bytes) {
-  for (size_t i = 0; i + 4 < bytes.size() && i < 64; ++i) {
-    size_t nalu = std::numeric_limits<size_t>::max();
-    if (i + 4 < bytes.size() && bytes[i] == 0 && bytes[i + 1] == 0 &&
-        bytes[i + 2] == 0 && bytes[i + 3] == 1) {
-      nalu = i + 4;
-    } else if (i + 3 < bytes.size() && bytes[i] == 0 && bytes[i + 1] == 0 &&
-               bytes[i + 2] == 1) {
-      nalu = i + 3;
-    }
-    if (nalu != std::numeric_limits<size_t>::max() && nalu < bytes.size()) {
-      const uint8_t type = bytes[nalu] & 0x1f;
-      return type == 7 || type == 8;
-    }
-  }
-  return false;
 }
 
 }  // namespace
@@ -270,17 +253,27 @@ bool H264Encoder::CacheSequenceHeader() {
   UINT32 size = 0;
   if (FAILED(current->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &size)) || size == 0) return false;
 
-  sequence_header_.resize(size);
+  std::vector<uint8_t> raw_header(size);
   UINT32 written = 0;
   if (FAILED(current->GetBlob(
           MF_MT_MPEG_SEQUENCE_HEADER,
-          sequence_header_.data(),
+          raw_header.data(),
           size,
           &written))) {
+    return false;
+  }
+  raw_header.resize(written);
+  if (!NormalizeH264SequenceHeader(
+          raw_header.data(),
+          raw_header.size(),
+          &sequence_header_,
+          &nal_length_size_,
+          &access_units_length_prefixed_)) {
     sequence_header_.clear();
     return false;
   }
-  sequence_header_.resize(written);
+
+  framing_known_ = true;
   return !sequence_header_.empty();
 }
 
@@ -423,10 +416,29 @@ bool H264Encoder::ReadOutput(EncodedH264Frame* output) {
     return false;
   }
 
-  output->bytes.assign(bytes, bytes + current_length);
+  std::vector<uint8_t> raw(bytes, bytes + current_length);
   contiguous->Unlock();
 
-  if (output->keyframe && !sequence_header_.empty() && !StartsWithParameterSet(output->bytes)) {
+  // Some MFTs expose MF_MT_MPEG_SEQUENCE_HEADER only after streaming starts.
+  if (!framing_known_) CacheSequenceHeader();
+
+  std::vector<uint8_t> normalized;
+  const bool prefer_length_prefixed = framing_known_
+      ? access_units_length_prefixed_
+      : true;
+  if (!NormalizeH264AccessUnit(
+          raw.data(),
+          raw.size(),
+          nal_length_size_,
+          prefer_length_prefixed,
+          &normalized)) {
+    std::wcerr << L"H264Encoder: output is neither valid Annex-B nor a supported length-prefixed access unit\n";
+    return false;
+  }
+  output->bytes.swap(normalized);
+
+  if (output->keyframe && !sequence_header_.empty() &&
+      !H264AnnexBHasParameterSet(output->bytes)) {
     std::vector<uint8_t> with_header;
     with_header.reserve(sequence_header_.size() + output->bytes.size());
     with_header.insert(with_header.end(), sequence_header_.begin(), sequence_header_.end());
@@ -483,6 +495,9 @@ void H264Encoder::Reset() {
   bitrate_bps_ = 0;
   frame_duration100ns_ = 0;
   sequence_header_.clear();
+  nal_length_size_ = 4;
+  access_units_length_prefixed_ = false;
+  framing_known_ = false;
   encoder_name_.clear();
 }
 
