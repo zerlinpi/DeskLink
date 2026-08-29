@@ -123,3 +123,10 @@ target_link_libraries(
     winhttp
     ws2_32
 )
+
+add_executable(desklink-access-proof-smoke
+  src/access_proof_smoke.cpp
+)
+target_compile_definitions(desklink-access-proof-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-access-proof-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(desklink-access-proof-smoke PRIVATE bcrypt)
