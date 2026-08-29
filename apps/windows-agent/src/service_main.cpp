@@ -2,6 +2,7 @@
 #include <userenv.h>
 #include <wtsapi32.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cwctype>
 #include <filesystem>
@@ -277,21 +278,47 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
   ReportStatus(SERVICE_RUNNING);
   LogEvent(EVENTLOG_INFORMATION_TYPE, L"DeskLink service started");
 
-  auto next_launch_attempt = std::chrono::steady_clock::now();
+  using clock = std::chrono::steady_clock;
+  auto next_launch_attempt = clock::now();
+  auto agent_started_at = clock::time_point{};
+  uint32_t consecutive_failures = 0;
+
+  auto schedule_retry = [&](const wchar_t* reason) {
+    consecutive_failures = std::min<uint32_t>(consecutive_failures + 1, 6);
+    const uint32_t delay_seconds = std::min<uint32_t>(60, 1u << consecutive_failures);
+    next_launch_attempt = clock::now() + std::chrono::seconds(delay_seconds);
+    LogEvent(
+        EVENTLOG_WARNING_TYPE,
+        std::wstring(reason) + L"; retrying Agent in " +
+            std::to_wstring(delay_seconds) + L" seconds");
+  };
+
   while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
+    const auto now = clock::now();
     const DWORD active_session = WTSGetActiveConsoleSessionId();
     const bool session_changed = active_session != g_agent_session;
     const bool agent_dead = g_agent_process && !AgentAlive();
 
-    if (session_changed || agent_dead) {
+    if (session_changed) {
       StopAgent();
-      next_launch_attempt = std::chrono::steady_clock::now();
+      consecutive_failures = 0;
+      agent_started_at = clock::time_point{};
+      next_launch_attempt = now;
+    } else if (agent_dead) {
+      const bool was_stable = agent_started_at != clock::time_point{} &&
+                              now - agent_started_at >= std::chrono::seconds(60);
+      StopAgent();
+      if (was_stable) consecutive_failures = 0;
+      schedule_retry(L"desklink-agent.exe exited unexpectedly");
+      agent_started_at = clock::time_point{};
     }
 
     if (!g_agent_process && active_session != kNoSession &&
-        std::chrono::steady_clock::now() >= next_launch_attempt) {
-      if (!LaunchAgent(active_session)) {
-        next_launch_attempt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        clock::now() >= next_launch_attempt) {
+      if (LaunchAgent(active_session)) {
+        agent_started_at = clock::now();
+      } else {
+        schedule_retry(L"Unable to launch desklink-agent.exe");
       }
     }
 
