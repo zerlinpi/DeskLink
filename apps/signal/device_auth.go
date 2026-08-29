@@ -21,9 +21,10 @@ type issuedSignalToken struct {
 	ExpiresAt int64  `json:"expiresAt"`
 }
 
-// deriveDeviceCredential creates the long-lived bootstrap credential for one
-// exact device ID. It is intentionally distinct from the short-lived signaling
-// registration token and must never be sent in WebSocket URLs or ICE signaling.
+// deriveDeviceCredential is the legacy deterministic bootstrap format. It stays
+// available for migration only when DESKLINK_DEVICE_CREDENTIALS_FILE is not
+// configured. New production deployments should provision independent random
+// credentials in the per-device registry instead.
 func deriveDeviceCredential(secret, deviceID string) string {
 	if secret == "" || !validDeviceID(deviceID) {
 		return ""
@@ -63,7 +64,7 @@ func signalTokenHandler() http.HandlerFunc {
 
 		deviceSecret := os.Getenv("DESKLINK_DEVICE_AUTH_SECRET")
 		signalSecret := os.Getenv("DESKLINK_SIGNAL_AUTH_SECRET")
-		if deviceSecret == "" || signalSecret == "" {
+		if !deviceCredentialAuthConfigured(deviceSecret) || signalSecret == "" {
 			http.NotFound(w, r)
 			return
 		}
@@ -82,7 +83,17 @@ func signalTokenHandler() http.HandlerFunc {
 			http.Error(w, "device revoked", http.StatusForbidden)
 			return
 		}
-		if !validateDeviceCredential(deviceSecret, deviceID, bearerToken(r)) {
+
+		credentialOK, err := validateDeviceCredentialSource(
+			deviceSecret,
+			deviceID,
+			bearerToken(r),
+		)
+		if err != nil {
+			http.Error(w, "device credential registry unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !credentialOK {
 			http.Error(w, "unauthorized device credential", http.StatusUnauthorized)
 			return
 		}
