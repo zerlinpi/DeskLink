@@ -101,3 +101,23 @@ target_link_libraries(
     winhttp
     wtsapi32
 )
+
+add_executable(desklink-service-auth-smoke
+  src/service_auth_broker_smoke.cpp
+  src/service_auth_broker.cpp
+  src/service_auth_broker.h
+  src/service_auth_client.cpp
+  src/service_auth_client.h
+  src/signal_token_client.cpp
+  src/signal_token_client.h
+)
+target_compile_definitions(desklink-service-auth-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-service-auth-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(
+  desklink-service-auth-smoke
+  PRIVATE
+    nlohmann_json::nlohmann_json
+    advapi32
+    shell32
+    winhttp
+)
