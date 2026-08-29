@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: desklink-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   signal:
     runs-on: ubuntu-latest
@@ -38,6 +42,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Restore native build cache
+        uses: actions/cache@v4
+        with:
+          path: build/windows-agent
+          key: desklink-windows-${{ runner.os }}-${{ hashFiles('apps/windows-agent/CMakeLists.txt') }}
       - name: Configure
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64
       - name: Build
