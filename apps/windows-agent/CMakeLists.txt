@@ -43,6 +43,7 @@ add_executable(desklink-agent
   src/h264_encoder.h
   src/input_injector.cpp
   src/input_injector.h
+  src/performance_tuning.cpp
   src/webrtc_session.cpp
   src/webrtc_session.h
 )
@@ -63,4 +64,6 @@ target_link_libraries(
     strmiids
     user32
     ole32
+    avrt
+    winmm
 )
