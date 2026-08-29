@@ -38,12 +38,14 @@ func TestSignalMetricsSnapshot(t *testing.T) {
 	metrics.pendingHostAuthQueued.Store(5)
 	metrics.pendingHostAuthDelivered.Store(4)
 	metrics.pendingHostAuthDropped.Store(1)
+	metrics.hostAuthDuplicatesSuppressed.Store(2)
 
 	snapshot := metrics.snapshot()
 	if snapshot.ActiveConnections != 2 || snapshot.TotalConnections != 9 ||
 		snapshot.RateLimitedHandshakes != 3 || snapshot.AuthFailures != 4 ||
 		snapshot.MessagesForwarded != 17 || snapshot.PendingHostAuthQueued != 5 ||
-		snapshot.PendingHostAuthDelivered != 4 || snapshot.PendingHostAuthDropped != 1 {
+		snapshot.PendingHostAuthDelivered != 4 || snapshot.PendingHostAuthDropped != 1 ||
+		snapshot.HostAuthDuplicatesSuppressed != 2 {
 		t.Fatalf("unexpected snapshot: %+v", snapshot)
 	}
 }
