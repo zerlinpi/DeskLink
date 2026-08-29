@@ -1,107 +1,107 @@
 # DeskLink production network deployment
 
-This document focuses on the network path required for a Sunlogin/UU Remote-like experience. The priority order is always:
+DeskLink's preferred media/control path is:
 
-1. direct ICE/P2P when possible;
-2. TURN over UDP when relay is required;
-3. TURN over TCP for restrictive NAT/firewalls;
-4. TURN over TLS (`turns:`) as the final compatibility path.
+1. direct ICE/P2P;
+2. TURN/UDP when relay is required;
+3. TURN/TCP for restrictive networks;
+4. TURN/TLS (`turns:`) as the final compatibility path.
 
-The media path must never be proxied through the signaling WebSocket service.
+The signaling service coordinates sessions and credentials only. Remote desktop media must not be proxied through the signaling WebSocket service.
 
 ## Recommended public topology
 
-Use separate DNS names even if services initially share one VM:
+Use separate DNS names even when services initially share infrastructure:
 
-- `control.example.com` -> HTTPS/WSS signaling reverse proxy.
-- `turn.example.com` -> coturn public address.
+- `control.example.com` -> HTTPS/WSS signaling + credential APIs;
+- `turn.example.com` -> coturn public listener.
 
-For production, place TURN nodes geographically close to users. A single distant relay can make a correctly implemented remote desktop feel slow because every media/control packet detours through that relay.
+Deploy TURN geographically close to users. A technically correct single remote relay can still make interactive control feel poor because every media/control packet detours through it.
 
 ## Ports
 
-Recommended baseline:
+Typical baseline:
 
-- TCP 443: HTTPS/WSS signaling and runtime credential API.
-- UDP/TCP 3478: STUN/TURN.
-- TCP 5349: TURN/TLS (`turns:`).
-- UDP 49160-49299: TURN relay allocation range in the supplied TLS example.
+- TCP 443: HTTPS/WSS signaling/controller/device credential APIs;
+- UDP/TCP 3478: STUN/TURN;
+- TCP 5349: TURN/TLS;
+- configured UDP relay allocation range, for example `49160-49299`.
 
-A provider may also expose TURN/TLS on TCP 443 on a dedicated IP when enterprise/hotel networks only permit outbound 443. Do not place a normal HTTPS reverse proxy in front of TURN unless the proxy explicitly supports raw TCP/TLS forwarding; TURN is not HTTP.
+Some restrictive networks require TURN/TLS on TCP 443 on a dedicated IP. Do not put an HTTP reverse proxy in front of TURN unless it explicitly supports raw TCP/TLS forwarding.
 
-## coturn
+## Reverse proxy requirements
 
-Start from `infra/coturn/turnserver.tls.example.conf` and replace all placeholders. Important requirements:
+Terminate HTTPS/WSS with a publicly trusted certificate and forward WebSocket upgrade headers correctly. The backend should normally only be reachable from the trusted proxy/network.
 
-- use a real DNS hostname and publicly trusted certificate;
-- set `external-ip=PUBLIC_IP/PRIVATE_IP` when the TURN node is behind 1:1 NAT;
-- open the complete relay UDP range in the cloud security group and host firewall;
-- use `use-auth-secret` + `static-auth-secret` only with a long random secret stored outside source control;
-- mint short-lived TURN credentials in the application backend rather than distributing the shared secret;
-- monitor relay bandwidth because remote desktop video can consume several Mbps per active session.
-
-Validate the TLS listener before browser testing:
+Production settings should include:
 
 ```bash
-./tools/network/check-turn-tls.sh turn.example.com 5349
-```
-
-## Signaling registration security
-
-The signaling server can require a short-lived HMAC registration token bound to an exact `deviceId` by setting:
-
-```bash
-DESKLINK_SIGNAL_AUTH_SECRET=<long-random-secret>
-```
-
-When enabled, `/ws` requires `?deviceId=...&auth=...`. The Windows Agent reads its token from `DESKLINK_SIGNAL_AUTH_TOKEN`. The browser controller supports a pre-provisioned `VITE_SIGNAL_DEVICE_ID` + `VITE_SIGNAL_AUTH_TOKEN` pair for controlled testing.
-
-Do not treat a build-time Vite token as the final public-web authentication architecture. `VITE_*` values are bundled into client JavaScript. A production account/device service should authenticate the user, mint a short-lived controller registration token at runtime, and deliver it only to that browser session.
-
-The signaling server also applies per-connection message limits plus cross-connection/IP handshake throttling. By default it trusts the TCP peer address only. If a trusted reverse proxy terminates HTTPS/WSS and rewrites client-IP headers, set:
-
-```bash
+DESKLINK_ALLOW_ANY_ORIGIN=0
+DESKLINK_ALLOWED_ORIGINS=https://remote.example.com
 DESKLINK_TRUST_PROXY_HEADERS=1
 ```
 
-Only enable that setting when the signaling server is not directly reachable around the proxy; otherwise a client could forge forwarding headers.
+Only set `DESKLINK_TRUST_PROXY_HEADERS=1` when clients cannot bypass the trusted proxy; otherwise forwarded client-IP headers can be forged.
 
-An optional protected operational endpoint can be enabled with:
+Do not log:
+
+- `Authorization` header values;
+- controller `desklink-auth.<token>` WebSocket subprotocol values;
+- complete host WebSocket query strings containing legacy/native `auth=` bearer tokens;
+- Access Codes, device credentials, controller keys or TURN passwords.
+
+Browser runtime controller tokens are intentionally carried in the WebSocket subprotocol request rather than the URL. The server negotiates/echoes only the fixed `desklink-v1` protocol. The native Windows host currently keeps the short-lived host token in the query for compatibility, so reverse-proxy URL logging must be configured accordingly.
+
+## Signaling/device identity
+
+Enable short-lived signaling tokens:
 
 ```bash
-DESKLINK_METRICS_TOKEN=<random-bearer-token>
+DESKLINK_SIGNAL_AUTH_SECRET=<long-random-signal-signing-secret>
+DESKLINK_SIGNAL_TOKEN_TTL=15m
 ```
 
-Then `GET /metricsz` with `Authorization: Bearer <token>` returns aggregate active/total connections, rate-limited handshakes, authentication failures and forwarded signaling-message counts. The endpoint returns 404 when no metrics token is configured.
-
-## Runtime TURN credentials
-
-DeskLink can issue coturn REST-compatible temporary credentials through the signaling service. Enable it only after signaling registration tokens are enabled:
+For hosts, prefer the independent device registry:
 
 ```bash
-DESKLINK_SIGNAL_AUTH_SECRET=<same-signal-HMAC-secret-used-for-registration>
-DESKLINK_TURN_AUTH_SECRET=<same-secret-configured-as-coturn-static-auth-secret>
-DESKLINK_TURN_CREDENTIAL_TTL=12h
+DESKLINK_DEVICE_CREDENTIALS_FILE=/run/desklink-secrets/devices.json
 ```
 
-`GET /api/v1/turn-credentials?deviceId=<device-id>` requires:
+Provision/rotate a host:
 
-```http
-Authorization: Bearer <valid-signal-registration-token-for-that-device-id>
+```bash
+go run ./tools/auth/rotate-device-registry-credential.go \
+  /secure/path/devices.json win-office-01
 ```
 
-The endpoint is absent unless both auth secrets are configured. Responses are `Cache-Control: no-store`. TURN credentials default to 12 hours and are capped at 24 hours.
+The printed `dc2` credential goes only to that Windows host and is stored there with DPAPI. The server registry stores only its SHA-256 hash.
 
-The TURN shared secret must never be delivered to Windows Agents or browsers. Clients receive only the temporary username/password pair generated from that secret.
+Legacy `DESKLINK_DEVICE_AUTH_SECRET`/`dc1` remains supported for migration. When a device registry is configured it is authoritative and failures are fail-closed.
 
-## Browser controller
+## Browser controller identity
 
-Normal profile should prefer direct/UDP paths while keeping TLS available as a final relay candidate:
+Configure the controller registry:
+
+```bash
+DESKLINK_CONTROLLER_CREDENTIALS_FILE=/run/desklink-secrets/controllers.json
+DESKLINK_CONTROLLER_SESSION_TTL=15m
+```
+
+Provision one account and its allowed devices:
+
+```bash
+go run ./tools/auth/set-controller-registry-key.go \
+  /secure/path/controllers.json alice win-office-01 win-laptop-02
+```
+
+The browser user enters the resulting `ck1` key at runtime. `/api/v1/controller-session` returns an in-memory short-lived token bound to the browser peer ID and one exact target device. The signaling hub rechecks that scope on every outgoing auth/offer/ICE message.
+
+A production Web build should use:
 
 ```dotenv
 VITE_SIGNAL_URL=wss://control.example.com/ws
-VITE_SIGNAL_DEVICE_ID=web-controller-01
-VITE_SIGNAL_AUTH_TOKEN=SHORT_LIVED_CONTROLLER_TOKEN
+VITE_CONTROLLER_SESSION_URL=https://control.example.com/api/v1/controller-session
+VITE_CONTROLLER_AUTH_REQUIRED=1
 VITE_STUN_URL=stun:turn.example.com:3478
 VITE_TURN_URL=turn:turn.example.com:3478
 VITE_TURN_TLS_URL=turns:turn.example.com:5349
@@ -109,67 +109,129 @@ VITE_TURN_CREDENTIALS_URL=https://control.example.com/api/v1/turn-credentials
 VITE_TURN_RUNTIME_REQUIRED=1
 ```
 
-When `VITE_TURN_CREDENTIALS_URL` is configured, the controller fetches fresh temporary TURN credentials before the initial PeerConnection and again before every ICE restart, then updates the PeerConnection ICE configuration before renegotiating. This prevents long-lived browser tabs from attempting recovery with expired relay credentials.
+Do not put a production controller key or static signaling bearer token in a `VITE_*` variable. `VITE_SIGNAL_AUTH_TOKEN` is a controlled-test compatibility mechanism only.
 
-`VITE_TURN_RUNTIME_REQUIRED=1` makes credential-fetch failures fail closed instead of falling back to `VITE_TURN_USERNAME` / `VITE_TURN_PASSWORD`. Leave static credentials only for local development or controlled migration.
+## Host Access Code proof
 
-The controller registers TURN/UDP and TURN/TCP from `VITE_TURN_URL`, and adds `VITE_TURN_TLS_URL` when configured. For explicit relay validation, set:
+The reusable host Access Code is no longer part of the WebRTC offer. The browser performs the `auth-request` / one-time HMAC challenge/proof flow before creating the initial PeerConnection offer. The signaling server sees challenge/proof material but does not receive the reusable Access Code.
 
-```dotenv
-VITE_ICE_TRANSPORT_POLICY=relay
-```
+Use a long random Access Code. The current HMAC challenge mechanism prevents replay but is not a PAKE and therefore does not make a weak short PIN safe from offline guessing.
 
-Use `apps/web/.env.restrictive.example` as the reference test profile. In normal production operation leave the transport policy unset so direct ICE remains preferred.
-
-## Windows host
-
-The Windows host registers STUN plus TURN/UDP, TURN/TCP and TURN/TLS candidates through libdatachannel. TLS defaults to port `5349`; set `DESKLINK_TURN_TLS_PORT=0` to disable the TLS candidate or set another port when the relay uses a custom listener.
-
-Production runtime-credential example:
+For unattended Windows use, store the Access Code through:
 
 ```powershell
-$env:DESKLINK_SIGNAL_URL = "wss://control.example.com/ws"
-$env:DESKLINK_DEVICE_ID = "win-office-01"
-$env:DESKLINK_SIGNAL_AUTH_TOKEN = "SHORT_LIVED_DEVICE_TOKEN"
-$env:DESKLINK_STUN_URL = "stun:turn.example.com:3478"
-$env:DESKLINK_TURN_HOST = "turn.example.com"
-$env:DESKLINK_TURN_PORT = "3478"
-$env:DESKLINK_TURN_TLS_PORT = "5349"
-$env:DESKLINK_TURN_CREDENTIALS_URL = "https://control.example.com/api/v1/turn-credentials"
-$env:DESKLINK_TURN_RUNTIME_REQUIRED = "1"
+.\desklink-service.exe --store-access-code
 ```
 
-For each new PeerConnection, the Agent requests a fresh temporary TURN username/password using its signaling registration token. With `DESKLINK_TURN_RUNTIME_REQUIRED=1`, a credential-fetch failure disables TURN for that new session instead of silently using configured static credentials. Direct/STUN ICE can still succeed when the network permits it.
+rather than a machine-wide plaintext environment variable.
 
-The Windows Agent intentionally does not print authenticated signaling URLs, registration tokens or TURN passwords to normal logs.
+## Runtime TURN credentials
 
-## Windows service
+Configure coturn with `use-auth-secret`/`static-auth-secret` and set the same secret on signaling:
 
-`desklink-service.exe` is a LocalSystem session supervisor. It launches `desklink-agent.exe` into the active logged-in user session, restarts the Agent after unexpected exits, and reacts to Windows session changes. The capture/input process itself therefore remains in the interactive user session instead of running as LocalSystem.
+```bash
+DESKLINK_TURN_AUTH_SECRET=<same-secret-as-coturn-static-auth-secret>
+DESKLINK_TURN_CREDENTIAL_TTL_SECONDS=43200
+```
 
-This service currently provides logged-in unattended persistence. It does not yet claim Windows logon-screen or UAC Secure Desktop capture/control; those require a separate, tightly scoped privileged broker/session design.
+`GET /api/v1/turn-credentials?deviceId=<target-device-id>` requires a valid short-lived token. It accepts either:
+
+- a host token bound to that same host ID; or
+- a controller token whose target scope matches the requested device.
+
+Responses are `no-store`. Clients receive only temporary TURN usernames/passwords; the coturn shared secret never leaves the server.
+
+With `VITE_TURN_RUNTIME_REQUIRED=1`, browser credential-fetch failure does not fall back to static public-bundle credentials. With `DESKLINK_TURN_RUNTIME_REQUIRED=1`, the Windows Agent disables TURN for that newly created PeerConnection instead of silently falling back to a long-lived password. Direct/STUN can still work.
+
+## coturn
+
+Start from `infra/coturn/turnserver.tls.example.conf` for public deployment and replace placeholders. Important requirements:
+
+- use a real hostname and publicly trusted certificate;
+- configure `external-ip=PUBLIC_IP/PRIVATE_IP` when appropriate;
+- open the complete relay UDP range in cloud and host firewalls;
+- keep the TURN auth secret outside source control;
+- monitor allocations, bandwidth, packet loss and CPU/network saturation;
+- deploy multiple regions as usage grows.
+
+Validate TURN/TLS before browser testing:
+
+```bash
+./tools/network/check-turn-tls.sh turn.example.com 5349
+```
+
+## Compose secret mounts
+
+The development Compose file supports an optional read-only mount:
+
+```text
+infra/secrets -> /run/desklink-secrets
+```
+
+Example production-style environment values inside that container:
+
+```bash
+DESKLINK_DEVICE_CREDENTIALS_FILE=/run/desklink-secrets/devices.json
+DESKLINK_CONTROLLER_CREDENTIALS_FILE=/run/desklink-secrets/controllers.json
+DESKLINK_REVOKED_DEVICE_IDS_FILE=/run/desklink-secrets/revoked-devices.txt
+```
+
+`infra/secrets/` is gitignored. For a real deployment, prefer Docker/Kubernetes/cloud secret mechanisms and administrator-owned files rather than manually maintaining secrets in the repository checkout.
+
+## Revocation
+
+Configure:
+
+```bash
+DESKLINK_REVOKED_DEVICE_IDS_FILE=/run/desklink-secrets/revoked-devices.txt
+```
+
+Revocation blocks new host/controller credentials and registrations targeting that device, blocks TURN issuance, blocks new signaling toward the target and closes existing signaling sockets on the keepalive recheck. An unreadable configured revocation file fails closed.
+
+## Optional metrics
+
+Set:
+
+```bash
+DESKLINK_METRICS_TOKEN=<random-bearer-token>
+```
+
+Then `GET /metricsz` with `Authorization: Bearer <token>` returns aggregate connection/rate-limit/auth/forwarding counters. It returns 404 when the token is not configured. Do not place the metrics token in a browser build.
+
+## Windows host network settings
+
+Example non-secret settings:
+
+```powershell
+setx /M DESKLINK_SIGNAL_URL "wss://control.example.com/ws"
+setx /M DESKLINK_DEVICE_ID "win-office-01"
+setx /M DESKLINK_SIGNAL_TOKEN_URL "https://control.example.com/api/v1/signal-token"
+setx /M DESKLINK_SIGNAL_TOKEN_REQUIRED "1"
+setx /M DESKLINK_STUN_URL "stun:turn.example.com:3478"
+setx /M DESKLINK_TURN_HOST "turn.example.com"
+setx /M DESKLINK_TURN_PORT "3478"
+setx /M DESKLINK_TURN_TLS_PORT "5349"
+setx /M DESKLINK_TURN_CREDENTIALS_URL "https://control.example.com/api/v1/turn-credentials"
+setx /M DESKLINK_TURN_RUNTIME_REQUIRED "1"
+```
+
+Store durable secrets separately with `desklink-service.exe --store-device-credential` and `--store-access-code`.
 
 ## Regional relay policy
 
-For low latency, route devices to the nearest healthy TURN region. A practical initial layout for East Asia could be:
-
-- Japan/Korea region;
-- North/East China-adjacent region where legally/operationally appropriate;
-- South China/Hong Kong-adjacent region where legally/operationally appropriate;
-- Southeast Asia region.
-
-The exact hosting regions depend on the product's legal, network and user-distribution requirements. Measure real RTT instead of assuming geographic distance equals network distance.
+Route clients to the nearest healthy TURN region based on measured network performance. Useful East Asia coverage may include Japan/Korea, China-adjacent regions where operationally/legal appropriate, Hong Kong/South China-adjacent regions and Southeast Asia. Do not assume geographic distance equals RTT; measure it.
 
 ## Acceptance targets
 
-Use the HUD and `docs/NETWORK_TESTING.md` rather than subjective visual checks. For each route, record:
+For each representative route record:
 
-- selected route: Direct or Relay;
-- relay protocol: UDP/TCP/TLS where observable;
-- RTT, jitter and packet loss;
-- decoded FPS;
-- resolution tier and bitrate behavior;
-- input responsiveness during congestion;
-- time to recover after a network path change.
+- Direct vs Relay;
+- relay protocol UDP/TCP/TLS;
+- RTT/jitter/loss;
+- decoded FPS and actual resolution;
+- bitrate/FPS/resolution adaptation behavior;
+- input responsiveness while bandwidth/loss is constrained;
+- reconnect/ICE-restart recovery time;
+- TURN allocation success and relay saturation.
 
-A relay path is acceptable only if it remains interactive under the target region's real RTT. If TURN/TCP/TLS is functional but consistently sluggish, the fix is usually relay placement/capacity rather than increasing video bitrate.
+Run the matrix in `docs/NETWORK_TESTING.md`. A relay route is acceptable only if it stays interactive under real target-region RTT and loss; increasing video bitrate does not fix a distant or overloaded relay.
