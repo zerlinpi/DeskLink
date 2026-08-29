@@ -1,15 +1,15 @@
 # Windows service and unattended-session architecture
 
-DeskLink builds two Windows executables:
+DeskLink builds two production Windows executables:
 
-- `desklink-agent.exe` — DXGI capture, hardware H.264, WebRTC, authentication refresh, and remote input inside the interactive user session.
-- `desklink-service.exe` — LocalSystem Windows Service responsible for machine/session lifecycle and keeping the user-session Agent alive.
+- `desklink-agent.exe` — DXGI capture, hardware H.264, WebRTC, short-lived authentication refresh, and remote input inside the interactive user session.
+- `desklink-service.exe` — LocalSystem Windows Service responsible for machine/session lifecycle, protected device identity, and keeping the user-session Agent alive.
 
-Keeping these responsibilities separate follows the intended production architecture: the service owns machine/session lifecycle, while capture and UI input stay in the interactive session where Windows desktop APIs work correctly.
+Keeping these responsibilities separate follows the intended production architecture: the Service owns durable machine identity and lifecycle, while capture and UI input stay in the interactive session where Windows desktop APIs work correctly.
 
 ## What this stage supports
 
-After a user has signed in to Windows, the service:
+After a user has signed in to Windows, the Service:
 
 1. detects the active console session;
 2. starts `desklink-agent.exe` in that user session using `WTSQueryUserToken` + `CreateProcessAsUser`;
@@ -19,13 +19,14 @@ After a user has signed in to Windows, the service:
 6. resets the crash backoff after the Agent has stayed up for at least 60 seconds;
 7. gracefully asks the Agent to release remote input and exit before user-session switches or service shutdown;
 8. force-terminates the Agent only if it has not exited within the five-second graceful-shutdown window;
-9. can keep the long-lived device credential encrypted at rest with Windows DPAPI instead of a machine-wide plaintext environment variable.
+9. stores the long-lived device bootstrap credential with machine-scope DPAPI;
+10. owns the long-lived credential at runtime and gives the user-session Agent only short-lived signaling tokens through a local authentication broker.
 
-This removes the need to manually launch a console Agent after each Windows login and avoids a rapid restart storm when capture/driver initialization is persistently failing.
+This removes the need to manually launch a console Agent after each Windows login, avoids restart storms, and keeps the durable device credential out of the ordinary user-session Agent process when DPAPI provisioning is used.
 
 ## Graceful Service -> Agent shutdown
 
-For each Agent launch, the Service creates a unique Windows Event in the global object namespace. The event ACL allows LocalSystem to signal it while authenticated user processes receive only synchronization/wait access.
+For each Agent launch, the Service creates a unique Windows Event in the global object namespace. The event ACL allows LocalSystem to signal it while the user-session Agent receives synchronization/wait access only.
 
 The event name is passed only as a launch argument. It carries no credential, input command, SDP, or other remote-control data.
 
@@ -34,15 +35,16 @@ When the Service needs to stop the Agent:
 1. it signals the Event;
 2. the Agent immediately releases every keyboard key and mouse button currently tracked as injected by DeskLink;
 3. the Agent triggers its existing normal shutdown path;
-4. `WebRtcSession::Stop()` releases input again, closes realtime state, and the process then tears down the encoder, GPU conversion, DXGI capture and Media Foundation normally;
-5. the Service waits up to five seconds;
-6. only if the process is still alive does the Job Object/`TerminateProcess` fallback run.
+4. `WebRtcSession::Stop()` releases input again and closes realtime state;
+5. the process tears down the encoder, GPU conversion, DXGI capture and Media Foundation normally;
+6. the Service waits up to five seconds;
+7. only if the process is still alive does the Job Object/`TerminateProcess` fallback run.
 
 The input-release operation is intentionally idempotent so shutdown races do not leave a remotely pressed modifier or mouse button stuck.
 
 ## DPAPI-protected device credential
 
-The preferred unattended-host configuration no longer stores the long-lived `dc1...` credential in the machine environment.
+The preferred unattended-host configuration does not store the long-lived `dc1...` credential in the machine environment.
 
 From an elevated terminal, run:
 
@@ -58,24 +60,13 @@ The command prompts for the credential with console echo disabled, then stores a
 
 The directory and file DACL are protected so only LocalSystem and the local Administrators group receive full access. The Service uses `CryptProtectData(..., CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN)` with DeskLink-specific optional entropy.
 
-On every Agent launch, the Service:
-
-1. decrypts the credential while running as LocalSystem;
-2. creates the target user's normal environment block;
-3. removes any existing `DESKLINK_DEVICE_CREDENTIAL` entry from that block;
-4. inserts the DPAPI-protected value as the replacement runtime environment entry;
-5. starts the Agent;
-6. wipes the Service's temporary plaintext string and copied environment buffer immediately after `CreateProcessAsUser` returns.
-
-If the DPAPI file exists but cannot be decrypted or validated, the Service fails that Agent launch and enters its normal retry backoff. It does not silently fall back to a potentially stale machine-wide plaintext credential.
-
-To remove the protected value:
+To remove it:
 
 ```powershell
 .\desklink-service.exe --clear-device-credential
 ```
 
-After successfully migrating to DPAPI, remove any old machine-level plaintext credential:
+After migrating to DPAPI, remove any old machine-level plaintext credential:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -87,7 +78,50 @@ After successfully migrating to DPAPI, remove any old machine-level plaintext cr
 
 Then restart the Service.
 
-This is an **at-rest protection milestone**, not the final credential boundary. The user-session Agent still receives the long-lived credential in its process environment because it currently performs the HTTPS short-token exchange itself. A later Service-owned local token broker should keep the long-lived credential entirely inside the privileged Service and give the Agent only short-lived signal/TURN material.
+If the DPAPI file exists but cannot be decrypted or validated, the Service fails that Agent launch and enters its normal retry backoff. It does not silently fall back to a potentially stale machine-wide plaintext credential.
+
+## Service-owned local authentication broker
+
+When a DPAPI credential is present, the long-lived `dc1...` credential remains inside the LocalSystem Service. It is no longer inserted into the Agent environment.
+
+For each Agent launch, the Service creates a unique local Named Pipe and passes only the pipe name to the Agent as a launch argument. The pipe name is an endpoint locator, not a secret credential.
+
+The authentication flow is:
+
+1. the Service decrypts the DPAPI-protected device credential;
+2. it creates the target user's normal environment block and removes any inherited `DESKLINK_DEVICE_CREDENTIAL` entry;
+3. it starts the Agent without the long-lived credential;
+4. the Service starts a local authentication broker bound to that Agent process;
+5. the Agent asks the local broker for a signaling token;
+6. the Service uses the long-lived credential to call the configured HTTPS `/api/v1/signal-token` endpoint;
+7. only the returned short-lived Signal Token and expiry are sent through the Named Pipe to the Agent;
+8. the Agent uses the short-lived token for WebSocket registration and to request temporary TURN credentials.
+
+The Service caches a short-lived Signal Token only while it still has more than 90 seconds of lifetime remaining. This reduces unnecessary backend calls and lets brief backend/network interruptions avoid breaking an otherwise valid reconnect. Cached short tokens and in-memory long credential copies are wiped when the broker stops.
+
+### Broker security boundary
+
+The local authentication Pipe uses multiple independent checks:
+
+- the Pipe is local-only with `PIPE_REJECT_REMOTE_CLIENTS`;
+- the first Pipe instance is created synchronously before broker startup reports success;
+- `FILE_FLAG_FIRST_PIPE_INSTANCE` is used for the initial instance to reject a conflicting pre-existing server instance;
+- the Pipe DACL grants access only to LocalSystem and the exact Windows user SID that owns the launched Agent;
+- after a connection is accepted, `GetNamedPipeClientProcessId` must exactly match the Agent PID recorded by the Service;
+- only the `signal-token` broker command is supported;
+- the long-lived device credential is never returned over the Pipe.
+
+The SID check prevents other Windows users on the same machine from opening the Pipe. The separate PID check prevents another process running as the same user from impersonating the Agent.
+
+The Windows CI contains a runtime broker smoke test that verifies:
+
+- the Pipe is already available when broker startup returns;
+- an authorized client process can communicate with it;
+- unsupported commands are rejected with a structured error;
+- a second process running as the same Windows user but with the wrong PID is rejected;
+- the broker stops cleanly.
+
+Manual/direct Agent launches without the Service broker continue to support the older environment-variable device-credential path for development compatibility. Production unattended hosts should prefer DPAPI + Service broker mode.
 
 ## Important current boundary
 
@@ -103,16 +137,16 @@ Supporting those cases safely requires a separately designed privileged broker/U
 
 ## Build output
 
-The normal Windows CMake build produces both executables in the Release output directory:
+The normal Windows CMake build produces:
 
 ```text
 build/windows-agent/Release/desklink-agent.exe
 build/windows-agent/Release/desklink-service.exe
 ```
 
-Keep both files in the same protected installation directory because the service resolves `desklink-agent.exe` beside its own executable.
+CI also builds an internal `desklink-service-auth-smoke.exe` runtime test executable, but only the Agent and Service are uploaded as normal release artifacts.
 
-A production installer should place them under a directory writable only by administrators, such as `Program Files`.
+Keep the Agent and Service in the same protected installation directory because the Service resolves `desklink-agent.exe` beside its own executable. A production installer should place them under a directory writable only by administrators, such as `Program Files`.
 
 ## Install
 
@@ -129,7 +163,7 @@ Installation uses:
 - LocalSystem service account;
 - restart-on-service-failure policy.
 
-The service attempts to start immediately after installation.
+The Service attempts to start immediately after installation.
 
 ## Uninstall
 
@@ -157,23 +191,32 @@ setx /M DESKLINK_TURN_CREDENTIALS_URL "https://control.example.com/api/v1/turn-c
 setx /M DESKLINK_TURN_RUNTIME_REQUIRED "1"
 ```
 
-`DESKLINK_ACCESS_CODE` is still a secret and remains an environment-variable deployment bridge in the current architecture. The DPAPI work in this stage specifically moves the more durable device bootstrap credential out of plaintext machine environment storage.
+Store the durable device bootstrap credential separately through the elevated Service command instead of `setx /M DESKLINK_DEVICE_CREDENTIAL`.
 
-`DESKLINK_OUTPUT_INDEX` is read by the service and passed to the Agent as its monitor index argument.
+`DESKLINK_ACCESS_CODE` is still a secret and remains an environment-variable deployment bridge in the current architecture. It should eventually move to protected Service-owned configuration or be replaced by the account/session authorization model.
 
-After changing machine environment variables or protected credentials, restart the `DeskLink` service so a newly launched Agent receives the new values.
+`DESKLINK_OUTPUT_INDEX` is read by the Service and passed to the Agent as its monitor index argument.
 
-See `docs/DEVICE_AUTH.md` for provisioning, short-lived signal-token renewal, TURN credentials, and per-device revocation.
+After changing machine environment variables or protected credentials, restart the `DeskLink` Service so newly launched Agent state receives the new configuration.
+
+See `docs/DEVICE_AUTH.md` for device provisioning, short-lived token renewal, TURN credentials and per-device revocation.
 
 ## Security notes
 
 - Protect the installation directory from non-admin writes.
 - Do not embed coturn `static-auth-secret` or any server master secret in either Windows executable.
-- Prefer temporary TURN credentials issued by the authenticated signaling/backend flow.
-- Do not log registration tokens, TURN passwords, device credentials, or remote-control access codes.
-- The service launches the Agent as the signed-in user rather than LocalSystem. This is intentional.
-- DPAPI machine scope protects the credential at rest together with the file ACL; local administrators and SYSTEM remain within the machine trust boundary.
+- Do not log registration tokens, TURN passwords, device credentials or remote-control access codes.
+- The Service launches the capture/input Agent as the signed-in user rather than LocalSystem. This is intentional.
+- DPAPI machine scope protects the durable credential at rest together with the file ACL; local Administrators and SYSTEM remain inside the machine trust boundary.
+- The Service broker narrows runtime exposure: the ordinary Agent receives short-lived Signal/TURN material, not the long-lived `dc1` credential.
 
-## Next Windows service milestone
+## Next Windows service milestones
 
-The next security milestone is a Service-owned local authentication broker so the long-lived device credential never enters the user-session Agent at all. After that, a separately scoped privileged broker/UIAccess path can address operations that genuinely require elevation. Secure Desktop/UAC support should be added only after that trust boundary is explicit, signed, and auditable.
+The next Windows security milestones are:
+
+1. replace the deterministic HMAC `dc1` bootstrap model with a real per-device registry and independently rotatable keys;
+2. move the remaining unattended access-code secret out of plaintext machine environment configuration;
+3. add installer/code-signing hardening;
+4. design a narrowly scoped privileged broker/UIAccess path for operations that genuinely require elevation.
+
+Secure Desktop/UAC and Windows logon-screen support should be added only after that privileged trust boundary is explicit, signed and auditable.
