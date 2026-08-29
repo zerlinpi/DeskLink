@@ -27,7 +27,7 @@ std::string WideToUtf8(const wchar_t* text) {
       nullptr);
   if (required <= 1) return {};
 
-  std::string result(static_cast<size_t>(required - 1), '\0');
+  std::string result(static_cast<size_t>(required), '\0');
   if (WideCharToMultiByte(
           CP_UTF8,
           WC_ERR_INVALID_CHARS,
@@ -39,6 +39,7 @@ std::string WideToUtf8(const wchar_t* text) {
           nullptr) <= 0) {
     return {};
   }
+  result.resize(static_cast<size_t>(required - 1));
   return result;
 }
 
