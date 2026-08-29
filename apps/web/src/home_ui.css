@@ -1,0 +1,265 @@
+/* Product-facing connection page. Remote-session layout remains owned by styles.css. */
+body:not(.remote-session-active) .shell {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 30px clamp(16px, 4vw, 48px) 36px;
+  gap: 22px;
+}
+
+body:not(.remote-session-active) header {
+  min-height: 54px;
+  padding: 0 4px;
+}
+
+body:not(.remote-session-active) header > div {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+body:not(.remote-session-active) header strong {
+  position: relative;
+  padding-left: 18px;
+  font-size: 24px;
+  font-weight: 760;
+  letter-spacing: -.035em;
+}
+
+body:not(.remote-session-active) header strong::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 9px;
+  height: 24px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  background: linear-gradient(180deg, #8e9aff, #6171ff);
+  box-shadow: 0 0 24px rgba(99, 113, 255, .45);
+}
+
+body:not(.remote-session-active) header > div > span {
+  color: #7f8ba2;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+body:not(.remote-session-active) .status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 12px;
+  border-color: rgba(139, 151, 179, .16);
+  background: rgba(13, 18, 29, .7);
+  color: #aeb8ca;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+}
+
+body:not(.remote-session-active) .status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #69758b;
+  box-shadow: 0 0 0 3px rgba(105, 117, 139, .1);
+}
+
+body:not(.remote-session-active) .status[data-state="busy"]::before {
+  background: #f0aa45;
+  box-shadow: 0 0 0 3px rgba(240, 170, 69, .12);
+}
+
+body:not(.remote-session-active) .status[data-state="ready"]::before {
+  background: #43d17d;
+  box-shadow: 0 0 0 3px rgba(67, 209, 125, .12);
+}
+
+body:not(.remote-session-active) .connect-card {
+  position: relative;
+  width: min(760px, 100%);
+  margin: clamp(18px, 5vh, 62px) auto 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 72px 24px 22px;
+  border: 1px solid rgba(129, 140, 248, .2);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(21, 28, 43, .9), rgba(11, 16, 26, .84)),
+    rgba(11, 16, 26, .85);
+  box-shadow:
+    0 28px 90px rgba(0, 0, 0, .28),
+    inset 0 1px 0 rgba(255, 255, 255, .04);
+  backdrop-filter: blur(24px) saturate(125%);
+}
+
+body:not(.remote-session-active) .connect-card::before {
+  content: "连接远程设备";
+  position: absolute;
+  top: 22px;
+  left: 24px;
+  color: #f7f9fd;
+  font-size: 20px;
+  font-weight: 720;
+  letter-spacing: -.025em;
+}
+
+body:not(.remote-session-active) .connect-card::after {
+  content: "优先 Direct P2P · 无法穿透时自动 TURN 中继";
+  grid-column: 1 / -1;
+  justify-self: center;
+  padding-top: 3px;
+  color: #647189;
+  font-size: 11px;
+  letter-spacing: .01em;
+}
+
+body:not(.remote-session-active) .connect-card[data-auth-mode="simple"] input[data-role="target-device"],
+body:not(.remote-session-active) .connect-card[data-auth-mode="simple"] input[data-role="access-code"] {
+  grid-column: span 1;
+}
+
+body:not(.remote-session-active) .connect-card input {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-color: rgba(109, 124, 154, .28);
+  border-radius: 12px;
+  background: rgba(5, 9, 16, .62);
+  color: #f7f9fc;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .02);
+}
+
+body:not(.remote-session-active) .connect-card input::placeholder {
+  color: #657188;
+}
+
+body:not(.remote-session-active) .connect-card input:hover {
+  border-color: rgba(122, 137, 170, .42);
+  background: rgba(8, 13, 22, .76);
+}
+
+body:not(.remote-session-active) .connect-card input:focus {
+  border-color: rgba(113, 128, 255, .9);
+  background: rgba(9, 14, 24, .9);
+  box-shadow: 0 0 0 3px rgba(105, 120, 255, .13);
+}
+
+body:not(.remote-session-active) .connect-card > button:not(.recent-device-chip):not(.recent-devices-clear) {
+  grid-column: 1 / -1;
+  min-height: 50px;
+  margin-top: 2px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #7f8bff 0%, #5f70f2 52%, #5667e9 100%);
+  box-shadow: 0 12px 28px rgba(83, 101, 224, .22);
+  font-size: 14px;
+  font-weight: 720;
+  letter-spacing: .01em;
+}
+
+body:not(.remote-session-active) .connect-card > button.is-disconnect {
+  background: rgba(239, 68, 68, .13);
+  color: #ffc4c4;
+  box-shadow: none;
+  outline: 1px solid rgba(239, 68, 68, .18);
+}
+
+body:not(.remote-session-active) .recent-devices {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+body:not(.remote-session-active) .recent-devices-label {
+  margin-right: 2px;
+  color: #748198;
+  font-size: 11px;
+}
+
+body:not(.remote-session-active) .recent-device-chip,
+body:not(.remote-session-active) .recent-devices-clear {
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid rgba(125, 139, 168, .18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .04);
+  color: #aeb8ca;
+  font-size: 11px;
+  font-weight: 580;
+  box-shadow: none;
+}
+
+body:not(.remote-session-active) .recent-device-chip:hover,
+body:not(.remote-session-active) .recent-devices-clear:hover {
+  border-color: rgba(129, 140, 248, .32);
+  background: rgba(129, 140, 248, .1);
+  filter: none;
+}
+
+body:not(.remote-session-active) .recent-devices-clear {
+  color: #758198;
+}
+
+body:not(.remote-session-active) .stage {
+  width: min(980px, 100%);
+  min-height: clamp(300px, 40vh, 500px);
+  margin: 0 auto;
+  border-color: rgba(93, 107, 136, .16);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 50% 43%, rgba(86, 102, 146, .13), transparent 34%),
+    linear-gradient(180deg, rgba(7, 11, 18, .82), rgba(3, 6, 11, .94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .02);
+}
+
+body:not(.remote-session-active) .empty {
+  max-width: 560px;
+  color: #68758b;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+@media (max-width: 760px) {
+  body:not(.remote-session-active) .shell {
+    padding: 18px 12px 22px;
+    gap: 14px;
+  }
+
+  body:not(.remote-session-active) header {
+    align-items: flex-start;
+  }
+
+  body:not(.remote-session-active) header > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  body:not(.remote-session-active) .connect-card {
+    margin-top: 16px;
+    grid-template-columns: 1fr;
+    padding: 68px 14px 16px;
+    border-radius: 18px;
+  }
+
+  body:not(.remote-session-active) .connect-card::before {
+    left: 16px;
+    top: 20px;
+  }
+
+  body:not(.remote-session-active) .connect-card input,
+  body:not(.remote-session-active) .connect-card > button,
+  body:not(.remote-session-active) .connect-card[data-auth-mode="simple"] input[data-role="target-device"],
+  body:not(.remote-session-active) .connect-card[data-auth-mode="simple"] input[data-role="access-code"] {
+    grid-column: 1;
+  }
+
+  body:not(.remote-session-active) .stage {
+    min-height: 46vh;
+    border-radius: 18px;
+  }
+}
