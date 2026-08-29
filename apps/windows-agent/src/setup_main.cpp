@@ -1,6 +1,9 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -30,9 +33,14 @@ constexpr int kDeviceCredential = 1009;
 constexpr int kInstallButton = 1010;
 constexpr int kRefreshButton = 1011;
 constexpr int kStatusText = 1012;
+constexpr int kDiagnoseButton = 1013;
+constexpr int kDiagnosticText = 1014;
+constexpr int kCopyDeviceButton = 1015;
+constexpr int kCopyDiagnosticsButton = 1016;
 
 HFONT g_font = nullptr;
 HFONT g_title_font = nullptr;
+std::wstring g_last_diagnostics;
 
 std::wstring LastErrorMessage(DWORD code) {
   wchar_t* raw = nullptr;
@@ -81,8 +89,6 @@ std::wstring GetControlText(HWND parent, int id) {
   const int length = GetWindowTextLengthW(control);
   if (length <= 0) return {};
 
-  // GetWindowTextW writes a trailing NUL. Keep one extra wchar in the mutable
-  // buffer, then shrink the std::wstring back to the exact user-entered length.
   std::wstring text(static_cast<size_t>(length) + 1, L'\0');
   const int copied = GetWindowTextW(control, text.data(), length + 1);
   if (copied <= 0) return {};
@@ -127,6 +133,227 @@ std::wstring DefaultDeviceId() {
     return id;
   }
   return L"windows-host";
+}
+
+std::wstring SignalHealthUrl(const std::wstring& signal_url) {
+  std::wstring health;
+  if (StartsWith(signal_url, L"wss://")) {
+    health = L"https://" + signal_url.substr(6);
+  } else if (StartsWith(signal_url, L"ws://")) {
+    health = L"http://" + signal_url.substr(5);
+  } else {
+    return {};
+  }
+
+  const size_t scheme = health.find(L"://");
+  const size_t authority_start = scheme == std::wstring::npos ? 0 : scheme + 3;
+  const size_t path = health.find(L'/', authority_start);
+  if (path == std::wstring::npos) return health + L"/healthz";
+  return health.substr(0, path) + L"/healthz";
+}
+
+bool HttpHealthCheck(const std::wstring& url, std::wstring* detail) {
+  URL_COMPONENTSW components{};
+  components.dwStructSize = sizeof(components);
+  components.dwHostNameLength = static_cast<DWORD>(-1);
+  components.dwUrlPathLength = static_cast<DWORD>(-1);
+  components.dwExtraInfoLength = static_cast<DWORD>(-1);
+  if (!WinHttpCrackUrl(url.c_str(), 0, 0, &components)) {
+    if (detail) *detail = L"无法解析健康检查地址：" + LastErrorMessage(GetLastError());
+    return false;
+  }
+
+  const std::wstring host(components.lpszHostName, components.dwHostNameLength);
+  std::wstring path = components.dwUrlPathLength > 0
+      ? std::wstring(components.lpszUrlPath, components.dwUrlPathLength)
+      : L"/healthz";
+  if (components.dwExtraInfoLength > 0) {
+    path.append(components.lpszExtraInfo, components.dwExtraInfoLength);
+  }
+
+  HINTERNET session = WinHttpOpen(
+      L"DeskLink Diagnostics/1.0",
+      WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+      WINHTTP_NO_PROXY_NAME,
+      WINHTTP_NO_PROXY_BYPASS,
+      0);
+  if (!session) {
+    if (detail) *detail = L"WinHTTP 初始化失败：" + LastErrorMessage(GetLastError());
+    return false;
+  }
+  WinHttpSetTimeouts(session, 2500, 2500, 2500, 3500);
+
+  HINTERNET connection = WinHttpConnect(session, host.c_str(), components.nPort, 0);
+  if (!connection) {
+    if (detail) *detail = L"无法连接 Signal 主机：" + LastErrorMessage(GetLastError());
+    WinHttpCloseHandle(session);
+    return false;
+  }
+
+  const DWORD request_flags = components.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+  HINTERNET request = WinHttpOpenRequest(
+      connection,
+      L"GET",
+      path.c_str(),
+      nullptr,
+      WINHTTP_NO_REFERER,
+      WINHTTP_DEFAULT_ACCEPT_TYPES,
+      request_flags);
+  if (!request) {
+    if (detail) *detail = L"无法创建健康检查请求：" + LastErrorMessage(GetLastError());
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return false;
+  }
+
+  bool ok = false;
+  if (WinHttpSendRequest(
+          request,
+          WINHTTP_NO_ADDITIONAL_HEADERS,
+          0,
+          WINHTTP_NO_REQUEST_DATA,
+          0,
+          0,
+          0) &&
+      WinHttpReceiveResponse(request, nullptr)) {
+    DWORD status = 0;
+    DWORD status_size = sizeof(status);
+    if (WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX,
+            &status,
+            &status_size,
+            WINHTTP_NO_HEADER_INDEX)) {
+      ok = status >= 200 && status < 300;
+      if (detail) *detail = L"HTTP " + std::to_wstring(status) + L" · " + url;
+    }
+  } else if (detail) {
+    *detail = L"Signal 健康检查失败：" + LastErrorMessage(GetLastError());
+  }
+
+  WinHttpCloseHandle(request);
+  WinHttpCloseHandle(connection);
+  WinHttpCloseHandle(session);
+  return ok;
+}
+
+bool TestTcpEndpoint(
+    const std::wstring& host,
+    const std::wstring& port,
+    std::wstring* detail) {
+  WSADATA winsock{};
+  if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0) {
+    if (detail) *detail = L"Winsock 初始化失败";
+    return false;
+  }
+
+  ADDRINFOW hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  ADDRINFOW* addresses = nullptr;
+  const int resolve = GetAddrInfoW(host.c_str(), port.c_str(), &hints, &addresses);
+  if (resolve != 0 || !addresses) {
+    if (detail) *detail = L"TURN 主机 DNS 解析失败（" + std::to_wstring(resolve) + L"）";
+    WSACleanup();
+    return false;
+  }
+
+  bool connected = false;
+  int last_error = 0;
+  for (ADDRINFOW* address = addresses; address && !connected; address = address->ai_next) {
+    SOCKET socket_handle = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+    if (socket_handle == INVALID_SOCKET) {
+      last_error = WSAGetLastError();
+      continue;
+    }
+
+    u_long nonblocking = 1;
+    if (ioctlsocket(socket_handle, FIONBIO, &nonblocking) != 0) {
+      last_error = WSAGetLastError();
+      closesocket(socket_handle);
+      continue;
+    }
+
+    const int connect_result = connect(
+        socket_handle,
+        address->ai_addr,
+        static_cast<int>(address->ai_addrlen));
+    if (connect_result == 0) {
+      connected = true;
+    } else {
+      last_error = WSAGetLastError();
+      if (last_error == WSAEWOULDBLOCK || last_error == WSAEINPROGRESS) {
+        fd_set writable;
+        fd_set failed;
+        FD_ZERO(&writable);
+        FD_ZERO(&failed);
+        FD_SET(socket_handle, &writable);
+        FD_SET(socket_handle, &failed);
+        timeval timeout{};
+        timeout.tv_sec = 2;
+        const int selected = select(0, nullptr, &writable, &failed, &timeout);
+        if (selected > 0 && FD_ISSET(socket_handle, &writable)) {
+          int socket_error = 0;
+          int socket_error_size = sizeof(socket_error);
+          if (getsockopt(
+                  socket_handle,
+                  SOL_SOCKET,
+                  SO_ERROR,
+                  reinterpret_cast<char*>(&socket_error),
+                  &socket_error_size) == 0 &&
+              socket_error == 0) {
+            connected = true;
+          } else {
+            last_error = socket_error;
+          }
+        } else if (selected == 0) {
+          last_error = WSAETIMEDOUT;
+        } else if (selected == SOCKET_ERROR) {
+          last_error = WSAGetLastError();
+        }
+      }
+    }
+    closesocket(socket_handle);
+  }
+
+  FreeAddrInfoW(addresses);
+  WSACleanup();
+  if (detail) {
+    if (connected) {
+      *detail = host + L":" + port + L" TCP 可达";
+    } else {
+      *detail = host + L":" + port + L" TCP 不可达（Winsock " + std::to_wstring(last_error) + L"）";
+    }
+  }
+  return connected;
+}
+
+bool CopyTextToClipboard(HWND window, const std::wstring& text) {
+  if (text.empty() || !OpenClipboard(window)) return false;
+  EmptyClipboard();
+  const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+  HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+  if (!memory) {
+    CloseClipboard();
+    return false;
+  }
+  void* destination = GlobalLock(memory);
+  if (!destination) {
+    GlobalFree(memory);
+    CloseClipboard();
+    return false;
+  }
+  memcpy(destination, text.c_str(), bytes);
+  GlobalUnlock(memory);
+  if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+    GlobalFree(memory);
+    CloseClipboard();
+    return false;
+  }
+  CloseClipboard();
+  return true;
 }
 
 bool SamePath(const std::filesystem::path& left, const std::filesystem::path& right) {
@@ -419,6 +646,121 @@ bool HasProtectedDeviceCredential() {
   return status == desklink::ProtectedCredentialStatus::Loaded;
 }
 
+void RunDiagnostics(HWND window) {
+  EnableWindow(GetDlgItem(window, kDiagnoseButton), FALSE);
+  SetControlText(window, kDiagnosticText, L"正在检查 Signal、Service 和 TURN…");
+  UpdateWindow(window);
+
+  int failures = 0;
+  int warnings = 0;
+  std::wstring report = L"DeskLink 连接诊断\r\n";
+  report += L"----------------------------------------\r\n";
+  auto pass = [&](const std::wstring& message) { report += L"[通过] " + message + L"\r\n"; };
+  auto warn = [&](const std::wstring& message) {
+    ++warnings;
+    report += L"[警告] " + message + L"\r\n";
+  };
+  auto fail = [&](const std::wstring& message) {
+    ++failures;
+    report += L"[失败] " + message + L"\r\n";
+  };
+
+  const std::wstring signal_url = GetControlText(window, kSignalUrl);
+  const std::wstring device_id = GetControlText(window, kDeviceId);
+  const std::wstring stun_url = GetControlText(window, kStunUrl);
+  const std::wstring turn_host = GetControlText(window, kTurnHost);
+  const std::wstring turn_port = GetControlText(window, kTurnPort).empty()
+      ? L"3478"
+      : GetControlText(window, kTurnPort);
+  const std::wstring signal_token_url = GetControlText(window, kSignalTokenUrl);
+  const std::wstring turn_credentials_url = GetControlText(window, kTurnCredentialsUrl);
+
+  DWORD service_state = 0;
+  if (QueryServiceState(&service_state) && service_state == SERVICE_RUNNING) {
+    pass(L"Windows Service 正在运行");
+  } else if (service_state == SERVICE_STOPPED) {
+    fail(L"Windows Service 已安装但未运行");
+  } else {
+    fail(L"Windows Service 未安装或状态不可用");
+  }
+
+  if (ValidDeviceId(device_id)) {
+    pass(L"设备 ID 格式正确：" + device_id);
+  } else {
+    fail(L"设备 ID 格式不正确");
+  }
+
+  if (HasProtectedAccessCode()) {
+    pass(L"无人值守访问码已使用 DPAPI 保存");
+  } else {
+    warn(L"没有检测到已保存的访问码；首次安装前需要设置");
+  }
+
+  if (StartsWith(signal_url, L"ws://") || StartsWith(signal_url, L"wss://")) {
+    const std::wstring health_url = SignalHealthUrl(signal_url);
+    std::wstring health_detail;
+    if (!health_url.empty() && HttpHealthCheck(health_url, &health_detail)) {
+      pass(L"Signal 服务可达：" + health_detail);
+    } else {
+      fail(health_detail.empty() ? L"Signal 服务健康检查失败" : health_detail);
+    }
+    if (StartsWith(signal_url, L"ws://") && signal_url.find(L"localhost") == std::wstring::npos &&
+        signal_url.find(L"127.0.0.1") == std::wstring::npos) {
+      warn(L"公网 Signal 使用 ws://，建议生产环境改为 wss://");
+    }
+  } else {
+    fail(L"Signal 地址必须以 ws:// 或 wss:// 开头");
+  }
+
+  if (stun_url.empty()) {
+    warn(L"未配置 STUN；跨公网直连成功率会降低");
+  } else if (StartsWith(stun_url, L"stun:") || StartsWith(stun_url, L"stuns:")) {
+    pass(L"STUN 地址格式已配置");
+  } else {
+    warn(L"STUN 地址格式异常，应以 stun: 或 stuns: 开头");
+  }
+
+  if (turn_host.empty()) {
+    warn(L"未配置 TURN；复杂 NAT/企业网络下可能无法建立远程连接");
+  } else {
+    std::wstring turn_detail;
+    if (TestTcpEndpoint(turn_host, turn_port, &turn_detail)) {
+      pass(L"TURN TCP 探测成功：" + turn_detail);
+    } else {
+      warn(turn_detail + L"；UDP/TLS TURN 仍需由服务端和防火墙单独确认");
+    }
+  }
+
+  if (!signal_token_url.empty()) {
+    if (HasProtectedDeviceCredential()) {
+      pass(L"Signal Token 模式已检测到加密设备凭证");
+    } else {
+      fail(L"启用了 Signal Token 接口，但没有检测到 dc2 设备凭证");
+    }
+  }
+  if (!turn_credentials_url.empty()) {
+    pass(L"已配置短期 TURN 凭证接口");
+  } else if (!turn_host.empty()) {
+    warn(L"TURN 已配置但没有短期凭证接口；生产环境建议启用动态 TURN 凭证");
+  }
+
+  report += L"----------------------------------------\r\n";
+  if (failures == 0 && warnings == 0) {
+    report += L"结论：配置完整，基础连接检查全部通过。\r\n";
+  } else if (failures == 0) {
+    report += L"结论：没有阻断项，但有 " + std::to_wstring(warnings) + L" 项建议优化。\r\n";
+  } else {
+    report += L"结论：发现 " + std::to_wstring(failures) + L" 个阻断项、" +
+              std::to_wstring(warnings) + L" 个警告项。优先修复 [失败] 项。\r\n";
+  }
+
+  g_last_diagnostics = report;
+  SetControlText(window, kDiagnosticText, report);
+  EnableWindow(GetDlgItem(window, kCopyDiagnosticsButton), TRUE);
+  EnableWindow(GetDlgItem(window, kDiagnoseButton), TRUE);
+  UpdateStatus(window, failures == 0 ? L"诊断完成" : L"诊断发现问题");
+}
+
 void InstallOrUpdate(HWND window) {
   std::wstring signal_url = GetControlText(window, kSignalUrl);
   std::wstring device_id = GetControlText(window, kDeviceId);
@@ -545,11 +887,12 @@ void InstallOrUpdate(HWND window) {
   cleanup();
   EnableWindow(GetDlgItem(window, kInstallButton), TRUE);
   UpdateStatus(window, L"配置已应用");
+  RunDiagnostics(window);
   MessageBoxW(
       window,
       L"DeskLink Windows 主机已安装并启动。\n\n"
       L"设备 ID 已配置；访问码已使用 Windows DPAPI 加密保存。\n"
-      L"现在可以在 Web 控制端输入设备 ID 和访问码发起连接。",
+      L"下方连接诊断会检查 Signal / TURN / Service 状态。",
       L"DeskLink 设置完成",
       MB_OK | MB_ICONINFORMATION);
 }
@@ -600,6 +943,24 @@ HWND AddEdit(
   return edit;
 }
 
+HWND AddButton(HWND window, int id, const wchar_t* text, int x, int y, int width, bool primary = false) {
+  HWND button = CreateWindowExW(
+      0,
+      L"BUTTON",
+      text,
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | (primary ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON),
+      x,
+      y,
+      width,
+      38,
+      window,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+      nullptr,
+      nullptr);
+  SendMessageW(button, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+  return button;
+}
+
 void Prefill(HWND window) {
   const auto environment = ReadServiceEnvironment();
   auto from_env = [&](const wchar_t* key, const wchar_t* fallback) {
@@ -629,17 +990,17 @@ void CreateControls(HWND window) {
 
   HWND title = CreateWindowExW(
       0, L"STATIC", L"DeskLink Windows 主机", WS_CHILD | WS_VISIBLE,
-      28, 22, 620, 34, window, nullptr, nullptr, nullptr);
+      28, 22, 650, 34, window, nullptr, nullptr, nullptr);
   SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(g_title_font), TRUE);
 
   HWND subtitle = CreateWindowExW(
       0,
       L"STATIC",
-      L"配置被控端连接参数、无人值守访问码并安装后台服务。配置更新后无需重启 Windows。",
+      L"配置被控端并一键检查 Signal、TURN 与 Windows Service。配置更新后无需重启 Windows。",
       WS_CHILD | WS_VISIBLE,
       30,
       60,
-      630,
+      660,
       38,
       window,
       nullptr,
@@ -650,7 +1011,7 @@ void CreateControls(HWND window) {
   int y = 112;
   constexpr int label_x = 30;
   constexpr int edit_x = 190;
-  constexpr int edit_width = 455;
+  constexpr int edit_width = 490;
   constexpr int row = 46;
 
   AddLabel(window, L"信令服务器 *", label_x, y + 5, 150);
@@ -666,8 +1027,8 @@ void CreateControls(HWND window) {
   AddEdit(window, kStunUrl, edit_x, y, edit_width, L"例如 stun:turn.example.com:3478");
   y += row;
   AddLabel(window, L"TURN 主机", label_x, y + 5, 150);
-  AddEdit(window, kTurnHost, edit_x, y, 340, L"例如 turn.example.com");
-  AddEdit(window, kTurnPort, 540, y, 105, L"3478");
+  AddEdit(window, kTurnHost, edit_x, y, 370, L"例如 turn.example.com");
+  AddEdit(window, kTurnPort, 570, y, 110, L"3478");
   y += row;
   AddLabel(window, L"信令令牌接口", label_x, y + 5, 150);
   AddEdit(window, kSignalTokenUrl, edit_x, y, edit_width, L"可选：https://.../api/v1/signal-token");
@@ -681,11 +1042,11 @@ void CreateControls(HWND window) {
   HWND hint = CreateWindowExW(
       0,
       L"STATIC",
-      L"提示：公网使用需先部署 DeskLink Signal/TURN。正式环境建议使用 WSS、短期 TURN 凭证和 dc2 设备凭证。",
+      L"建议：安装后先点击“连接诊断”。公网环境应配置 WSS + STUN + TURN；正式环境再启用短期凭证接口。",
       WS_CHILD | WS_VISIBLE,
       30,
       y + 48,
-      615,
+      650,
       42,
       window,
       nullptr,
@@ -693,35 +1054,13 @@ void CreateControls(HWND window) {
       nullptr);
   SendMessageW(hint, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
 
-  HWND install = CreateWindowExW(
-      0,
-      L"BUTTON",
-      L"安装 / 更新并启动",
-      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-      30,
-      y + 100,
-      210,
-      38,
-      window,
-      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kInstallButton)),
-      nullptr,
-      nullptr);
-  SendMessageW(install, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
-
-  HWND refresh = CreateWindowExW(
-      0,
-      L"BUTTON",
-      L"刷新服务状态",
-      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-      250,
-      y + 100,
-      150,
-      38,
-      window,
-      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRefreshButton)),
-      nullptr,
-      nullptr);
-  SendMessageW(refresh, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+  const int action_y = y + 100;
+  AddButton(window, kInstallButton, L"安装 / 更新并启动", 30, action_y, 190, true);
+  AddButton(window, kDiagnoseButton, L"连接诊断", 230, action_y, 110);
+  AddButton(window, kCopyDeviceButton, L"复制设备 ID", 350, action_y, 120);
+  AddButton(window, kRefreshButton, L"刷新状态", 480, action_y, 100);
+  HWND copy_diagnostics = AddButton(window, kCopyDiagnosticsButton, L"复制诊断", 590, action_y, 90);
+  EnableWindow(copy_diagnostics, FALSE);
 
   HWND status = CreateWindowExW(
       0,
@@ -730,13 +1069,28 @@ void CreateControls(HWND window) {
       WS_CHILD | WS_VISIBLE,
       30,
       y + 153,
-      615,
+      650,
       26,
       window,
       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatusText)),
       nullptr,
       nullptr);
   SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+
+  HWND diagnostic = CreateWindowExW(
+      WS_EX_CLIENTEDGE,
+      L"EDIT",
+      L"点击“连接诊断”检查当前配置。不会上传访问码或设备凭证。",
+      WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+      30,
+      y + 183,
+      650,
+      150,
+      window,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDiagnosticText)),
+      nullptr,
+      nullptr);
+  SendMessageW(diagnostic, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
 
   Prefill(window);
 }
@@ -750,6 +1104,28 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w_param, LPARAM l_
       switch (LOWORD(w_param)) {
         case kInstallButton:
           if (HIWORD(w_param) == BN_CLICKED) InstallOrUpdate(window);
+          return 0;
+        case kDiagnoseButton:
+          if (HIWORD(w_param) == BN_CLICKED) RunDiagnostics(window);
+          return 0;
+        case kCopyDeviceButton:
+          if (HIWORD(w_param) == BN_CLICKED) {
+            const std::wstring device_id = GetControlText(window, kDeviceId);
+            if (CopyTextToClipboard(window, device_id)) {
+              UpdateStatus(window, L"设备 ID 已复制");
+            } else {
+              ShowError(window, L"复制设备 ID 失败。");
+            }
+          }
+          return 0;
+        case kCopyDiagnosticsButton:
+          if (HIWORD(w_param) == BN_CLICKED && !g_last_diagnostics.empty()) {
+            if (CopyTextToClipboard(window, g_last_diagnostics)) {
+              UpdateStatus(window, L"诊断报告已复制");
+            } else {
+              ShowError(window, L"复制诊断报告失败。");
+            }
+          }
           return 0;
         case kRefreshButton:
           if (HIWORD(w_param) == BN_CLICKED) UpdateStatus(window);
@@ -791,12 +1167,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
   HWND window = CreateWindowExW(
       0,
       kWindowClass,
-      L"DeskLink 设置",
+      L"DeskLink 设置与诊断",
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
       CW_USEDEFAULT,
       CW_USEDEFAULT,
-      700,
-      690,
+      730,
+      850,
       nullptr,
       nullptr,
       instance,
