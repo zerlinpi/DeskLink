@@ -61,6 +61,8 @@ class H264Encoder {
   uint32_t bitrate_bps_{0};
   uint64_t frame_duration100ns_{0};
   std::vector<uint8_t> sequence_header_;
+  uint8_t nal_length_size_{4};
+  bool access_units_length_prefixed_{false};
   std::wstring encoder_name_;
 };
 
