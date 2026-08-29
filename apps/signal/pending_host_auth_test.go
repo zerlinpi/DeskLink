@@ -81,3 +81,33 @@ func TestPendingHostAuthQueueCopiesPayload(t *testing.T) {
 		t.Fatalf("queue must own an immutable payload copy, got %q", entries[0].payload)
 	}
 }
+
+func TestHostAuthDispatchGuardSuppressesSameConnectionDuplicate(t *testing.T) {
+	guard := newHostAuthDispatchGuard()
+	now := time.Unix(1_700_000_000, 0)
+	source := &peer{id: "controller-a"}
+
+	if !guard.claim("host-a", source, "session-a", now) {
+		t.Fatal("first dispatch should be claimed")
+	}
+	if guard.claim("host-a", source, "session-a", now.Add(time.Second)) {
+		t.Fatal("same connection/session should be suppressed within dedupe TTL")
+	}
+	if !guard.claim("host-a", source, "session-a", now.Add(hostAuthDispatchDedupeTTL+time.Millisecond)) {
+		t.Fatal("dispatch should be allowed again after dedupe TTL")
+	}
+}
+
+func TestHostAuthDispatchGuardAllowsReconnectedController(t *testing.T) {
+	guard := newHostAuthDispatchGuard()
+	now := time.Unix(1_700_000_000, 0)
+	oldConnection := &peer{id: "controller-a"}
+	newConnection := &peer{id: "controller-a"}
+
+	if !guard.claim("host-a", oldConnection, "session-a", now) {
+		t.Fatal("first dispatch should be claimed")
+	}
+	if !guard.claim("host-a", newConnection, "session-a", now.Add(time.Second)) {
+		t.Fatal("a new controller connection must not inherit the old connection dedupe window")
+	}
+}
