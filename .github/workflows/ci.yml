@@ -11,7 +11,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      signal: ${{ steps.filter.outputs.signal }}
+      web: ${{ steps.filter.outputs.web }}
+      repo: ${{ steps.filter.outputs.repo }}
+      windows: ${{ steps.filter.outputs.windows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        name: Detect affected components
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          head="${{ github.sha }}"
+
+          all=false
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            all=true
+            changed=""
+          else
+            changed="$(git diff --name-only "$base" "$head")"
+          fi
+
+          affected() {
+            local pattern="$1"
+            if [[ "$all" == "true" ]]; then
+              return 0
+            fi
+            grep -Eq "$pattern" <<<"$changed"
+          }
+
+          signal=false
+          web=false
+          repo=false
+          windows=false
+
+          affected '^(apps/signal/|tools/auth/|packages/protocol/|infra/docker-compose\.yml$|\.github/workflows/ci\.yml$)' && signal=true
+          affected '^(apps/web/|tools/auth/verify-access-proof-vector\.mjs$|packages/protocol/|\.github/workflows/ci\.yml$)' && web=true
+          affected '^(tools/network/|infra/|\.github/workflows/ci\.yml$)' && repo=true
+          affected '^(apps/windows-agent/|tools/auth/verify-access-proof-vector\.mjs$|packages/protocol/|\.github/workflows/ci\.yml$)' && windows=true
+
+          echo "signal=$signal" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
+
+          printf 'Changed files:\n%s\n' "${changed:-<all components>}"
+          printf 'Affected: signal=%s web=%s repo=%s windows=%s\n' "$signal" "$web" "$repo" "$windows"
+
   signal:
+    needs: changes
+    if: needs.changes.outputs.signal == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -75,6 +135,8 @@ jobs:
           fi
 
   web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -90,6 +152,8 @@ jobs:
       - run: npm run build
 
   repo-checks:
+    needs: changes
+    if: needs.changes.outputs.repo == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,6 +165,8 @@ jobs:
         run: docker compose -f infra/docker-compose.yml config >/dev/null
 
   windows-agent:
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
