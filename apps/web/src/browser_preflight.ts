@@ -60,9 +60,15 @@ function shouldBlockConnect(target: EventTarget | null) {
   return true;
 }
 
+function isConnectButton(button: HTMLButtonElement) {
+  if (button.dataset.connectionAction) return button.dataset.connectionAction === "connect";
+  const text = button.textContent?.trim();
+  return text === "Connect" || text === "连接设备";
+}
+
 document.addEventListener("click", (event) => {
   const button = (event.target as Element | null)?.closest<HTMLButtonElement>(".connect-card button");
-  if (!button || button.textContent?.trim() !== "Connect" || !shouldBlockConnect(button)) return;
+  if (!button || !isConnectButton(button) || !shouldBlockConnect(button)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   renderNotice();
@@ -70,6 +76,9 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || !shouldBlockConnect(event.target)) return;
+  const card = (event.target as Element | null)?.closest<HTMLElement>(".connect-card");
+  const primary = card?.querySelector<HTMLButtonElement>('button[data-connection-action="connect"]');
+  if (!primary && capability.blocking.length === 0) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   renderNotice();
