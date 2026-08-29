@@ -740,6 +740,16 @@ function App() {
       return;
     }
 
+    if (msg.type === "device-revoked") {
+      const revokedTarget = typeof msg.target === "string" ? msg.target : "";
+      if (revokedTarget && revokedTarget !== targetId.trim()) {
+        console.debug("DeskLink ignored device-revoked for unexpected target", revokedTarget);
+        return;
+      }
+      disconnect("device revoked");
+      return;
+    }
+
     if (msg.type === "peer-offline") {
       const pc = pcRef.current;
       if (!pc) {
