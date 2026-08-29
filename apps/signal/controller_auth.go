@@ -24,6 +24,7 @@ const (
 	maxControllerSessionTTL      = time.Hour
 	maxControllerLoginBodyBytes  = 16 << 10
 	controllerTokenPrefix        = "ct1"
+	controllerAuthProtocolPrefix = "desklink-auth."
 )
 
 type controllerRegistryFile struct {
@@ -246,6 +247,29 @@ func registrationScopeForToken(
 	return signalRegistrationScope{}, false
 }
 
+// websocketRegistrationToken keeps legacy query authentication for native hosts,
+// but lets browsers carry their short-lived controller token in the requested
+// WebSocket subprotocol header instead. This avoids putting controller tokens in
+// URLs that are commonly captured by reverse-proxy access logs.
+//
+// The server negotiates only the fixed `desklink-v1` protocol. The auth-bearing
+// requested protocol is therefore never echoed to the client in the handshake.
+func websocketRegistrationToken(r *http.Request) string {
+	if token := strings.TrimSpace(r.URL.Query().Get("auth")); token != "" {
+		return token
+	}
+	for _, raw := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		protocol := strings.TrimSpace(raw)
+		if strings.HasPrefix(protocol, controllerAuthProtocolPrefix) {
+			token := strings.TrimPrefix(protocol, controllerAuthProtocolPrefix)
+			if token != "" && len(token) <= 2048 {
+				return token
+			}
+		}
+	}
+	return ""
+}
+
 func signalRegistrationScopeForRequest(
 	r *http.Request,
 	deviceID string,
@@ -254,7 +278,7 @@ func signalRegistrationScopeForRequest(
 	if secret == "" {
 		return signalRegistrationScope{}, true
 	}
-	return registrationScopeForToken(secret, deviceID, r.URL.Query().Get("auth"), time.Now())
+	return registrationScopeForToken(secret, deviceID, websocketRegistrationToken(r), time.Now())
 }
 
 func setControllerCORS(w http.ResponseWriter, r *http.Request) bool {
