@@ -27,7 +27,8 @@ if (-not (Test-Path $BinaryDirectory)) {
 $targets = @(
   (Join-Path $BinaryDirectory "DeskLink.exe"),
   (Join-Path $BinaryDirectory "desklink-agent.exe"),
-  (Join-Path $BinaryDirectory "desklink-service.exe")
+  (Join-Path $BinaryDirectory "desklink-service.exe"),
+  (Join-Path $BinaryDirectory "desklink-media-probe.exe")
 )
 foreach ($target in $targets) {
   if (-not (Test-Path $target)) { throw "Signing target is missing: $target" }
