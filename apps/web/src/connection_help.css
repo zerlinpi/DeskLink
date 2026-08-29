@@ -1,0 +1,31 @@
+body:not(.remote-session-active) .connection-help {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  border: 1px solid rgba(245, 158, 11, .24);
+  border-radius: 11px;
+  background: rgba(245, 158, 11, .08);
+  color: #d8dee9;
+  line-height: 1.55;
+}
+
+body:not(.remote-session-active) .connection-help strong {
+  color: #f5c36a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+body:not(.remote-session-active) .connection-help span {
+  color: #9eabc0;
+  font-size: 11px;
+}
+
+body:not(.remote-session-active) .connection-help[data-level="error"] {
+  border-color: rgba(239, 68, 68, .25);
+  background: rgba(239, 68, 68, .08);
+}
+
+body:not(.remote-session-active) .connection-help[data-level="error"] strong {
+  color: #ffaaaa;
+}
