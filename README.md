@@ -6,7 +6,7 @@ DeskLink is a low-latency remote desktop project targeting a Sunlogin / NetEase 
 
 - **Controller:** Web (React + TypeScript) first, so macOS/Windows/mobile browsers can control a remote device without installing a controller.
 - **Windows host agent:** Native C++20 using DXGI Desktop Duplication, D3D11 GPU scaling/color conversion, Media Foundation hardware H.264, and Win32 `SendInput`.
-- **Windows supervisor:** Native Windows Service keeps a per-user Agent running in the active logged-in session.
+- **Windows supervisor:** Native Windows Service keeps a per-user Agent running in the active logged-in session and owns durable machine identity.
 - **Realtime transport:** WebRTC (ICE/STUN/TURN, DTLS-SRTP, RTP, DataChannels) with P2P preferred and TURN relay fallback.
 - **Signaling:** Go WebSocket/HTTP service. It coordinates sessions and issues short-lived signaling/relay credentials; media does not flow through signaling.
 - **Relay:** coturn with UDP/TCP/TLS support and TURN REST temporary credentials.
@@ -27,7 +27,7 @@ Implemented on `main`:
 - Optional protected signaling metrics endpoint.
 - STUN plus TURN UDP/TCP/TLS fallback, with P2P preferred.
 - Authenticated TURN REST temporary-credential endpoint; responses are short-lived and `no-store`.
-- Windows Agent runtime signal-token renewal plus TURN credential retrieval over WinHTTP, with optional fail-closed modes.
+- Windows runtime Signal Token renewal plus TURN credential retrieval, with optional fail-closed modes.
 - Browser runtime TURN credential retrieval before initial connection and refresh before ICE restart, with optional fail-closed mode.
 - Browser H.264 receive negotiation and hardware-decoded video rendering where supported.
 - Separate reliable `control` and unreliable/unordered `pointer` DataChannels to reduce head-of-line blocking.
@@ -48,8 +48,12 @@ Implemented on `main`:
 - Windows scheduling tuning: above-normal process priority, MMCSS capture priority and 1 ms timer period (can be disabled).
 - `desklink-service.exe` starts/restarts the Agent in the active logged-in Windows user session, reacts to session changes and uses crash-loop exponential backoff.
 - Graceful Service -> Agent shutdown: remote keys/buttons are released first, normal WebRTC/GPU/media cleanup gets a five-second window, then forced termination is used only as fallback.
-- Machine-scope DPAPI storage for the long-lived Windows device credential under `%ProgramData%\DeskLink`, with SYSTEM/Administrators-only file ACL and child-process-only injection at Agent launch.
-- CI for signaling, browser and Windows native builds, including stale-run cancellation, native dependency caching, DPAPI runtime smoke testing and downloadable Windows Agent/Service artifacts.
+- Machine-scope DPAPI storage for the durable Windows device credential under `%ProgramData%\DeskLink`, with SYSTEM/Administrators-only file ACL.
+- Service-owned local authentication broker: the DPAPI-protected long-lived device credential stays inside LocalSystem; the user-session Agent receives only short-lived Signal Tokens.
+- Local authentication Pipe hardening: local-only Named Pipe, synchronous first-instance creation, exact Agent user-SID ACL and exact Agent PID verification.
+- Service-side short Signal Token cache with a 90-second expiry safety margin to reduce unnecessary backend exchanges and improve reconnect resilience.
+- Windows CI runtime validation for DPAPI storage and the local auth broker, including same-user/wrong-PID rejection.
+- CI for signaling, browser and Windows native builds, including stale-run cancellation, native dependency caching and downloadable Windows Agent/Service artifacts.
 
 Still required before calling the project production-ready:
 
@@ -57,9 +61,10 @@ Still required before calling the project production-ready:
 - Browser/H.264 compatibility testing across Chrome/Edge/Safari and mobile browsers.
 - Production HTTPS/WSS deployment and certificate/reverse-proxy validation.
 - A real account/device registry that authenticates users/controllers, stores independent per-device keys/hashes, supports credential rotation/ownership/audit history and issues short-lived browser registration tokens at runtime.
-- A Service-owned local authentication broker so the long-lived Windows device credential never enters the user-session Agent process at all.
 - Regional TURN deployment, relay health/routing policy and real WAN latency measurements.
+- Move the remaining unattended access-code secret out of plaintext machine environment configuration or replace it with the future account/session authorization model.
 - Windows logon-screen and UAC Secure Desktop capture/control through a tightly scoped privileged broker. The current Service covers logged-in unattended persistence only.
+- Installer/code-signing hardening.
 - Audio, clipboard/file transfer and native mobile UX.
 
 ## Repository layout
@@ -159,6 +164,8 @@ For unattended production-style identity, provision a `dc1...` device credential
 Restart-Service DeskLink
 ```
 
+In DPAPI mode, the long-lived credential remains inside the LocalSystem Service. The Service-owned local broker gives the user-session Agent only short-lived signaling material.
+
 See `docs/WINDOWS_SERVICE.md` and `docs/DEVICE_AUTH.md` for limitations, migration and uninstall instructions.
 
 ### 3. Start the browser controller
@@ -206,8 +213,9 @@ Do not rely on the development defaults for a public deployment. In particular:
 7. Switch network paths during a session and verify signaling reconnect + ICE restart recover without manual reconnect.
 8. Install the Windows Service and test logon, logout, fast-user/session changes, graceful Agent shutdown and crash recovery.
 9. Provision the DPAPI device credential, remove the old plaintext machine credential and verify unattended reconnect after reboot/login.
-10. Revoke a test device and verify token issuance stops and any existing signaling WebSocket is disconnected within the keepalive interval.
-11. Test Intel, NVIDIA and AMD hardware encoders independently.
+10. Confirm the user-session Agent has no `DESKLINK_DEVICE_CREDENTIAL` in DPAPI/Service mode and still refreshes short-lived Signal Tokens through the local broker.
+11. Revoke a test device and verify token issuance stops and any existing signaling WebSocket is disconnected within the keepalive interval.
+12. Test Intel, NVIDIA and AMD hardware encoders independently.
 
 See `docs/NETWORK_TESTING.md` for a repeatable weak-network test matrix.
 
@@ -216,6 +224,6 @@ See `docs/NETWORK_TESTING.md` for a repeatable weak-network test matrix.
 1. **M0 — complete:** signaling, browser UI, WebRTC negotiation, input protocol, TURN fallback.
 2. **M1 — implemented, runtime validation ongoing:** Windows GPU capture/encode, browser playback, mouse/keyboard input, access-code authorization.
 3. **M2 — performance core implemented:** adaptive bitrate/FPS/resolution, PLI/NACK recovery, RTP pacing, reconnect/ICE restart, multi-monitor and diagnostics.
-4. **M3 — in progress:** logged-in unattended Windows Service, short-lived credential chain, per-device revocation, graceful Agent lifecycle and DPAPI at-rest credential protection are implemented. A Service-owned local token broker, independent per-device key rotation, Secure Desktop broker, account/browser auth, clipboard/file transfer/audio, macOS and native mobile clients remain.
+4. **M3 — in progress:** logged-in unattended Windows Service, short-lived credential chain, per-device revocation, graceful Agent lifecycle, DPAPI protected device identity and Service-owned PID/SID-bound short-token broker are implemented. Independent per-device key rotation, account/browser auth, protected access-code storage, Secure Desktop broker, clipboard/file transfer/audio, macOS and native mobile clients remain.
 
 See `docs/ARCHITECTURE.md` for the detailed technical decisions.
