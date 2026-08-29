@@ -47,6 +47,8 @@ add_executable(desklink-agent
   src/desktop_capture.h
   src/gpu_color_converter.cpp
   src/gpu_color_converter.h
+  src/h264_annexb.cpp
+  src/h264_annexb.h
   src/h264_encoder.cpp
   src/h264_encoder.h
   src/input_injector.cpp
@@ -138,3 +140,11 @@ add_executable(desklink-access-proof-smoke
 target_compile_definitions(desklink-access-proof-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-access-proof-smoke PRIVATE /W4 /permissive-)
 target_link_libraries(desklink-access-proof-smoke PRIVATE bcrypt)
+
+add_executable(desklink-h264-annexb-smoke
+  src/h264_annexb_smoke.cpp
+  src/h264_annexb.cpp
+  src/h264_annexb.h
+)
+target_compile_definitions(desklink-h264-annexb-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-h264-annexb-smoke PRIVATE /W4 /permissive-)
