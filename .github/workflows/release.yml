@@ -1,0 +1,227 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desklink-release
+  cancel-in-progress: false
+
+jobs:
+  server-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        name: Validate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must be semantic major.minor.patch" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+
+      - name: Test and build signaling service
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          pushd apps/signal
+          go mod download
+          go test ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath -ldflags="-s -w" \
+            -o "../../release/desklink-signal-v${{ steps.version.outputs.version }}-linux-amd64" .
+          popd
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build browser controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          pushd apps/web
+          npm install
+          npm run build
+          popd
+          tar -czf "release/desklink-web-v${{ steps.version.outputs.version }}.tar.gz" -C apps/web/dist .
+
+      - name: Create server/web checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum \
+            "desklink-signal-v${{ steps.version.outputs.version }}-linux-amd64" \
+            "desklink-web-v${{ steps.version.outputs.version }}.tar.gz" \
+            > SHA256SUMS.server-web.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desklink-release-server-web-${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          retention-days: 7
+          path: release/*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        name: Validate version
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION must be semantic major.minor.patch" }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+
+      - name: Validate static OpenSSL selection
+        shell: pwsh
+        run: |
+          $cache = Get-Content "build/windows-agent/CMakeCache.txt" -Raw
+          if ($cache -match '(?im)^OPENSSL_(CRYPTO|SSL)_LIBRARY[^=]*=.*[\\/]MDd?[\\/]') {
+            throw "CMake selected an OpenSSL /MD library instead of the portable /MT/static variant"
+          }
+
+      - name: Build Windows release
+        run: cmake --build build/windows-agent --config Release --parallel
+
+      - name: Run native release smoke tests
+        shell: pwsh
+        run: |
+          $smokes = @(
+            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
+            "build/windows-agent/Release/desklink-access-proof-smoke.exe",
+            "build/windows-agent/Release/desklink-service-auth-smoke.exe"
+          )
+          foreach ($smokePath in $smokes) {
+            $smoke = Resolve-Path $smokePath
+            & $smoke
+            if ($LASTEXITCODE -ne 0) { throw "$smokePath failed with exit code $LASTEXITCODE" }
+          }
+
+      - name: Validate portable Windows dependencies
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe was not found" }
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $install) { throw "Visual C++ build tools installation was not found" }
+          $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if (-not $dumpbin) { throw "dumpbin.exe was not found" }
+
+          $forbidden = '(?im)^\s*(VCRUNTIME[^\s]*\.dll|MSVCP[^\s]*\.dll|libcrypto[^\s]*\.dll|libssl[^\s]*\.dll|datachannel[^\s]*\.dll)\s*$'
+          foreach ($binary in @(
+            "build/windows-agent/Release/desklink-agent.exe",
+            "build/windows-agent/Release/desklink-service.exe"
+          )) {
+            if (-not (Test-Path $binary)) { throw "missing artifact binary: $binary" }
+            $dependencyText = (& $dumpbin.FullName /DEPENDENTS $binary) -join "`n"
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $binary" }
+            if ($dependencyText -match $forbidden) {
+              throw "$binary has an external runtime dependency that must be bundled or statically linked"
+            }
+          }
+
+      - name: Package Windows host
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $packageRoot = Join-Path $PWD "release\desklink-windows-v$version-x64"
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          Copy-Item "build/windows-agent/Release/desklink-agent.exe" $packageRoot
+          Copy-Item "build/windows-agent/Release/desklink-service.exe" $packageRoot
+          Copy-Item "packaging/windows/install-service.ps1" $packageRoot
+          Copy-Item "packaging/windows/uninstall-service.ps1" $packageRoot
+          Copy-Item "packaging/windows/README.txt" $packageRoot
+          Copy-Item "docs/WINDOWS_SERVICE.md" $packageRoot
+
+          $zip = Join-Path $PWD "release\desklink-windows-v$version-x64.zip"
+          Compress-Archive -Path "$packageRoot\*" -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $zip -Leaf)" | Set-Content "release\SHA256SUMS.windows.txt" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desklink-release-windows-${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release/desklink-windows-v${{ steps.version.outputs.version }}-x64.zip
+            release/SHA256SUMS.windows.txt
+
+  publish:
+    needs: [server-web, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        name: Validate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must be semantic major.minor.patch" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desklink-release-*-${{ steps.version.outputs.version }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Consolidate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat release-assets/SHA256SUMS.server-web.txt release-assets/SHA256SUMS.windows.txt \
+            > release-assets/SHA256SUMS.txt
+          rm release-assets/SHA256SUMS.server-web.txt release-assets/SHA256SUMS.windows.txt
+          cat release-assets/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          version="${{ steps.version.outputs.version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "DeskLink v$version" \
+            --notes-file "docs/releases/v$version.md" \
+            release-assets/*
