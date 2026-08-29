@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <regex>
 #include <utility>
@@ -9,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 #include <rtc/h264rtppacketizer.hpp>
+#include <rtc/pacinghandler.hpp>
 #include <rtc/plihandler.hpp>
 #include <rtc/rtcpsrreporter.hpp>
 #include <rtc/rtcpnackresponder.hpp>
@@ -26,6 +28,53 @@ double JsonNumber(const json& object, const char* key, double fallback = 0.0) {
   const auto it = object.find(key);
   if (it == object.end() || !it->is_number()) return fallback;
   return it->get<double>();
+}
+
+uint32_t EnvUIntOr(
+    const char* name,
+    uint32_t fallback,
+    uint32_t minimum,
+    uint32_t maximum) {
+  char* value = nullptr;
+  size_t length = 0;
+  if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) {
+    if (value) std::free(value);
+    return fallback;
+  }
+
+  std::string text(value);
+  std::free(value);
+  if (text.empty()) return fallback;
+
+  try {
+    const unsigned long parsed = std::stoul(text);
+    if (parsed >= minimum && parsed <= maximum) {
+      return static_cast<uint32_t>(parsed);
+    }
+  } catch (...) {
+  }
+  return fallback;
+}
+
+uint32_t EffectivePacingBitrate(const SessionConfig& config) {
+  if (config.media_pacing_bitrate_bps > 0) {
+    return std::clamp<uint32_t>(config.media_pacing_bitrate_bps, 500'000, 60'000'000);
+  }
+
+  const uint32_t configured_video_bitrate = EnvUIntOr(
+      "DESKLINK_BITRATE_BPS",
+      12'000'000,
+      1'000'000,
+      50'000'000);
+  const uint64_t with_headroom =
+      static_cast<uint64_t>(configured_video_bitrate) * 12 / 10;
+  const uint32_t default_pacing = static_cast<uint32_t>(
+      std::min<uint64_t>(with_headroom, 60'000'000));
+  return EnvUIntOr(
+      "DESKLINK_PACING_BPS",
+      default_pacing,
+      500'000,
+      60'000'000);
 }
 }  // namespace
 
@@ -451,6 +500,19 @@ void WebRtcSession::CreatePeer(
       packetizer->addToChain(std::make_shared<rtc::PliHandler>([on_keyframe_requested]() {
         on_keyframe_requested();
       }));
+    }
+
+    const uint32_t pacing_bps = EffectivePacingBitrate(config_);
+    const uint32_t pacing_interval_ms = std::clamp<uint32_t>(
+        config_.media_pacing_interval_ms,
+        1,
+        20);
+    if (pacing_bps > 0) {
+      packetizer->addToChain(std::make_shared<rtc::PacingHandler>(
+          static_cast<double>(pacing_bps),
+          std::chrono::milliseconds(pacing_interval_ms)));
+      std::cout << "RTP pacing: " << (pacing_bps / 1'000'000.0)
+                << " Mbps, " << pacing_interval_ms << " ms interval\n";
     }
 
     video_track->setMediaHandler(packetizer);
