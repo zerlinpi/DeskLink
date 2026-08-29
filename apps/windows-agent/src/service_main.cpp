@@ -137,10 +137,10 @@ bool CreateAgentStopEvent(DWORD session_id) {
   CloseAgentStopEvent();
 
   PSECURITY_DESCRIPTOR descriptor = nullptr;
-  // LocalSystem may signal the event; authenticated users may only wait on it.
-  // The unpredictable suffix prevents accidental/cross-session name collisions.
+  // LocalSystem may signal the event; authenticated users receive only generic
+  // execute, which maps to SYNCHRONIZE for event objects (wait, but no SetEvent).
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          L"D:P(A;;GA;;;SY)(A;;GR;;;AU)",
+          L"D:P(A;;GA;;;SY)(A;;GX;;;AU)",
           SDDL_REVISION_1,
           &descriptor,
           nullptr)) {
