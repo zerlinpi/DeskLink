@@ -52,6 +52,8 @@ add_executable(desklink-agent
   src/clipboard_win32.h
   src/desktop_capture.cpp
   src/desktop_capture.h
+  src/file_transfer_receiver.cpp
+  src/file_transfer_receiver.h
   src/gpu_color_converter.cpp
   src/gpu_color_converter.h
   src/h264_annexb.cpp
