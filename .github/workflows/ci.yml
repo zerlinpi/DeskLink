@@ -68,6 +68,14 @@ jobs:
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64
       - name: Build
         run: cmake --build build/windows-agent --config Release --parallel
+      - name: Validate DPAPI credential store
+        shell: pwsh
+        run: |
+          $service = Resolve-Path "build/windows-agent/Release/desklink-service.exe"
+          "dc1.CI_DPAPI_SMOKE_TEST_0123456789" | & $service --store-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI credential store failed with exit code $LASTEXITCODE" }
+          & $service --clear-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI credential cleanup failed with exit code $LASTEXITCODE" }
       - name: Upload Windows binaries
         uses: actions/upload-artifact@v4
         with:
