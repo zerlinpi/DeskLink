@@ -3,13 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -64,6 +62,7 @@ func startSignalE2EServer(t *testing.T) (string, string) {
 		"DESKLINK_SIGNAL_AUTH_SECRET="+secret,
 		"DESKLINK_ALLOW_ANY_ORIGIN=1",
 		"DESKLINK_ALLOWED_ORIGINS=",
+		"DESKLINK_TRUST_PROXY_HEADERS=0",
 		"DESKLINK_CONTROLLER_CREDENTIALS_FILE=",
 		"DESKLINK_DEVICE_CREDENTIALS_FILE=",
 		"DESKLINK_DEVICE_AUTH_SECRET=",
@@ -144,10 +143,10 @@ func dialSignalE2EController(
 	}
 	endpoint := wsEndpoint + "?deviceId=" + url.QueryEscape(controllerID)
 	conn, response, err := dialer.Dial(endpoint, nil)
-	if response != nil && response.Body != nil {
-		_ = response.Body.Close()
-	}
 	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		t.Fatalf("dial controller websocket: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
@@ -168,10 +167,10 @@ func dialSignalE2EHost(
 	endpoint := wsEndpoint + "?deviceId=" + url.QueryEscape(hostID) + "&auth=" + url.QueryEscape(token)
 	dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
 	conn, response, err := dialer.Dial(endpoint, nil)
-	if response != nil && response.Body != nil {
-		_ = response.Body.Close()
-	}
 	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		t.Fatalf("dial host websocket: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
@@ -223,21 +222,6 @@ func expectSignalE2EAuthRequest(
 	}
 }
 
-func expectSignalE2ENoMessage(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
-	t.Helper()
-	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		t.Fatalf("set websocket read deadline: %v", err)
-	}
-	var message signalE2EMessage
-	err := conn.ReadJSON(&message)
-	if err == nil {
-		t.Fatalf("expected no websocket message, got %+v", message)
-	}
-	if !strings.Contains(strings.ToLower(err.Error()), "timeout") {
-		t.Fatalf("expected websocket read timeout, got %v", err)
-	}
-}
-
 func TestSignalWebSocketHostWaitEndToEnd(t *testing.T) {
 	wsEndpoint, secret := startSignalE2EServer(t)
 
@@ -283,18 +267,15 @@ func TestSignalWebSocketHostWaitEndToEnd(t *testing.T) {
 		)
 		_ = oldController.Close()
 
-		// Registering a new socket with the same logical controller ID must not
-		// inherit pending authentication state from the old connection instance.
+		// A new socket with the same logical controller ID must not inherit the
+		// old socket's pending authentication state. If the old request leaked,
+		// it would be the first auth-request delivered to the host below and the
+		// new-session assertion would fail.
 		newController := dialSignalE2EController(t, wsEndpoint, controllerID, controllerToken)
 		hostToken := mintSignalAuthToken(secret, hostID, time.Now().Add(5*time.Minute))
 		host := dialSignalE2EHost(t, wsEndpoint, hostID, hostToken)
-		expectSignalE2ENoMessage(t, host, 300*time.Millisecond)
 
 		writeSignalE2EAuthRequest(t, newController, hostID, newSession)
 		expectSignalE2EAuthRequest(t, host, controllerID, newSession)
 	})
-
-	if t.Failed() {
-		t.Logf("signal E2E endpoint: %s", fmt.Sprintf("%s", wsEndpoint))
-	}
 }
