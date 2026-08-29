@@ -36,28 +36,87 @@ WebRtcSession::~WebRtcSession() {
 }
 
 void WebRtcSession::Start() {
+  bool expected_stopped = true;
+  if (!stopping_.compare_exchange_strong(expected_stopped, false)) return;
+
+  reconnect_attempt_.store(0, std::memory_order_relaxed);
+  {
+    std::scoped_lock lock(reconnect_mutex_);
+    reconnect_requested_ = false;
+  }
+
+  reconnect_thread_ = std::jthread([this](std::stop_token stop_token) {
+    SignalingReconnectLoop(stop_token);
+  });
+  ConnectSignaling();
+}
+
+void WebRtcSession::ConnectSignaling() {
+  if (stopping_.load(std::memory_order_relaxed)) return;
+
   rtc::WebSocket::Configuration ws_config;
   ws_config.connectionTimeout = 10s;
   ws_config.pingInterval = 20s;
   ws_config.maxOutstandingPings = 3;
 
   auto ws = std::make_shared<rtc::WebSocket>(ws_config);
-  websocket_ = ws;
+  std::weak_ptr<rtc::WebSocket> weak_ws = ws;
 
-  ws->onOpen([this]() {
+  ws->onOpen([this, weak_ws]() {
+    auto opened = weak_ws.lock();
+    if (!opened || stopping_.load(std::memory_order_relaxed)) return;
+
+    {
+      std::scoped_lock lock(mutex_);
+      if (websocket_ != opened) return;
+    }
+
+    reconnect_attempt_.store(0, std::memory_order_relaxed);
     std::cout << "Signaling connected as " << config_.device_id << "\n";
   });
-  ws->onClosed([]() {
+  ws->onClosed([this, weak_ws]() {
+    auto closed = weak_ws.lock();
+    bool was_current = false;
+    {
+      std::scoped_lock lock(mutex_);
+      if (closed && websocket_ == closed) {
+        websocket_.reset();
+        was_current = true;
+      }
+    }
+
+    if (!was_current) return;
     std::cout << "Signaling connection closed\n";
+    if (!stopping_.load(std::memory_order_relaxed)) {
+      RequestSignalingReconnect();
+    }
   });
-  ws->onError([](const std::string& error) {
+  ws->onError([this, weak_ws](const std::string& error) {
+    auto failed = weak_ws.lock();
+    if (!failed) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (websocket_ != failed) return;
+    }
     std::cerr << "Signaling error: " << error << "\n";
   });
-  ws->onMessage([this](rtc::message_variant data) {
+  ws->onMessage([this, weak_ws](rtc::message_variant data) {
+    auto source = weak_ws.lock();
+    if (!source) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (websocket_ != source) return;
+    }
     if (const auto* text = std::get_if<std::string>(&data)) {
       HandleSignal(*text);
     }
   });
+
+  {
+    std::scoped_lock lock(mutex_);
+    if (stopping_.load(std::memory_order_relaxed)) return;
+    websocket_ = ws;
+  }
 
   const char separator = config_.signal_url.find('?') == std::string::npos ? '?' : '&';
   const std::string url = config_.signal_url + separator + "deviceId=" + config_.device_id;
@@ -65,7 +124,58 @@ void WebRtcSession::Start() {
   ws->open(url);
 }
 
+void WebRtcSession::RequestSignalingReconnect() {
+  if (stopping_.load(std::memory_order_relaxed)) return;
+  {
+    std::scoped_lock lock(reconnect_mutex_);
+    if (reconnect_requested_) return;
+    reconnect_requested_ = true;
+  }
+  reconnect_cv_.notify_one();
+}
+
+void WebRtcSession::SignalingReconnectLoop(std::stop_token stop_token) {
+  std::unique_lock lock(reconnect_mutex_);
+  while (!stop_token.stop_requested() && !stopping_.load(std::memory_order_relaxed)) {
+    reconnect_cv_.wait(lock, [this, &stop_token]() {
+      return reconnect_requested_ || stop_token.stop_requested() ||
+             stopping_.load(std::memory_order_relaxed);
+    });
+
+    if (stop_token.stop_requested() || stopping_.load(std::memory_order_relaxed)) return;
+    reconnect_requested_ = false;
+
+    const uint32_t attempt = reconnect_attempt_.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t exponent = std::min<uint32_t>(attempt, 5);
+    const uint32_t delay_seconds = std::min<uint32_t>(30, 1u << exponent);
+    lock.unlock();
+
+    std::cout << "Reconnecting signaling in " << delay_seconds << "s\n";
+    for (uint32_t tick = 0; tick < delay_seconds * 10; ++tick) {
+      if (stop_token.stop_requested() || stopping_.load(std::memory_order_relaxed)) return;
+      std::this_thread::sleep_for(100ms);
+    }
+
+    if (!stop_token.stop_requested() && !stopping_.load(std::memory_order_relaxed)) {
+      ConnectSignaling();
+    }
+
+    lock.lock();
+  }
+}
+
 void WebRtcSession::Stop() {
+  if (stopping_.exchange(true, std::memory_order_relaxed)) return;
+
+  {
+    std::scoped_lock lock(reconnect_mutex_);
+    reconnect_requested_ = false;
+  }
+  if (reconnect_thread_.joinable()) {
+    reconnect_thread_.request_stop();
+    reconnect_cv_.notify_all();
+  }
+
   std::shared_ptr<rtc::PeerConnection> peer;
   std::shared_ptr<rtc::WebSocket> ws;
   {
@@ -80,6 +190,10 @@ void WebRtcSession::Stop() {
   }
   if (peer) peer->close();
   if (ws) ws->close();
+
+  if (reconnect_thread_.joinable()) {
+    reconnect_thread_.join();
+  }
 }
 
 bool WebRtcSession::connected() const {
