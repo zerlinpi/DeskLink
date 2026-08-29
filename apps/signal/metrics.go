@@ -10,15 +10,15 @@ import (
 )
 
 type signalMetrics struct {
-	activeConnections    atomic.Uint64
-	totalConnections     atomic.Uint64
+	activeConnections     atomic.Int64
+	totalConnections      atomic.Uint64
 	rateLimitedHandshakes atomic.Uint64
-	authFailures         atomic.Uint64
-	messagesForwarded    atomic.Uint64
+	authFailures          atomic.Uint64
+	messagesForwarded     atomic.Uint64
 }
 
 type signalMetricsSnapshot struct {
-	ActiveConnections     uint64 `json:"activeConnections"`
+	ActiveConnections     int64  `json:"activeConnections"`
 	TotalConnections      uint64 `json:"totalConnections"`
 	RateLimitedHandshakes uint64 `json:"rateLimitedHandshakes"`
 	AuthFailures          uint64 `json:"authFailures"`
