@@ -1,0 +1,34 @@
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @DESKLINK_VERSION_MAJOR@,@DESKLINK_VERSION_MINOR@,@DESKLINK_VERSION_PATCH@,0
+ PRODUCTVERSION @DESKLINK_VERSION_MAJOR@,@DESKLINK_VERSION_MINOR@,@DESKLINK_VERSION_PATCH@,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "DeskLink Open Source Project\0"
+            VALUE "FileDescription", "@DESKLINK_FILE_DESCRIPTION@\0"
+            VALUE "FileVersion", "@DESKLINK_VERSION@\0"
+            VALUE "InternalName", "@DESKLINK_INTERNAL_NAME@\0"
+            VALUE "LegalCopyright", "DeskLink contributors\0"
+            VALUE "OriginalFilename", "@DESKLINK_ORIGINAL_FILENAME@\0"
+            VALUE "ProductName", "DeskLink\0"
+            VALUE "ProductVersion", "@DESKLINK_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
