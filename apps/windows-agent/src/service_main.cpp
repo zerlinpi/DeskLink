@@ -282,6 +282,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
   auto next_launch_attempt = clock::now();
   auto agent_started_at = clock::time_point{};
   uint32_t consecutive_failures = 0;
+  DWORD observed_active_session = kNoSession;
 
   auto schedule_retry = [&](const wchar_t* reason) {
     consecutive_failures = std::min<uint32_t>(consecutive_failures + 1, 6);
@@ -296,10 +297,11 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
   while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
     const auto now = clock::now();
     const DWORD active_session = WTSGetActiveConsoleSessionId();
-    const bool session_changed = active_session != g_agent_session;
+    const bool session_changed = active_session != observed_active_session;
     const bool agent_dead = g_agent_process && !AgentAlive();
 
     if (session_changed) {
+      observed_active_session = active_session;
       StopAgent();
       consecutive_failures = 0;
       agent_started_at = clock::time_point{};
