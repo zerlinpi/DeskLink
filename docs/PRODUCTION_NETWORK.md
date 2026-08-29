@@ -46,25 +46,73 @@ Validate the TLS listener before browser testing:
 ./tools/network/check-turn-tls.sh turn.example.com 5349
 ```
 
+## Signaling registration security
+
+The signaling server can require a short-lived HMAC registration token bound to an exact `deviceId` by setting:
+
+```bash
+DESKLINK_SIGNAL_AUTH_SECRET=<long-random-secret>
+```
+
+When enabled, `/ws` requires `?deviceId=...&auth=...`. The Windows Agent reads its token from `DESKLINK_SIGNAL_AUTH_TOKEN`. The browser controller supports a pre-provisioned `VITE_SIGNAL_DEVICE_ID` + `VITE_SIGNAL_AUTH_TOKEN` pair for controlled testing.
+
+Do not treat a build-time Vite token as the final public-web authentication architecture. `VITE_*` values are bundled into client JavaScript. A production account/device service should authenticate the user, mint a short-lived controller registration token at runtime, and deliver it only to that browser session.
+
+The signaling server also applies per-connection message limits plus cross-connection/IP handshake throttling. By default it trusts the TCP peer address only. If a trusted reverse proxy terminates HTTPS/WSS and rewrites client-IP headers, set:
+
+```bash
+DESKLINK_TRUST_PROXY_HEADERS=1
+```
+
+Only enable that setting when the signaling server is not directly reachable around the proxy; otherwise a client could forge forwarding headers.
+
+An optional protected operational endpoint can be enabled with:
+
+```bash
+DESKLINK_METRICS_TOKEN=<random-bearer-token>
+```
+
+Then `GET /metricsz` with `Authorization: Bearer <token>` returns aggregate active/total connections, rate-limited handshakes, authentication failures and forwarded signaling-message counts. The endpoint returns 404 when no metrics token is configured.
+
 ## Browser controller
 
-Normal profile should prefer direct/UDP paths:
+Normal profile should prefer direct/UDP paths while keeping TLS available as a final relay candidate:
 
 ```dotenv
 VITE_SIGNAL_URL=wss://control.example.com/ws
 VITE_STUN_URL=stun:turn.example.com:3478
 VITE_TURN_URL=turn:turn.example.com:3478
+VITE_TURN_TLS_URL=turns:turn.example.com:5349
 VITE_TURN_USERNAME=TEMPORARY_USERNAME
 VITE_TURN_PASSWORD=TEMPORARY_PASSWORD
 ```
 
-For a dedicated restrictive-network validation build, copy `apps/web/.env.restrictive.example` to `.env.local`. That profile uses `turns:turn.example.com:5349` so the same controller can be tested in networks that block ordinary TURN/UDP/TCP.
+The controller registers TURN/UDP and TURN/TCP from `VITE_TURN_URL`, and adds `VITE_TURN_TLS_URL` when configured. For explicit relay validation, set:
 
-The current browser code accepts one TURN base URL at build/runtime environment configuration. A later controller improvement should register UDP/TCP/TLS TURN URLs simultaneously so ICE can fall through all relay transports in a single session without rebuilding the controller.
+```dotenv
+VITE_ICE_TRANSPORT_POLICY=relay
+```
+
+Use `apps/web/.env.restrictive.example` as the reference test profile. In normal production operation leave the transport policy unset so direct ICE remains preferred.
 
 ## Windows host
 
-The Windows host currently registers STUN plus TURN/UDP and TURN/TCP candidates through libdatachannel. TURN/TLS is the next native-host transport addition. Do not claim full restrictive-network coverage for the native host until `TurnTls` is wired into `SessionConfig` and validated in CI/runtime testing.
+The Windows host registers STUN plus TURN/UDP, TURN/TCP and TURN/TLS candidates through libdatachannel. TLS defaults to port `5349`; set `DESKLINK_TURN_TLS_PORT=0` to disable the TLS candidate or set another port when the relay uses a custom listener.
+
+Example:
+
+```powershell
+$env:DESKLINK_SIGNAL_URL = "wss://control.example.com/ws"
+$env:DESKLINK_SIGNAL_AUTH_TOKEN = "SHORT_LIVED_DEVICE_TOKEN"
+$env:DESKLINK_STUN_URL = "stun:turn.example.com:3478"
+$env:DESKLINK_TURN_HOST = "turn.example.com"
+$env:DESKLINK_TURN_PORT = "3478"
+$env:DESKLINK_TURN_TLS_PORT = "5349"
+$env:DESKLINK_TURN_USERNAME = "TEMPORARY_USERNAME"
+$env:DESKLINK_TURN_PASSWORD = "TEMPORARY_PASSWORD"
+```
+
+The Windows Agent intentionally does not print the full authenticated signaling URL, so registration tokens are not written to normal logs.
 
 ## Regional relay policy
 
