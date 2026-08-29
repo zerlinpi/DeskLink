@@ -30,8 +30,10 @@ function rememberDevice(id: string) {
 }
 
 function targetInput() {
-  return Array.from(document.querySelectorAll<HTMLInputElement>(".connect-card input"))
-    .find((input) => input.dataset.role === "target-device" || TARGET_PLACEHOLDERS.has(input.placeholder)) ?? null;
+  return document.querySelector<HTMLInputElement>('.connect-card input[data-role="target-device"]')
+    ?? Array.from(document.querySelectorAll<HTMLInputElement>(".connect-card input"))
+      .find((input) => TARGET_PLACEHOLDERS.has(input.placeholder))
+    ?? null;
 }
 
 function applyTarget(id: string) {
@@ -95,6 +97,12 @@ function renderHistory() {
   row.append(clear);
 }
 
+function isConnectButton(button: HTMLButtonElement) {
+  if (button.dataset.connectionAction) return button.dataset.connectionAction === "connect";
+  const text = button.textContent?.trim();
+  return text === "Connect" || text === "连接设备";
+}
+
 function bindForm() {
   const card = document.querySelector<HTMLElement>(".connect-card");
   const input = targetInput();
@@ -102,20 +110,18 @@ function bindForm() {
   card.dataset.deviceHistoryBound = "1";
 
   card.addEventListener("click", (event) => {
-    const button = (event.target as Element | null)?.closest("button");
-    if (!button || button.closest(".recent-devices")) return;
-    const text = button.textContent?.trim();
-    if (text === "Connect" || text === "连接设备") {
-      rememberDevice(input.value);
-      renderHistory();
-    }
+    const button = (event.target as Element | null)?.closest<HTMLButtonElement>("button");
+    if (!button || button.closest(".recent-devices") || !isConnectButton(button)) return;
+    rememberDevice(input.value);
+    renderHistory();
   }, true);
 
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      rememberDevice(input.value);
-      renderHistory();
-    }
+    if (event.key !== "Enter") return;
+    const primary = card.querySelector<HTMLButtonElement>('button[data-connection-action="connect"]');
+    if (!primary || primary.disabled) return;
+    rememberDevice(input.value);
+    renderHistory();
   }, true);
 }
 
