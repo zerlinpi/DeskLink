@@ -18,13 +18,10 @@ type turnCredentials struct {
 }
 
 // mintTurnCredentials implements the TURN REST temporary credential scheme
-// supported by coturn's use-auth-secret/static-auth-secret mode.
-//
-// It intentionally does not expose an HTTP handler. DeskLink's current device-ID
-// registration is not yet a strong account/device authentication boundary, so
-// handing these credentials to every anonymous WebSocket client would allow TURN
-// relay abuse. Wire this helper into the authenticated session flow once device
-// identity/token authentication is in place.
+// supported by coturn's use-auth-secret/static-auth-secret mode. The HTTP layer
+// exposes these credentials only after a valid short-lived signaling token for
+// the same device ID has been presented; the coturn shared secret never leaves
+// the server.
 func mintTurnCredentials(
 	secret string,
 	userID string,
