@@ -26,11 +26,11 @@ func turnCredentialTTL() time.Duration {
 
 func bearerToken(r *http.Request) string {
 	const prefix = "Bearer "
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, prefix) {
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return ""
 	}
-	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	return strings.TrimSpace(header[len(prefix):])
 }
 
 func setCredentialCORS(w http.ResponseWriter, r *http.Request) bool {
