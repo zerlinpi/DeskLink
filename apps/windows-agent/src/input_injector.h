@@ -1,11 +1,14 @@
 #pragma once
 
 #include <atomic>
-#include <mutex>
 #include <string>
-#include <unordered_set>
 
 namespace desklink {
+
+// Releases every key/button currently held down by DeskLink in this Agent process.
+// This is process-wide so shutdown paths outside WebRtcSession can safely prevent
+// stuck remote input before the process exits.
+bool ReleaseAllInjectedInput();
 
 class InputInjector {
  public:
@@ -23,10 +26,6 @@ class InputInjector {
   std::atomic<long> desktop_top_{0};
   std::atomic<long> desktop_width_{0};
   std::atomic<long> desktop_height_{0};
-
-  mutable std::mutex pressed_mutex_;
-  mutable std::unordered_set<unsigned short> pressed_keys_;
-  mutable std::unordered_set<int> pressed_buttons_;
 };
 
 }  // namespace desklink
