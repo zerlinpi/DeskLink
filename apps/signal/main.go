@@ -366,7 +366,7 @@ func main() {
 
 			target := h.get(msg.Target)
 			if target == nil {
-				if msg.Type == "auth-request" {
+				if shouldQueuePendingHostAuth(p, msg.Type) {
 					if pendingHostAuthRequests.enqueue(
 						msg.Target,
 						id,
