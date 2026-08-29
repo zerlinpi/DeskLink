@@ -6,11 +6,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <string>
+
+#include <rtc/rtc.hpp>
 
 #include "desktop_capture.h"
-#include "input_injector.h"
+#include "webrtc_session.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -24,6 +28,31 @@ BOOL WINAPI ConsoleHandler(DWORD signal) {
     return TRUE;
   }
   return FALSE;
+}
+
+std::string EnvOr(const char* name, std::string fallback) {
+  if (const char* value = std::getenv(name); value && *value) return value;
+  return fallback;
+}
+
+uint16_t EnvPortOr(const char* name, uint16_t fallback) {
+  const std::string value = EnvOr(name, "");
+  if (value.empty()) return fallback;
+  try {
+    const unsigned long parsed = std::stoul(value);
+    if (parsed <= 65535) return static_cast<uint16_t>(parsed);
+  } catch (...) {
+  }
+  return fallback;
+}
+
+std::string DefaultDeviceId() {
+  char computer_name[MAX_COMPUTERNAME_LENGTH + 1]{};
+  DWORD size = static_cast<DWORD>(std::size(computer_name));
+  if (GetComputerNameA(computer_name, &size) && size > 0) {
+    return std::string("win-") + computer_name;
+  }
+  return "windows-host";
 }
 
 }  // namespace
@@ -110,6 +139,19 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
 
+  desklink::SessionConfig session_config;
+  session_config.signal_url = EnvOr("DESKLINK_SIGNAL_URL", session_config.signal_url);
+  session_config.device_id = EnvOr("DESKLINK_DEVICE_ID", DefaultDeviceId());
+  session_config.stun_url = EnvOr("DESKLINK_STUN_URL", session_config.stun_url);
+  session_config.turn_host = EnvOr("DESKLINK_TURN_HOST", session_config.turn_host);
+  session_config.turn_port = EnvPortOr("DESKLINK_TURN_PORT", session_config.turn_port);
+  session_config.turn_username = EnvOr("DESKLINK_TURN_USERNAME", session_config.turn_username);
+  session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);
+
+  rtc::InitLogger(rtc::LogLevel::Info);
+  desklink::WebRtcSession session(std::move(session_config));
+  session.Start();
+
   std::wcout << L"DeskLink Windows Agent\n"
              << L"GPU: " << adapter_desc.Description << L"\n"
              << L"Output: " << output_index << L" (" << capture.width() << L"x" << capture.height() << L")\n"
@@ -124,6 +166,7 @@ int wmain(int argc, wchar_t** argv) {
     auto frame = capture.Acquire(16);
     if (frame) {
       ++captured_frames;
+      // M1 next step: GPU color conversion -> Media Foundation H.264 -> WebRTC video track.
     } else {
       ++timeout_ticks;
     }
@@ -133,7 +176,9 @@ int wmain(int argc, wchar_t** argv) {
     if (elapsed >= 1.0) {
       const double fps = static_cast<double>(captured_frames) / elapsed;
       std::wcout << L"capture=" << std::fixed << std::setprecision(1) << fps
-                 << L" fps, idle/timeouts=" << timeout_ticks << L"\r" << std::flush;
+                 << L" fps, idle/timeouts=" << timeout_ticks
+                 << (session.connected() ? L", controller=connected" : L", controller=waiting")
+                 << L"\r" << std::flush;
       captured_frames = 0;
       timeout_ticks = 0;
       window_start = now;
@@ -141,6 +186,7 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   std::wcout << L"\nDeskLink Agent stopped.\n";
+  session.Stop();
   capture.Reset();
   context->ClearState();
   context->Flush();
