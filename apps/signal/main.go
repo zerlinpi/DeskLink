@@ -383,10 +383,13 @@ func main() {
 				continue
 			}
 
-			if msg.Type == "auth-request" &&
-				!hostAuthDispatches.claim(msg.Target, p, msg.Session, time.Now()) {
-				metrics.hostAuthDuplicatesSuppressed.Add(1)
-				continue
+			claimedHostAuth := false
+			if msg.Type == "auth-request" {
+				if !hostAuthDispatches.claim(msg.Target, p, msg.Session, time.Now()) {
+					metrics.hostAuthDuplicatesSuppressed.Add(1)
+					continue
+				}
+				claimedHostAuth = true
 			}
 
 			forward := map[string]any{
@@ -396,6 +399,25 @@ func main() {
 				"payload": msg.Payload,
 			}
 			if err := target.write(forward); err != nil {
+				if claimedHostAuth {
+					hostAuthDispatches.release(msg.Target, p, msg.Session)
+					if shouldQueuePendingHostAuth(p, msg.Type) {
+						if pendingHostAuthRequests.enqueue(
+							msg.Target,
+							id,
+							msg.Session,
+							msg.Payload,
+							time.Now(),
+						) {
+							metrics.pendingHostAuthQueued.Add(1)
+						} else {
+							metrics.pendingHostAuthDropped.Add(1)
+						}
+					}
+				}
+				h.remove(msg.Target, target)
+				_ = target.conn.Close()
+				_ = p.write(map[string]any{"type": "peer-offline", "target": msg.Target})
 				log.Printf("forward %s -> %s: %v", id, msg.Target, err)
 			} else {
 				metrics.messagesForwarded.Add(1)
