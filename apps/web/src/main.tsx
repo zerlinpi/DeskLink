@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { accessProofAlgorithm, createAccessProof } from "./access_proof";
 import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";
 import "./styles.css";
 
@@ -70,6 +71,13 @@ const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
 const CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS = 90;
 const SIGNAL_PROTOCOL = "desklink-v1";
 const CONTROLLER_AUTH_PROTOCOL_PREFIX = "desklink-auth.";
+const HOST_SCOPED_SIGNAL_TYPES = new Set([
+  "auth-challenge",
+  "auth-accepted",
+  "auth-rejected",
+  "answer",
+  "ice",
+]);
 
 const TURN_URLS = TURN_URL.startsWith("turns:")
   ? [TURN_URL]
@@ -174,6 +182,7 @@ function App() {
   const signalReconnectTimerRef = useRef<number | null>(null);
   const signalReconnectAttemptRef = useRef(0);
   const manualDisconnectRef = useRef(false);
+  const initialPeerStartingRef = useRef(false);
   const controllerTokenRef = useRef(STATIC_SIGNAL_AUTH_TOKEN);
   const controllerTokenExpiryRef = useRef(STATIC_SIGNAL_AUTH_TOKEN ? Number.MAX_SAFE_INTEGER : 0);
   const controllerTokenTargetRef = useRef("");
@@ -454,7 +463,6 @@ function App() {
     if (!sendSignal("offer", {
       type: offer.type,
       sdp: offer.sdp,
-      accessCode,
       iceRestart,
     })) {
       negotiationPendingRef.current = false;
@@ -603,11 +611,110 @@ function App() {
     return pc;
   };
 
+  const startInitialPeer = async () => {
+    if (initialPeerStartingRef.current || pcRef.current || manualDisconnectRef.current) return;
+    initialPeerStartingRef.current = true;
+    setStatus("negotiating WebRTC");
+    try {
+      const authToken = await ensureSignalAuthToken(false);
+      const iceServers = await resolveIceServers(localId, authToken);
+      if (manualDisconnectRef.current || pcRef.current) return;
+
+      const pc = createPeer(iceServers);
+      const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+      const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
+      const h264Codecs = videoCapabilities?.codecs.filter(
+        (codec) => codec.mimeType.toLowerCase() === "video/h264",
+      );
+      if (h264Codecs?.length) transceiver.setCodecPreferences(h264Codecs);
+
+      if (!await sendOffer(pc, false)) setStatus("signal error");
+    } catch (error) {
+      console.debug("DeskLink initial connection setup failed", error);
+      disconnect(TURN_RUNTIME_REQUIRED ? "TURN credential error" : "signal error");
+    } finally {
+      initialPeerStartingRef.current = false;
+    }
+  };
+
   const handleSignalMessage = async (event: MessageEvent) => {
     let msg: SignalMessage;
     try {
       msg = JSON.parse(event.data);
     } catch {
+      return;
+    }
+
+    if (HOST_SCOPED_SIGNAL_TYPES.has(msg.type)) {
+      if (msg.from !== targetId.trim() || msg.session !== sessionRef.current) {
+        console.debug("DeskLink ignored host-scoped signal from unexpected peer/session", msg.type);
+        return;
+      }
+    }
+
+    if (msg.type === "auth-challenge") {
+      const algorithm = msg.payload?.algorithm;
+      const nonce = msg.payload?.nonce;
+      if (algorithm !== accessProofAlgorithm() || typeof nonce !== "string") {
+        disconnect("unsupported host authentication challenge");
+        return;
+      }
+      try {
+        setStatus("proving host access");
+        const proof = await createAccessProof(
+          accessCode,
+          localId,
+          targetId.trim(),
+          sessionRef.current,
+          nonce,
+        );
+        if (manualDisconnectRef.current) return;
+        if (!sendSignal("auth-proof", { algorithm, proof })) {
+          disconnect("host authentication signaling failed");
+        }
+      } catch (error) {
+        console.debug("DeskLink host access proof failed", error);
+        disconnect("host access authentication failed");
+      }
+      return;
+    }
+
+    if (msg.type === "auth-accepted") {
+      await startInitialPeer();
+      return;
+    }
+
+    if (msg.type === "auth-rejected") {
+      const reason = msg.payload?.reason;
+      if (reason === "host-unconfigured") {
+        disconnect("host access code not configured");
+      } else if (reason === "auth-busy") {
+        disconnect("host authentication busy");
+      } else if (reason === "auth-unavailable") {
+        disconnect("host authentication unavailable");
+      } else {
+        disconnect("access code rejected");
+      }
+      return;
+    }
+
+    if (msg.type === "peer-offline") {
+      const pc = pcRef.current;
+      if (!pc) {
+        setStatus("host offline");
+        return;
+      }
+      if (pc.connectionState === "connected") {
+        setStatus("control ready · host signaling offline");
+      } else {
+        setStatus("host offline · retrying");
+        scheduleIceRestart(pc, false);
+      }
+      return;
+    }
+
+    if (msg.type === "error" && msg.message?.includes("authorization scope")) {
+      disconnect("controller authorization rejected");
       return;
     }
 
@@ -647,18 +754,6 @@ function App() {
       } else {
         pendingRemoteIceRef.current.push(candidate);
       }
-    } else if (msg.type === "peer-offline") {
-      if (pc.connectionState === "connected") {
-        setStatus("control ready · host signaling offline");
-      } else {
-        setStatus("host offline · retrying");
-        scheduleIceRestart(pc, false);
-      }
-    } else if (msg.type === "auth-rejected") {
-      const reason = msg.payload?.reason;
-      disconnect(reason === "host-unconfigured" ? "host access code not configured" : "access code rejected");
-    } else if (msg.type === "error" && msg.message?.includes("authorization scope")) {
-      disconnect("controller authorization rejected");
     }
   };
 
@@ -700,36 +795,27 @@ function App() {
       void handleSignalMessage(event);
     };
 
-    ws.onopen = async () => {
+    ws.onopen = () => {
       if (wsRef.current !== ws || manualDisconnectRef.current) return;
       signalReconnectAttemptRef.current = 0;
       clearSignalReconnectTimer();
 
       if (initial) {
-        try {
-          const iceServers = await resolveIceServers(localId, authToken);
-          if (wsRef.current !== ws || manualDisconnectRef.current) return;
-
-          const pc = createPeer(iceServers);
-          const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
-          const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
-          const h264Codecs = videoCapabilities?.codecs.filter(
-            (codec) => codec.mimeType.toLowerCase() === "video/h264",
-          );
-          if (h264Codecs?.length) transceiver.setCodecPreferences(h264Codecs);
-
-          if (!await sendOffer(pc, false)) {
-            setStatus("signal error");
-          }
-        } catch (error) {
-          console.debug("DeskLink initial connection setup failed", error);
-          disconnect(TURN_RUNTIME_REQUIRED ? "TURN credential error" : "signal error");
+        setStatus("authorizing host");
+        if (!sendSignal("auth-request", { version: 1 })) {
+          disconnect("host authentication signaling failed");
         }
         return;
       }
 
       const pc = pcRef.current;
-      if (!pc) return;
+      if (!pc) {
+        setStatus("authorizing host");
+        if (!sendSignal("auth-request", { version: 1 })) {
+          disconnect("host authentication signaling failed");
+        }
+        return;
+      }
       if (pc.connectionState === "connected") {
         setStatus("control ready");
       } else if (pc.connectionState !== "closed") {
@@ -770,6 +856,7 @@ function App() {
     iceRestartInFlightRef.current = false;
     negotiationPendingRef.current = false;
     signalReconnectAttemptRef.current = 0;
+    initialPeerStartingRef.current = false;
 
     if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
     pointerRafRef.current = null;
