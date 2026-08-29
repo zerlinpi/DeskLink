@@ -182,9 +182,10 @@ However, plain HMAC with a human-memorable low-entropy Access Code is not a PAKE
 - Audio: optional, later milestone.
 - `control` DataChannel: **bidirectional**, ordered/reliable. Controller -> host carries clicks/keyboard input that must not be lost, session safety commands, telemetry, video-quality preferences, monitor-switch requests and explicit clipboard operations. Host -> controller carries monitor state/switch results and explicit clipboard results/text.
 - `pointer` DataChannel: controller -> host; unordered with `maxRetransmits=0`. Used for pointer movement and wheel events where stale input should be discarded rather than retransmitted.
+- `file-transfer` DataChannel: ordered/reliable and isolated from input/control traffic. File-transfer v0 currently implements controller/browser -> Windows host uploads with chunk validation, flow control, cancellation and same-session network-reconnect resume.
 - Telemetry: controller reports decoder/network observations over the reliable control channel for adaptive bitrate/FPS/resolution decisions.
 
-ICE policy normally prefers direct candidates and uses TURN as fallback. A relay-only policy exists for validation/restrictive-network testing.
+ICE policy normally prefers direct candidates and uses TURN as fallback. A relay-only policy exists for validation/restrictive-network testing. Application signaling never carries file payload bytes; however, when ICE selects a TURN relay, encrypted WebRTC file traffic traverses that relay just like other relayed WebRTC traffic.
 
 ## Offer / answer / ICE ordering
 
@@ -269,7 +270,7 @@ The current Windows capture implementation enumerates and switches outputs attac
 
 ### Explicit bidirectional text clipboard
 
-Clipboard transport is intentionally **text-only, P2P, explicit and session-local**. It never travels through signaling, is not persisted by DeskLink, and does not continuously monitor either endpoint clipboard.
+Clipboard transport is intentionally **text-only, explicit and session-local**. It never travels through application signaling, is not persisted by DeskLink, and does not continuously monitor either endpoint clipboard. On a direct ICE path it is peer-to-peer; on a TURN-selected path it remains WebRTC encrypted but traverses the relay.
 
 Controller -> host:
 
@@ -285,9 +286,67 @@ Host -> controller:
 {"t":"clipboard-text","requestId":"uuid","text":"text read from Windows"}
 ```
 
-Failures use `clipboard-result` with `ok:false` and a short `error`. The current Windows/browser implementation caps one UTF-8 clipboard payload at **128 KiB** and uses Windows `CF_UNICODETEXT` on the host. Large content, images, directories and files are not clipboard-v0 payloads; they belong on the future chunked file-transfer channel.
+Failures use `clipboard-result` with `ok:false` and a short `error`. The current Windows/browser implementation caps one UTF-8 clipboard payload at **128 KiB** and uses Windows `CF_UNICODETEXT` on the host. Large content, images, directories and files are not clipboard-v0 payloads; files use the dedicated `file-transfer` channel.
 
 The browser UI only invokes local Clipboard APIs from explicit user actions. If browser permissions block `navigator.clipboard.readText()` or `writeText()`, the UI falls back to a visible text area so the user can manually paste/copy. Receiving remote text does not silently overwrite the controller's local clipboard.
+
+## File transfer v0
+
+File transfer uses a dedicated ordered/reliable WebRTC DataChannel named `file-transfer`. It is intentionally separated from the low-latency pointer channel and the small control-message channel, so large buffered file payloads do not become application-level input/control messages.
+
+The current v0 direction is **controller/browser -> Windows host**. Host -> browser downloads and a remote file browser are separate capabilities and must not be inferred from this upload protocol.
+
+A controller begins or resumes one file with a compact text message:
+
+```json
+{"t":"upload-begin","id":"4a8f...stable-transfer-id","name":"report.zip","size":734003200}
+```
+
+The host validates the transfer ID, sanitizes the filename, opens/creates its hidden partial file and replies with the byte offset it already has durably/previously accepted for this transfer ID:
+
+```json
+{"t":"upload-ready","id":"4a8f...stable-transfer-id","offset":104857600,"size":734003200}
+```
+
+The controller must treat the host `offset` as the source of truth. Buffered chunks that were counted as sent by the browser but never accepted by the host may therefore be retransmitted after a reconnect without corrupting the file.
+
+Each binary DataChannel message is one independently verified chunk:
+
+```text
+bytes 0..7    unsigned 64-bit little-endian file offset
+bytes 8..39   SHA-256(payload), exactly 32 raw digest bytes
+bytes 40..N   payload bytes
+```
+
+The current browser/Windows implementation caps one payload chunk at **32 KiB**. The host accepts a chunk only when its offset exactly equals the next expected byte, the payload does not exceed the declared file size and the SHA-256 digest matches. A mismatched offset causes the host to re-advertise its current `upload-ready` offset; invalid hashes/overflow/write failures produce an error instead of silently advancing the partial file.
+
+Progress and completion messages are host -> controller:
+
+```json
+{"t":"upload-progress","id":"...","received":105906176,"size":734003200}
+{"t":"upload-complete","id":"...","name":"report (1).zip","size":734003200}
+{"t":"upload-error","id":"...","error":"chunk-hash-mismatch"}
+```
+
+Cancellation is controller -> host:
+
+```json
+{"t":"upload-cancel","id":"..."}
+```
+
+On success the host replies:
+
+```json
+{"t":"upload-cancelled","id":"..."}
+```
+
+The current Windows receiver permits one active upload per `file-transfer` channel. The browser queues multiple selected/dropped files and sends them sequentially. The browser applies DataChannel backpressure with `bufferedAmount`: the current implementation stops adding chunks above a 2 MiB high-water mark and resumes after buffered data falls to the 512 KiB low-water mark.
+
+Verified partial files are retained when the DataChannel/PeerConnection is interrupted. While the same browser page still holds the original `File` object, a replacement PeerConnection opens a new `file-transfer` channel, resends `upload-begin` with the same transfer ID and resumes from the host-confirmed offset. A failed job can likewise retry with the same transfer ID. Full browser page reload is **not** resumable in v0 because the browser cannot silently reacquire the user's original local `File` permission/object; persistent browser file handles require a separate user-consented design.
+
+The current Windows product policy defaults the receive root to the interactive user's `Downloads\\DeskLink` and supports an administrator override via `DESKLINK_TRANSFER_DIR`. The controller does not provide an arbitrary remote filesystem path. Windows sanitizes unsafe/reserved filenames and finalizes to a non-overwriting unique destination name. The current Windows implementation caps a file at **20 GiB**; this is a product safety/resource limit, not a protocol-wide promise that other hosts must use the same maximum.
+
+File payload bytes are never wrapped in DeskLink signaling messages. With direct ICE they travel directly between WebRTC peers; with TURN they are still encrypted WebRTC DataChannel traffic but traverse the selected relay.
 
 Unreliable `pointer` channel:
 
@@ -311,4 +370,4 @@ Browser pointer-move events are coalesced to at most display animation cadence w
 7. Do not continuously encode while no authenticated controller is connected; retain only the latest converted GPU frame for fast static-desktop recovery.
 8. Keep input/control traffic independent from video queue pressure.
 9. Monitor switches are transactional: if the new capture/video pipeline cannot be established, retain or restore the previous monitor rather than reporting a false successful switch.
-10. Clipboard v0 remains bounded text control traffic. Large or resumable transfers must use a separately flow-controlled file-transfer protocol instead of oversized reliable control messages.
+10. Clipboard v0 remains bounded text control traffic. Large/resumable file payloads use the separately flow-controlled `file-transfer` DataChannel with bounded chunk size and browser-side buffered-amount backpressure.
