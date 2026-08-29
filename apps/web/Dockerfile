@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1
+
+FROM node:22-alpine AS build
+WORKDIR /app
+
+COPY package.json tsconfig.json index.html ./
+COPY src ./src
+
+# The browser controller is static, so public endpoints are injected at build
+# time. Production Compose uses same-origin /ws and /api routes to avoid CORS
+# and mixed-content mistakes behind HTTPS.
+ARG VITE_SIGNAL_URL=/ws
+ARG VITE_CONTROLLER_SESSION_URL=/api/v1/controller-session
+ARG VITE_CONTROLLER_AUTH_REQUIRED=1
+ARG VITE_STUN_URL=
+ARG VITE_TURN_URL=
+ARG VITE_TURN_TLS_URL=
+ARG VITE_TURN_CREDENTIALS_URL=/api/v1/turn-credentials
+ARG VITE_TURN_RUNTIME_REQUIRED=1
+ARG VITE_ICE_TRANSPORT_POLICY=all
+
+ENV VITE_SIGNAL_URL=${VITE_SIGNAL_URL} \
+    VITE_CONTROLLER_SESSION_URL=${VITE_CONTROLLER_SESSION_URL} \
+    VITE_CONTROLLER_AUTH_REQUIRED=${VITE_CONTROLLER_AUTH_REQUIRED} \
+    VITE_STUN_URL=${VITE_STUN_URL} \
+    VITE_TURN_URL=${VITE_TURN_URL} \
+    VITE_TURN_TLS_URL=${VITE_TURN_TLS_URL} \
+    VITE_TURN_CREDENTIALS_URL=${VITE_TURN_CREDENTIALS_URL} \
+    VITE_TURN_RUNTIME_REQUIRED=${VITE_TURN_RUNTIME_REQUIRED} \
+    VITE_ICE_TRANSPORT_POLICY=${VITE_ICE_TRANSPORT_POLICY}
+
+RUN npm install \
+    && npm run build
+
+FROM nginx:alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
