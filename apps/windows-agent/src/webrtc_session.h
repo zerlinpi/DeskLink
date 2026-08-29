@@ -34,6 +34,8 @@ struct SessionConfig {
   uint16_t turn_port{3478};
   std::string turn_username{"desklink"};
   std::string turn_password{"CHANGE_ME_NOW"};
+  uint32_t media_pacing_bitrate_bps{14'400'000};
+  uint32_t media_pacing_interval_ms{5};
   std::function<void(const NetworkFeedback&)> on_network_feedback;
   std::function<void()> on_keyframe_requested;
 };
