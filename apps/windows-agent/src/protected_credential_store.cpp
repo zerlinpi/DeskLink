@@ -67,11 +67,14 @@ std::wstring SecretFilePath(const SecretSpec& spec) {
 }
 
 bool ValidDeviceCredential(const std::wstring& credential) {
-  if (credential.size() < 8 || credential.size() > 512 || credential.rfind(L"dc1.", 0) != 0) {
+  const bool supported_prefix =
+      credential.rfind(L"dc1.", 0) == 0 || credential.rfind(L"dc2.", 0) == 0;
+  if (credential.size() < 8 || credential.size() > 512 || !supported_prefix) {
     return false;
   }
   return std::all_of(credential.begin(), credential.end(), [](wchar_t ch) {
-    return std::iswalnum(ch) || ch == L'.' || ch == L'-' || ch == L'_';
+    return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+           (ch >= L'0' && ch <= L'9') || ch == L'.' || ch == L'-' || ch == L'_';
   });
 }
 
@@ -394,7 +397,7 @@ bool StoreProtectedDeviceCredential(
       kDeviceCredentialSpec,
       credential,
       ValidDeviceCredential,
-      L"Device credential must be a valid dc1 credential",
+      L"Device credential must be a valid dc1 or dc2 credential",
       error);
 }
 
