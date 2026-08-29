@@ -56,6 +56,34 @@ setx /M DESKLINK_TURN_RUNTIME_REQUIRED "1"
 
 Restart the DeskLink Service after changing machine environment variables.
 
+## Revoke one device
+
+DeskLink can now revoke one `deviceId` without rotating the master device secret.
+
+For a small emergency list, set a comma/space/newline-separated value:
+
+```bash
+DESKLINK_REVOKED_DEVICE_IDS=win-office-01,win-laptop-02
+```
+
+For production, prefer a root/admin-owned read-only text file and point the signaling service at it:
+
+```bash
+DESKLINK_REVOKED_DEVICE_IDS_FILE=/run/secrets/desklink-revoked-devices
+```
+
+The file may contain one device ID per line or comma/space-separated values. It is read on authentication/credential checks rather than cached, so editing the file takes effect without restarting the signaling process.
+
+A revoked device is denied at all current credential boundaries:
+
+- `/api/v1/signal-token` returns `403` even when the device presents the correct long-lived credential;
+- `/api/v1/turn-credentials` returns `403` even when the device still has an unexpired short-lived signal token;
+- new WebSocket registration is rejected;
+- existing signaling WebSockets are rechecked on the 30-second keepalive cycle and are actively closed after revocation;
+- another peer is not allowed to start new signaling toward a revoked target.
+
+If `DESKLINK_REVOKED_DEVICE_IDS_FILE` is configured but cannot be read, authentication/credential operations fail closed instead of silently ignoring the revocation source.
+
 ## Failure behavior
 
 With `DESKLINK_SIGNAL_TOKEN_REQUIRED=1`, the Agent does not attempt signaling registration with a stale/static token if device-token exchange fails. It enters the existing exponential signaling reconnect loop and retries later.
@@ -64,9 +92,9 @@ With `DESKLINK_TURN_RUNTIME_REQUIRED=1`, a failed TURN credential exchange disab
 
 ## Current security boundary and limitation
 
-The `dc1` credential is currently derived from a server master secret and the exact `deviceId` using HMAC-SHA256. This is a bootstrap architecture that avoids a database, but it has an important limitation: there is no per-device revocation list. Revoking one derived credential currently requires rotating the device-auth master secret, which invalidates every derived device credential.
+The `dc1` credential is currently derived from a server master secret and the exact `deviceId` using HMAC-SHA256. The new revocation list allows an individual device to be disabled without invalidating every other host.
 
-Before a public multi-user release, replace or extend this with a device registry that stores independent per-device credential hashes/keys and supports individual revocation, rotation, ownership transfer and audit history.
+However, `dc1` remains deterministic for a given master secret and `deviceId`. If that credential is leaked, removing the device from the revocation list would make the leaked credential valid again. A truly independent per-device credential rotation still requires a device registry that stores separate per-device credential hashes/keys and supports rotation, ownership transfer and audit history.
 
 Machine environment variables are also a deployment bridge, not the final Windows secret store. A hardened installer should move the long-lived device credential into Windows-protected storage (for example a service-owned DPAPI-protected secret) and pass only short-lived material to the user-session Agent.
 
