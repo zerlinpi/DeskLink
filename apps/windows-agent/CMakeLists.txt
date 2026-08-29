@@ -77,6 +77,8 @@ target_link_libraries(
 
 add_executable(desklink-service
   src/service_main.cpp
+  src/protected_credential_store.cpp
+  src/protected_credential_store.h
 )
 target_compile_definitions(desklink-service PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-service PRIVATE /W4 /permissive-)
@@ -84,6 +86,7 @@ target_link_libraries(
   desklink-service
   PRIVATE
     advapi32
+    crypt32
     userenv
     wtsapi32
 )
