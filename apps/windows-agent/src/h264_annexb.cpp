@@ -160,9 +160,13 @@ bool NormalizeH264AccessUnit(
     if (ConvertLengthPrefixed(data, size, nal_length_size, annexb)) return true;
   }
 
-  // Some MFTs omit/lose sequence-header metadata but still emit the common
-  // four-byte length-prefixed format. Try that as a conservative fallback.
-  if (nal_length_size != 4 && ConvertLengthPrefixed(data, size, 4, annexb)) return true;
+  // If framing metadata was missing or a vendor MFT changes representation,
+  // accept only a candidate length size that parses the entire access unit.
+  for (const uint8_t candidate : {uint8_t{4}, uint8_t{2}, uint8_t{1}}) {
+    if (candidate != nal_length_size && ConvertLengthPrefixed(data, size, candidate, annexb)) {
+      return true;
+    }
+  }
   return false;
 }
 
