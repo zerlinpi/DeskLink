@@ -82,6 +82,21 @@ func TestPendingHostAuthQueueCopiesPayload(t *testing.T) {
 	}
 }
 
+func TestPendingHostAuthRequiresControllerScope(t *testing.T) {
+	controller := &peer{id: "controller-a", controller: true}
+	host := &peer{id: "host-a", controller: false}
+
+	if !shouldQueuePendingHostAuth(controller, "auth-request") {
+		t.Fatal("authenticated controller auth-request should be eligible for offline queueing")
+	}
+	if shouldQueuePendingHostAuth(host, "auth-request") {
+		t.Fatal("host identities must not be able to occupy the offline controller auth queue")
+	}
+	if shouldQueuePendingHostAuth(controller, "offer") {
+		t.Fatal("only auth-request may be queued while the target is offline")
+	}
+}
+
 func TestHostAuthDispatchGuardSuppressesSameConnectionDuplicate(t *testing.T) {
 	guard := newHostAuthDispatchGuard()
 	now := time.Unix(1_700_000_000, 0)
