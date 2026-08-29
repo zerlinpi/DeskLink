@@ -25,6 +25,27 @@ For routed signaling messages the server preserves `type`, `session` and `payloa
 
 Browser runtime controller authorization is carried during the WebSocket handshake with the `desklink-v1` subprotocol plus a `desklink-auth.<short-lived-token>` subprotocol entry. Runtime controller tokens are intentionally not placed in the WebSocket URL. The older `auth` query parameter remains only for compatible native/development registration paths.
 
+### Registration lifetime and live device revocation
+
+Authenticated signaling registration is not perpetual. The server retains the verified expiry of both native-host signaling tokens and browser controller `ct1` tokens and actively closes the corresponding WebSocket when that registration token expires. A reconnect must therefore obtain/use a currently valid token again; an already-open socket cannot outlive the short-lived credential that authorized it.
+
+Device revocation is also enforced against already-connected peers. The signaling service performs a shared revocation sweep every 5 seconds. The revocation source is loaded once per sweep and then applied to the current peer snapshot, so the revocation-file I/O cost does not grow linearly with the number of connected peers. A controller is checked against the target device encoded in its scoped token; a native host is checked against its own device ID. Authentication/token endpoints still check the revocation source directly so new registrations fail closed immediately.
+
+When a live device/target becomes revoked, the server emits the server-owned event below before closing the affected signaling connection:
+
+```json
+{
+  "type": "device-revoked",
+  "target": "office-pc"
+}
+```
+
+`device-revoked` is deliberately **not** an allowed client-originated signaling type. A controller or host attempting to send that type receives the normal unsupported-signal error; only the signaling service may originate the forced-termination event.
+
+The browser treats `device-revoked` as a terminal state for the current remote-control attempt: it sends `release-all` when possible, stops telemetry and retry/wait timers, closes DataChannels/PeerConnection/WebSocket, clears the runtime controller token/session state, and does not automatically reconnect. The Windows host likewise releases injected keyboard/mouse state, closes the active PeerConnection, clears controller/session/challenge/one-time-offer authorization state, latches the registration as revoked, and suppresses signaling reconnect for the remainder of that `WebRtcSession` run. Explicit restart/reinitialization is required before a host can attempt registration again after administrative unrevocation.
+
+The signaling E2E suite verifies both active-message and idle-peer revocation paths. In particular, an idle controller and idle host can be revoked without sending any subsequent signaling message and must receive `device-revoked` and a `device revoked` WebSocket close within the sweep interval plus scheduler/network overhead. The suite also verifies that clients cannot forge the event.
+
 ## Remote-control Access Code authorization
 
 A reusable Access Code is **never sent in an offer**. A new remote-control session must complete a challenge/response before the initial PeerConnection is created.
