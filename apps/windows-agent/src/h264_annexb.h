@@ -12,12 +12,14 @@ bool NormalizeH264SequenceHeader(
     const uint8_t* data,
     size_t size,
     std::vector<uint8_t>* annexb,
-    uint8_t* nal_length_size);
+    uint8_t* nal_length_size,
+    bool* access_units_length_prefixed);
 
 bool NormalizeH264AccessUnit(
     const uint8_t* data,
     size_t size,
     uint8_t nal_length_size,
+    bool access_units_length_prefixed,
     std::vector<uint8_t>* annexb);
 
 bool H264AnnexBHasParameterSet(const std::vector<uint8_t>& bytes);
