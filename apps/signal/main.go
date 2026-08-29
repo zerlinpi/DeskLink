@@ -155,6 +155,7 @@ var upgrader = websocket.Upgrader{
 
 func main() {
 	h := newHub()
+	guard := newIPGuard()
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -162,19 +163,29 @@ func main() {
 	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		clientIP := requestClientIP(r)
+		if !guard.reserve(clientIP, time.Now()) {
+			w.Header().Set("Retry-After", "45")
+			http.Error(w, "too many connection attempts", http.StatusTooManyRequests)
+			return
+		}
+		defer guard.release(clientIP, time.Now())
+
 		id := r.URL.Query().Get("deviceId")
 		if !validDeviceID(id) {
 			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
 		if !signalRegistrationAuthorized(r, id) {
+			guard.authFailed(clientIP, time.Now())
 			http.Error(w, "unauthorized device registration", http.StatusUnauthorized)
 			return
 		}
+		guard.authSucceeded(clientIP, time.Now())
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Printf("upgrade: %v", err)
+			log.Printf("upgrade from %s: %v", clientIP, err)
 			return
 		}
 
