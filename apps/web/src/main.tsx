@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -74,6 +74,20 @@ function App() {
     const channel = pointerRef.current;
     if (channel?.readyState === "open") channel.send(JSON.stringify(payload));
   };
+
+  useEffect(() => {
+    const releaseAll = () => sendReliable({ t: "release-all" });
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") releaseAll();
+    };
+
+    window.addEventListener("blur", releaseAll);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("blur", releaseAll);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
 
   const stopTelemetry = () => {
     if (statsTimerRef.current !== null) window.clearInterval(statsTimerRef.current);
@@ -248,6 +262,7 @@ function App() {
   };
 
   const disconnect = (nextStatus = "idle") => {
+    sendReliable({ t: "release-all" });
     stopTelemetry();
     if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
     pointerRafRef.current = null;
@@ -407,6 +422,7 @@ function App() {
             sendReliable(pointFromEvent(e, "down"));
           }}
           onPointerUp={(e) => sendReliable(pointFromEvent(e, "up"))}
+          onPointerCancel={() => sendReliable({ t: "release-all" })}
           onWheel={(e) => {
             e.preventDefault();
             const magnitude = Math.max(1, Math.min(5, Math.round(Math.abs(e.deltaY) / 100)));
