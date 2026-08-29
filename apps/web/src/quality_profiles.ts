@@ -6,7 +6,9 @@ type ProfileOption = {
   detail: string;
 };
 
-type CreateDataChannel = RTCPeerConnection["createDataChannel"];
+type ControlChannelDetail = {
+  channel: RTCDataChannel;
+};
 
 const PROFILE_OPTIONS: ProfileOption[] = [
   { id: "auto", label: "自动", detail: "根据延迟、丢包和带宽动态调整" },
@@ -16,9 +18,6 @@ const PROFILE_OPTIONS: ProfileOption[] = [
 ];
 
 const profileById = new Map(PROFILE_OPTIONS.map((profile) => [profile.id, profile]));
-const peerPrototype = RTCPeerConnection.prototype;
-const originalCreateDataChannel: CreateDataChannel = peerPrototype.createDataChannel;
-
 let controlChannel: RTCDataChannel | null = null;
 let currentProfile: VideoProfile = "auto";
 let qualityButton: HTMLButtonElement | null = null;
@@ -72,15 +71,10 @@ function attachControlChannel(channel: RTCDataChannel) {
   });
 }
 
-peerPrototype.createDataChannel = function createDeskLinkDataChannel(
-  this: RTCPeerConnection,
-  label: string,
-  dataChannelDict?: RTCDataChannelInit,
-): RTCDataChannel {
-  const channel = originalCreateDataChannel.call(this, label, dataChannelDict);
-  if (label === "control") attachControlChannel(channel);
-  return channel;
-} as CreateDataChannel;
+window.addEventListener("desklink:control-channel", (event) => {
+  const detail = (event as CustomEvent<ControlChannelDetail>).detail;
+  if (detail?.channel) attachControlChannel(detail.channel);
+});
 
 function selectProfile(profile: VideoProfile) {
   currentProfile = profile;
@@ -165,3 +159,5 @@ window.addEventListener("keydown", (event) => {
 });
 
 mountQualityControl();
+
+export {};
