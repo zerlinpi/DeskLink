@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <string>
 
 #include <rtc/rtc.hpp>
@@ -180,6 +181,11 @@ int wmain(int argc, wchar_t** argv) {
       12'000'000,
       1'000'000,
       50'000'000);
+  const uint32_t min_bitrate = EnvUIntOr(
+      "DESKLINK_MIN_BITRATE_BPS",
+      std::min<uint32_t>(2'000'000, target_bitrate),
+      500'000,
+      target_bitrate);
   const uint32_t max_width = EnvUIntOr("DESKLINK_MAX_WIDTH", 1920, 640, 3840);
   const uint32_t max_height = EnvUIntOr("DESKLINK_MAX_HEIGHT", 1080, 360, 2160);
   const VideoSize encode_size = FitWithin(
@@ -211,6 +217,11 @@ int wmain(int argc, wchar_t** argv) {
     std::wcerr << L"Hardware H264 encoder unavailable; remote input remains available but video is disabled.\n";
   }
 
+  std::atomic<uint32_t> requested_bitrate{target_bitrate};
+  std::atomic_bool feedback_keyframe{false};
+  std::mutex adaptation_mutex;
+  auto last_bitrate_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+
   desklink::SessionConfig session_config;
   session_config.signal_url = EnvOr("DESKLINK_SIGNAL_URL", session_config.signal_url);
   session_config.device_id = EnvOr("DESKLINK_DEVICE_ID", DefaultDeviceId());
@@ -220,6 +231,49 @@ int wmain(int argc, wchar_t** argv) {
   session_config.turn_port = EnvPortOr("DESKLINK_TURN_PORT", session_config.turn_port);
   session_config.turn_username = EnvOr("DESKLINK_TURN_USERNAME", session_config.turn_username);
   session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);
+  session_config.on_network_feedback = [&](const desklink::NetworkFeedback& feedback) {
+    std::scoped_lock lock(adaptation_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    const auto since_change = now - last_bitrate_change;
+    const uint32_t current = requested_bitrate.load(std::memory_order_relaxed);
+    uint32_t next = current;
+
+    const bool severe = feedback.loss_ratio >= 0.08 ||
+                        feedback.rtt_ms >= 250.0 ||
+                        feedback.jitter_ms >= 80.0;
+    const bool moderate = feedback.loss_ratio >= 0.03 ||
+                          feedback.rtt_ms >= 160.0 ||
+                          feedback.jitter_ms >= 45.0;
+    const bool healthy = feedback.loss_ratio < 0.01 &&
+                         (feedback.rtt_ms <= 0.0 || feedback.rtt_ms < 100.0) &&
+                         feedback.jitter_ms < 30.0;
+
+    if (severe && since_change >= std::chrono::seconds(1)) {
+      next = std::max<uint32_t>(min_bitrate, static_cast<uint32_t>(current * 0.65));
+    } else if (moderate && since_change >= std::chrono::seconds(2)) {
+      next = std::max<uint32_t>(min_bitrate, static_cast<uint32_t>(current * 0.82));
+    } else if (healthy && since_change >= std::chrono::seconds(5)) {
+      const uint32_t increase = std::max<uint32_t>(250'000, current / 12);
+      next = std::min<uint32_t>(target_bitrate, current + increase);
+    }
+
+    if (feedback.available_incoming_bitrate_bps > 0.0 &&
+        feedback.available_incoming_bitrate_bps < static_cast<double>(current) * 1.05) {
+      const uint32_t capacity_target = std::max<uint32_t>(
+          min_bitrate,
+          static_cast<uint32_t>(feedback.available_incoming_bitrate_bps * 0.82));
+      next = std::min(next, capacity_target);
+    }
+
+    next = std::clamp(next, min_bitrate, target_bitrate);
+    if (next != current) {
+      requested_bitrate.store(next, std::memory_order_relaxed);
+      last_bitrate_change = now;
+      if (next < current && feedback.loss_ratio >= 0.15) {
+        feedback_keyframe.store(true, std::memory_order_relaxed);
+      }
+    }
+  };
 
   if (session_config.access_code.empty()) {
     std::wcerr << L"SECURITY: DESKLINK_ACCESS_CODE is not set; incoming remote-control offers will be rejected.\n";
@@ -236,7 +290,8 @@ int wmain(int argc, wchar_t** argv) {
              << L"Stream target: " << encode_size.width << L"x" << encode_size.height
              << L" @ " << target_fps << L" fps, "
              << std::fixed << std::setprecision(1)
-             << (target_bitrate / 1'000'000.0) << L" Mbps\n"
+             << (target_bitrate / 1'000'000.0) << L" Mbps max, "
+             << (min_bitrate / 1'000'000.0) << L" Mbps min\n"
              << L"Press Ctrl+C to stop.\n";
 
   using clock = std::chrono::steady_clock;
@@ -246,14 +301,34 @@ int wmain(int argc, wchar_t** argv) {
   uint64_t sent_frames = 0;
   uint64_t encoded_bytes = 0;
   uint64_t timeout_ticks = 0;
+  uint32_t active_bitrate = target_bitrate;
   bool was_connected = false;
 
   while (g_running) {
     const bool connected = session.connected();
     if (connected && !was_connected && encoder_ready) {
       encoder.RequestKeyframe();
+    } else if (!connected && was_connected && encoder_ready && active_bitrate != target_bitrate) {
+      if (encoder.SetBitrate(target_bitrate)) {
+        active_bitrate = target_bitrate;
+        requested_bitrate.store(target_bitrate, std::memory_order_relaxed);
+      }
     }
     was_connected = connected;
+
+    if (connected && encoder_ready) {
+      const uint32_t desired_bitrate = requested_bitrate.load(std::memory_order_relaxed);
+      if (desired_bitrate != active_bitrate) {
+        if (encoder.SetBitrate(desired_bitrate)) {
+          active_bitrate = desired_bitrate;
+        } else {
+          requested_bitrate.store(active_bitrate, std::memory_order_relaxed);
+        }
+      }
+      if (feedback_keyframe.exchange(false, std::memory_order_relaxed)) {
+        encoder.RequestKeyframe();
+      }
+    }
 
     auto frame = capture.Acquire(16);
     if (frame) {
@@ -294,6 +369,7 @@ int wmain(int argc, wchar_t** argv) {
                  << L" fps, encode=" << encode_fps
                  << L" fps, sent=" << sent_frames
                  << L", media=" << media_mbps << L" Mbps"
+                 << L", target=" << (active_bitrate / 1'000'000.0) << L" Mbps"
                  << L", idle=" << timeout_ticks
                  << (connected ? L", controller=connected" : L", controller=waiting")
                  << L"        \r" << std::flush;
