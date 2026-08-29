@@ -1,5 +1,7 @@
 #include "desktop_capture.h"
 
+#include <windows.h>
+
 #include <chrono>
 #include <iostream>
 
@@ -10,6 +12,34 @@ uint64_t Now100ns() {
   using namespace std::chrono;
   return static_cast<uint64_t>(
       duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count() / 100);
+}
+
+std::string WideToUtf8(const wchar_t* text) {
+  if (!text || !*text) return {};
+  const int required = WideCharToMultiByte(
+      CP_UTF8,
+      WC_ERR_INVALID_CHARS,
+      text,
+      -1,
+      nullptr,
+      0,
+      nullptr,
+      nullptr);
+  if (required <= 1) return {};
+
+  std::string result(static_cast<size_t>(required - 1), '\0');
+  if (WideCharToMultiByte(
+          CP_UTF8,
+          WC_ERR_INVALID_CHARS,
+          text,
+          -1,
+          result.data(),
+          required,
+          nullptr,
+          nullptr) <= 0) {
+    return {};
+  }
+  return result;
 }
 
 }  // namespace
@@ -44,10 +74,19 @@ bool DesktopCapture::Initialize(ID3D11Device* device, uint32_t output_index) {
   return RecreateDuplication();
 }
 
+void DesktopCapture::ReleaseAcquiredFrame() {
+  if (duplication_ && frame_acquired_) {
+    duplication_->ReleaseFrame();
+  }
+  frame_acquired_ = false;
+}
+
 bool DesktopCapture::RecreateDuplication() {
+  ReleaseAcquiredFrame();
   duplication_.Reset();
   output_.Reset();
-  frame_acquired_ = false;
+
+  if (!adapter_ || !device_) return false;
 
   Microsoft::WRL::ComPtr<IDXGIOutput> output;
   HRESULT hr = adapter_->EnumOutputs(output_index_, &output);
@@ -82,13 +121,59 @@ bool DesktopCapture::RecreateDuplication() {
   return true;
 }
 
+std::vector<DisplayInfo> DesktopCapture::EnumerateOutputs() const {
+  std::vector<DisplayInfo> displays;
+  if (!adapter_) return displays;
+
+  const POINT origin{0, 0};
+  const HMONITOR primary_monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTONULL);
+
+  for (uint32_t index = 0;; ++index) {
+    Microsoft::WRL::ComPtr<IDXGIOutput> output;
+    const HRESULT hr = adapter_->EnumOutputs(index, &output);
+    if (hr == DXGI_ERROR_NOT_FOUND) break;
+    if (FAILED(hr) || !output) continue;
+
+    DXGI_OUTPUT_DESC desc{};
+    if (FAILED(output->GetDesc(&desc))) continue;
+
+    DisplayInfo info;
+    info.index = index;
+    info.name = WideToUtf8(desc.DeviceName);
+    info.left = desc.DesktopCoordinates.left;
+    info.top = desc.DesktopCoordinates.top;
+    info.width = static_cast<uint32_t>(
+        desc.DesktopCoordinates.right - desc.DesktopCoordinates.left);
+    info.height = static_cast<uint32_t>(
+        desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top);
+    info.primary = primary_monitor != nullptr && desc.Monitor == primary_monitor;
+    displays.push_back(std::move(info));
+  }
+
+  return displays;
+}
+
+bool DesktopCapture::SwitchOutput(uint32_t output_index) {
+  if (!adapter_ || !device_) return false;
+  if (output_index == output_index_ && duplication_) return true;
+
+  const uint32_t previous_index = output_index_;
+  output_index_ = output_index;
+  if (RecreateDuplication()) return true;
+
+  std::wcerr << L"DesktopCapture: unable to switch to output " << output_index
+             << L"; restoring output " << previous_index << L"\n";
+  output_index_ = previous_index;
+  if (!RecreateDuplication()) {
+    std::wcerr << L"DesktopCapture: failed to restore previous output after switch failure\n";
+  }
+  return false;
+}
+
 std::optional<CapturedFrame> DesktopCapture::Acquire(uint32_t timeout_ms) {
   if (!duplication_) return std::nullopt;
 
-  if (frame_acquired_) {
-    duplication_->ReleaseFrame();
-    frame_acquired_ = false;
-  }
+  ReleaseAcquiredFrame();
 
   DXGI_OUTDUPL_FRAME_INFO info{};
   Microsoft::WRL::ComPtr<IDXGIResource> resource;
@@ -109,8 +194,7 @@ std::optional<CapturedFrame> DesktopCapture::Acquire(uint32_t timeout_ms) {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
   hr = resource.As(&texture);
   if (FAILED(hr)) {
-    duplication_->ReleaseFrame();
-    frame_acquired_ = false;
+    ReleaseAcquiredFrame();
     return std::nullopt;
   }
 
@@ -126,14 +210,12 @@ std::optional<CapturedFrame> DesktopCapture::Acquire(uint32_t timeout_ms) {
 }
 
 void DesktopCapture::Reset() {
-  if (duplication_ && frame_acquired_) {
-    duplication_->ReleaseFrame();
-  }
-  frame_acquired_ = false;
+  ReleaseAcquiredFrame();
   duplication_.Reset();
   output_.Reset();
   adapter_.Reset();
   device_.Reset();
+  output_index_ = 0;
   width_ = 0;
   height_ = 0;
   left_ = 0;
