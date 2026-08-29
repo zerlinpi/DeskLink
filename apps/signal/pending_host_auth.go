@@ -8,15 +8,21 @@ import (
 )
 
 const (
-	pendingHostAuthTTL            = 30 * time.Second
+	pendingHostAuthTTL            = 10 * time.Minute
 	hostAuthDispatchDedupeTTL     = 3 * time.Second
 	maxPendingHostAuthGlobal      = 512
 	maxPendingHostAuthPerTarget   = 32
 	maxHostAuthDispatchEntries    = 4096
 )
 
+type pendingHostAuthQueueKey struct {
+	source  *peer
+	session string
+}
+
 type pendingHostAuthSignal struct {
 	from      string
+	source    *peer
 	session   string
 	payload   json.RawMessage
 	expiresAt time.Time
@@ -24,18 +30,14 @@ type pendingHostAuthSignal struct {
 
 type pendingHostAuthQueue struct {
 	mu       sync.Mutex
-	byTarget map[string]map[string]pendingHostAuthSignal
+	byTarget map[string]map[pendingHostAuthQueueKey]pendingHostAuthSignal
 	total    int
 }
 
 func newPendingHostAuthQueue() *pendingHostAuthQueue {
 	return &pendingHostAuthQueue{
-		byTarget: make(map[string]map[string]pendingHostAuthSignal),
+		byTarget: make(map[string]map[pendingHostAuthQueueKey]pendingHostAuthSignal),
 	}
-}
-
-func pendingHostAuthKey(from, session string) string {
-	return from + "\x00" + session
 }
 
 func shouldQueuePendingHostAuth(source *peer, messageType string) bool {
@@ -59,12 +61,12 @@ func (q *pendingHostAuthQueue) pruneExpiredLocked(now time.Time) {
 
 func (q *pendingHostAuthQueue) enqueue(
 	target string,
-	from string,
+	source *peer,
 	session string,
 	payload json.RawMessage,
 	now time.Time,
 ) bool {
-	if target == "" || from == "" || session == "" {
+	if target == "" || source == nil || source.id == "" || session == "" {
 		return false
 	}
 
@@ -74,11 +76,11 @@ func (q *pendingHostAuthQueue) enqueue(
 
 	entries := q.byTarget[target]
 	if entries == nil {
-		entries = make(map[string]pendingHostAuthSignal)
+		entries = make(map[pendingHostAuthQueueKey]pendingHostAuthSignal)
 		q.byTarget[target] = entries
 	}
 
-	key := pendingHostAuthKey(from, session)
+	key := pendingHostAuthQueueKey{source: source, session: session}
 	if _, exists := entries[key]; !exists {
 		if len(entries) >= maxPendingHostAuthPerTarget || q.total >= maxPendingHostAuthGlobal {
 			return false
@@ -87,12 +89,37 @@ func (q *pendingHostAuthQueue) enqueue(
 	}
 
 	entries[key] = pendingHostAuthSignal{
-		from:      from,
+		from:      source.id,
+		source:    source,
 		session:   session,
 		payload:   append(json.RawMessage(nil), payload...),
 		expiresAt: now.Add(pendingHostAuthTTL),
 	}
 	return true
+}
+
+func (q *pendingHostAuthQueue) removeSource(source *peer) int {
+	if source == nil {
+		return 0
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	removed := 0
+	for target, entries := range q.byTarget {
+		for key := range entries {
+			if key.source != source {
+				continue
+			}
+			delete(entries, key)
+			q.total--
+			removed++
+		}
+		if len(entries) == 0 {
+			delete(q.byTarget, target)
+		}
+	}
+	return removed
 }
 
 func (q *pendingHostAuthQueue) take(target string, now time.Time) []pendingHostAuthSignal {
@@ -193,8 +220,9 @@ var (
 func flushPendingHostAuthRequests(h *hub, target *peer, metrics *signalMetrics) {
 	requests := pendingHostAuthRequests.take(target.id, time.Now())
 	for index, request := range requests {
-		source := h.get(request.from)
-		if source == nil || !source.controller || !source.canSignalTarget(target.id) {
+		source := request.source
+		if source == nil || h.get(request.from) != source ||
+			!source.controller || !source.canSignalTarget(target.id) {
 			metrics.pendingHostAuthDropped.Add(1)
 			continue
 		}
@@ -219,9 +247,13 @@ func flushPendingHostAuthRequests(h *hub, target *peer, metrics *signalMetrics) 
 			hostAuthDispatches.release(target.id, source, request.session)
 			log.Printf("flush pending auth %s -> %s: %v", request.from, target.id, err)
 			for _, retry := range requests[index:] {
+				if retry.source == nil || h.get(retry.from) != retry.source {
+					metrics.pendingHostAuthDropped.Add(1)
+					continue
+				}
 				if !pendingHostAuthRequests.enqueue(
 					target.id,
-					retry.from,
+					retry.source,
 					retry.session,
 					retry.payload,
 					time.Now(),
