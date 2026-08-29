@@ -70,3 +70,16 @@ target_link_libraries(
     winmm
     winhttp
 )
+
+add_executable(desklink-service
+  src/service_main.cpp
+)
+target_compile_definitions(desklink-service PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-service PRIVATE /W4 /permissive-)
+target_link_libraries(
+  desklink-service
+  PRIVATE
+    advapi32
+    userenv
+    wtsapi32
+)
