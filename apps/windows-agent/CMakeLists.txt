@@ -83,6 +83,8 @@ add_executable(desklink-service
   src/protected_credential_store.h
   src/service_auth_broker.cpp
   src/service_auth_broker.h
+  src/service_auth_client.cpp
+  src/service_auth_client.h
   src/signal_token_client.cpp
   src/signal_token_client.h
 )
@@ -94,6 +96,7 @@ target_link_libraries(
     nlohmann_json::nlohmann_json
     advapi32
     crypt32
+    shell32
     userenv
     winhttp
     wtsapi32
