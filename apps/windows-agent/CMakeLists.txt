@@ -7,7 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Release artifacts are intended to be copy-deployable on supported Windows
 # machines. Use the static MSVC runtime for this project and all CMake
-# FetchContent dependencies so desklink-agent/service do not require a separately
+# FetchContent dependencies so DeskLink binaries do not require a separately
 # installed Visual C++ Redistributable merely to start.
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
@@ -120,6 +120,30 @@ target_link_libraries(
     userenv
     winhttp
     wtsapi32
+)
+
+# User-facing Windows setup/management executable. This is deliberately a native
+# Win32 binary with no extra runtime dependency. It installs Agent/Service into
+# Program Files, stores the Access Code/device credential with DPAPI, and writes
+# service-scoped environment settings so configuration applies immediately after
+# a Service restart without relying on stale machine environment blocks.
+add_executable(desklink-manager WIN32
+  src/setup_main.cpp
+  src/protected_credential_store.cpp
+  src/protected_credential_store.h
+)
+set_target_properties(desklink-manager PROPERTIES OUTPUT_NAME "DeskLink")
+target_compile_definitions(desklink-manager PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-manager PRIVATE /W4 /permissive-)
+target_link_options(desklink-manager PRIVATE "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
+target_link_libraries(
+  desklink-manager
+  PRIVATE
+    advapi32
+    comctl32
+    crypt32
+    shell32
+    user32
 )
 
 add_executable(desklink-service-auth-smoke
