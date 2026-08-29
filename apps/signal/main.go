@@ -189,6 +189,7 @@ func originAllowed(origin string) bool {
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
+	Subprotocols:    []string{"desklink-v1"},
 	CheckOrigin: func(r *http.Request) bool {
 		return originAllowed(r.Header.Get("Origin"))
 	},
