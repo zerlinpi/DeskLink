@@ -44,6 +44,8 @@ add_executable(desklink-agent
   src/input_injector.cpp
   src/input_injector.h
   src/performance_tuning.cpp
+  src/service_auth_client.cpp
+  src/service_auth_client.h
   src/service_shutdown_bridge.cpp
   src/signal_token_client.cpp
   src/signal_token_client.h
@@ -79,14 +81,20 @@ add_executable(desklink-service
   src/service_main.cpp
   src/protected_credential_store.cpp
   src/protected_credential_store.h
+  src/service_auth_broker.cpp
+  src/service_auth_broker.h
+  src/signal_token_client.cpp
+  src/signal_token_client.h
 )
 target_compile_definitions(desklink-service PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-service PRIVATE /W4 /permissive-)
 target_link_libraries(
   desklink-service
   PRIVATE
+    nlohmann_json::nlohmann_json
     advapi32
     crypt32
     userenv
+    winhttp
     wtsapi32
 )
