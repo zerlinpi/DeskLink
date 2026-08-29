@@ -10,37 +10,40 @@ import (
 )
 
 type signalMetrics struct {
-	activeConnections        atomic.Int64
-	totalConnections         atomic.Uint64
-	rateLimitedHandshakes    atomic.Uint64
-	authFailures             atomic.Uint64
-	messagesForwarded        atomic.Uint64
-	pendingHostAuthQueued    atomic.Uint64
-	pendingHostAuthDelivered atomic.Uint64
-	pendingHostAuthDropped   atomic.Uint64
+	activeConnections            atomic.Int64
+	totalConnections             atomic.Uint64
+	rateLimitedHandshakes        atomic.Uint64
+	authFailures                 atomic.Uint64
+	messagesForwarded            atomic.Uint64
+	pendingHostAuthQueued        atomic.Uint64
+	pendingHostAuthDelivered     atomic.Uint64
+	pendingHostAuthDropped       atomic.Uint64
+	hostAuthDuplicatesSuppressed atomic.Uint64
 }
 
 type signalMetricsSnapshot struct {
-	ActiveConnections        int64  `json:"activeConnections"`
-	TotalConnections         uint64 `json:"totalConnections"`
-	RateLimitedHandshakes    uint64 `json:"rateLimitedHandshakes"`
-	AuthFailures             uint64 `json:"authFailures"`
-	MessagesForwarded        uint64 `json:"messagesForwarded"`
-	PendingHostAuthQueued    uint64 `json:"pendingHostAuthQueued"`
-	PendingHostAuthDelivered uint64 `json:"pendingHostAuthDelivered"`
-	PendingHostAuthDropped   uint64 `json:"pendingHostAuthDropped"`
+	ActiveConnections            int64  `json:"activeConnections"`
+	TotalConnections             uint64 `json:"totalConnections"`
+	RateLimitedHandshakes        uint64 `json:"rateLimitedHandshakes"`
+	AuthFailures                 uint64 `json:"authFailures"`
+	MessagesForwarded            uint64 `json:"messagesForwarded"`
+	PendingHostAuthQueued        uint64 `json:"pendingHostAuthQueued"`
+	PendingHostAuthDelivered     uint64 `json:"pendingHostAuthDelivered"`
+	PendingHostAuthDropped       uint64 `json:"pendingHostAuthDropped"`
+	HostAuthDuplicatesSuppressed uint64 `json:"hostAuthDuplicatesSuppressed"`
 }
 
 func (m *signalMetrics) snapshot() signalMetricsSnapshot {
 	return signalMetricsSnapshot{
-		ActiveConnections:        m.activeConnections.Load(),
-		TotalConnections:         m.totalConnections.Load(),
-		RateLimitedHandshakes:    m.rateLimitedHandshakes.Load(),
-		AuthFailures:             m.authFailures.Load(),
-		MessagesForwarded:        m.messagesForwarded.Load(),
-		PendingHostAuthQueued:    m.pendingHostAuthQueued.Load(),
-		PendingHostAuthDelivered: m.pendingHostAuthDelivered.Load(),
-		PendingHostAuthDropped:   m.pendingHostAuthDropped.Load(),
+		ActiveConnections:            m.activeConnections.Load(),
+		TotalConnections:             m.totalConnections.Load(),
+		RateLimitedHandshakes:        m.rateLimitedHandshakes.Load(),
+		AuthFailures:                 m.authFailures.Load(),
+		MessagesForwarded:            m.messagesForwarded.Load(),
+		PendingHostAuthQueued:        m.pendingHostAuthQueued.Load(),
+		PendingHostAuthDelivered:     m.pendingHostAuthDelivered.Load(),
+		PendingHostAuthDropped:       m.pendingHostAuthDropped.Load(),
+		HostAuthDuplicatesSuppressed: m.hostAuthDuplicatesSuppressed.Load(),
 	}
 }
 
