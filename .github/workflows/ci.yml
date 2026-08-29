@@ -181,6 +181,34 @@ jobs:
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64
       - name: Build
         run: cmake --build build/windows-agent --config Release --parallel
+      - name: Validate portable Windows dependencies
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe was not found" }
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $install) { throw "Visual C++ build tools installation was not found" }
+          $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if (-not $dumpbin) { throw "dumpbin.exe was not found" }
+
+          $forbidden = '(?im)^\s*(VCRUNTIME[^\s]*\.dll|MSVCP[^\s]*\.dll|libcrypto[^\s]*\.dll|libssl[^\s]*\.dll|datachannel[^\s]*\.dll)\s*$'
+          $binaries = @(
+            "build/windows-agent/Release/desklink-agent.exe",
+            "build/windows-agent/Release/desklink-service.exe"
+          )
+          foreach ($binary in $binaries) {
+            if (-not (Test-Path $binary)) { throw "missing artifact binary: $binary" }
+            $dependencies = & $dumpbin.FullName /DEPENDENTS $binary
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $binary" }
+            $dependencyText = $dependencies -join "`n"
+            Write-Host "Dependencies for $binary:"
+            Write-Host $dependencyText
+            if ($dependencyText -match $forbidden) {
+              throw "$binary has an external runtime dependency that must be bundled or statically linked"
+            }
+          }
       - name: Validate Access Code proof vector
         shell: pwsh
         run: |
