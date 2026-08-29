@@ -465,7 +465,9 @@ bool LaunchAgent(DWORD session_id) {
   startup.lpDesktop = desktop.data();
 
   PROCESS_INFORMATION process{};
+  const bool broker_mode = credential_status == desklink::ProtectedCredentialStatus::Loaded;
   DWORD creation_flags = CREATE_NO_WINDOW;
+  if (broker_mode) creation_flags |= CREATE_SUSPENDED;
   if (child_environment) creation_flags |= CREATE_UNICODE_ENVIRONMENT;
 
   const std::wstring working_directory = agent_path.parent_path().wstring();
@@ -497,9 +499,27 @@ bool LaunchAgent(DWORD session_id) {
     return false;
   }
 
+  // Put the still-suspended protected-mode Agent into its Job Object before any
+  // user-mode code can run. Non-broker development mode is already running here,
+  // but follows the same containment setup as before.
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  if (job) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits,
+            sizeof(limits)) ||
+        !AssignProcessToJobObject(job, process.hProcess)) {
+      CloseHandle(job);
+      job = nullptr;
+    }
+  }
+
   bool broker_started = true;
   std::wstring broker_error;
-  if (credential_status == desklink::ProtectedCredentialStatus::Loaded) {
+  if (broker_mode) {
     broker_started = desklink::StartServiceAuthBroker(
         auth_pipe_name,
         process.dwProcessId,
@@ -516,8 +536,13 @@ bool LaunchAgent(DWORD session_id) {
   CloseHandle(user_token);
 
   if (!broker_started) {
-    TerminateProcess(process.hProcess, 0);
+    if (job) {
+      TerminateJobObject(job, 0);
+    } else {
+      TerminateProcess(process.hProcess, 0);
+    }
     WaitForSingleObject(process.hProcess, 3000);
+    if (job) CloseHandle(job);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     CloseAgentStopEvent();
@@ -525,22 +550,27 @@ bool LaunchAgent(DWORD session_id) {
     return false;
   }
 
-  CloseHandle(process.hThread);
-
-  HANDLE job = CreateJobObjectW(nullptr, nullptr);
-  if (job) {
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &limits,
-            sizeof(limits)) ||
-        !AssignProcessToJobObject(job, process.hProcess)) {
-      CloseHandle(job);
-      job = nullptr;
+  if (broker_mode && ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+    const DWORD resume_error = GetLastError();
+    desklink::StopServiceAuthBroker();
+    if (job) {
+      TerminateJobObject(job, 0);
+    } else {
+      TerminateProcess(process.hProcess, 0);
     }
+    WaitForSingleObject(process.hProcess, 3000);
+    if (job) CloseHandle(job);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    CloseAgentStopEvent();
+    LogEvent(
+        EVENTLOG_ERROR_TYPE,
+        L"Unable to resume broker-gated Agent process (error " +
+            std::to_wstring(resume_error) + L")");
+    return false;
   }
+
+  CloseHandle(process.hThread);
 
   g_agent_process = process.hProcess;
   g_agent_job = job;
@@ -548,9 +578,7 @@ bool LaunchAgent(DWORD session_id) {
   LogEvent(
       EVENTLOG_INFORMATION_TYPE,
       L"Started desklink-agent.exe in session " + std::to_wstring(session_id) +
-          (credential_status == desklink::ProtectedCredentialStatus::Loaded
-               ? L" with Service-owned authentication broker"
-               : L""));
+          (broker_mode ? L" after Service authentication broker became ready" : L""));
   return true;
 }
 
