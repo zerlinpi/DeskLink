@@ -156,6 +156,8 @@ var upgrader = websocket.Upgrader{
 func main() {
 	h := newHub()
 	guard := newIPGuard()
+	var metrics signalMetrics
+	registerMetricsHandler(&metrics)
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -165,6 +167,7 @@ func main() {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		clientIP := requestClientIP(r)
 		if !guard.reserve(clientIP, time.Now()) {
+			metrics.rateLimitedHandshakes.Add(1)
 			w.Header().Set("Retry-After", "45")
 			http.Error(w, "too many connection attempts", http.StatusTooManyRequests)
 			return
@@ -180,6 +183,7 @@ func main() {
 		}
 		if !signalRegistrationAuthorized(r, id) {
 			guard.authFailed(clientIP, time.Now())
+			metrics.authFailures.Add(1)
 			http.Error(w, "unauthorized device registration", http.StatusUnauthorized)
 			return
 		}
@@ -190,6 +194,9 @@ func main() {
 			log.Printf("upgrade from %s: %v", clientIP, err)
 			return
 		}
+		metrics.activeConnections.Add(1)
+		metrics.totalConnections.Add(1)
+		defer metrics.activeConnections.Add(-1)
 
 		p := newPeer(id, conn)
 		h.put(p)
@@ -267,6 +274,8 @@ func main() {
 			}
 			if err := target.write(forward); err != nil {
 				log.Printf("forward %s -> %s: %v", id, msg.Target, err)
+			} else {
+				metrics.messagesForwarded.Add(1)
 			}
 		}
 	})
