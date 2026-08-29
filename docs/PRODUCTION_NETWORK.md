@@ -22,7 +22,7 @@ For production, place TURN nodes geographically close to users. A single distant
 
 Recommended baseline:
 
-- TCP 443: HTTPS/WSS signaling.
+- TCP 443: HTTPS/WSS signaling and runtime credential API.
 - UDP/TCP 3478: STUN/TURN.
 - TCP 5349: TURN/TLS (`turns:`).
 - UDP 49160-49299: TURN relay allocation range in the supplied TLS example.
@@ -74,18 +74,44 @@ DESKLINK_METRICS_TOKEN=<random-bearer-token>
 
 Then `GET /metricsz` with `Authorization: Bearer <token>` returns aggregate active/total connections, rate-limited handshakes, authentication failures and forwarded signaling-message counts. The endpoint returns 404 when no metrics token is configured.
 
+## Runtime TURN credentials
+
+DeskLink can issue coturn REST-compatible temporary credentials through the signaling service. Enable it only after signaling registration tokens are enabled:
+
+```bash
+DESKLINK_SIGNAL_AUTH_SECRET=<same-signal-HMAC-secret-used-for-registration>
+DESKLINK_TURN_AUTH_SECRET=<same-secret-configured-as-coturn-static-auth-secret>
+DESKLINK_TURN_CREDENTIAL_TTL=12h
+```
+
+`GET /api/v1/turn-credentials?deviceId=<device-id>` requires:
+
+```http
+Authorization: Bearer <valid-signal-registration-token-for-that-device-id>
+```
+
+The endpoint is absent unless both auth secrets are configured. Responses are `Cache-Control: no-store`. TURN credentials default to 12 hours and are capped at 24 hours.
+
+The TURN shared secret must never be delivered to Windows Agents or browsers. Clients receive only the temporary username/password pair generated from that secret.
+
 ## Browser controller
 
 Normal profile should prefer direct/UDP paths while keeping TLS available as a final relay candidate:
 
 ```dotenv
 VITE_SIGNAL_URL=wss://control.example.com/ws
+VITE_SIGNAL_DEVICE_ID=web-controller-01
+VITE_SIGNAL_AUTH_TOKEN=SHORT_LIVED_CONTROLLER_TOKEN
 VITE_STUN_URL=stun:turn.example.com:3478
 VITE_TURN_URL=turn:turn.example.com:3478
 VITE_TURN_TLS_URL=turns:turn.example.com:5349
-VITE_TURN_USERNAME=TEMPORARY_USERNAME
-VITE_TURN_PASSWORD=TEMPORARY_PASSWORD
+VITE_TURN_CREDENTIALS_URL=https://control.example.com/api/v1/turn-credentials
+VITE_TURN_RUNTIME_REQUIRED=1
 ```
+
+When `VITE_TURN_CREDENTIALS_URL` is configured, the controller fetches fresh temporary TURN credentials before the initial PeerConnection and again before every ICE restart, then updates the PeerConnection ICE configuration before renegotiating. This prevents long-lived browser tabs from attempting recovery with expired relay credentials.
+
+`VITE_TURN_RUNTIME_REQUIRED=1` makes credential-fetch failures fail closed instead of falling back to `VITE_TURN_USERNAME` / `VITE_TURN_PASSWORD`. Leave static credentials only for local development or controlled migration.
 
 The controller registers TURN/UDP and TURN/TCP from `VITE_TURN_URL`, and adds `VITE_TURN_TLS_URL` when configured. For explicit relay validation, set:
 
@@ -99,20 +125,29 @@ Use `apps/web/.env.restrictive.example` as the reference test profile. In normal
 
 The Windows host registers STUN plus TURN/UDP, TURN/TCP and TURN/TLS candidates through libdatachannel. TLS defaults to port `5349`; set `DESKLINK_TURN_TLS_PORT=0` to disable the TLS candidate or set another port when the relay uses a custom listener.
 
-Example:
+Production runtime-credential example:
 
 ```powershell
 $env:DESKLINK_SIGNAL_URL = "wss://control.example.com/ws"
+$env:DESKLINK_DEVICE_ID = "win-office-01"
 $env:DESKLINK_SIGNAL_AUTH_TOKEN = "SHORT_LIVED_DEVICE_TOKEN"
 $env:DESKLINK_STUN_URL = "stun:turn.example.com:3478"
 $env:DESKLINK_TURN_HOST = "turn.example.com"
 $env:DESKLINK_TURN_PORT = "3478"
 $env:DESKLINK_TURN_TLS_PORT = "5349"
-$env:DESKLINK_TURN_USERNAME = "TEMPORARY_USERNAME"
-$env:DESKLINK_TURN_PASSWORD = "TEMPORARY_PASSWORD"
+$env:DESKLINK_TURN_CREDENTIALS_URL = "https://control.example.com/api/v1/turn-credentials"
+$env:DESKLINK_TURN_RUNTIME_REQUIRED = "1"
 ```
 
-The Windows Agent intentionally does not print the full authenticated signaling URL, so registration tokens are not written to normal logs.
+For each new PeerConnection, the Agent requests a fresh temporary TURN username/password using its signaling registration token. With `DESKLINK_TURN_RUNTIME_REQUIRED=1`, a credential-fetch failure disables TURN for that new session instead of silently using configured static credentials. Direct/STUN ICE can still succeed when the network permits it.
+
+The Windows Agent intentionally does not print authenticated signaling URLs, registration tokens or TURN passwords to normal logs.
+
+## Windows service
+
+`desklink-service.exe` is a LocalSystem session supervisor. It launches `desklink-agent.exe` into the active logged-in user session, restarts the Agent after unexpected exits, and reacts to Windows session changes. The capture/input process itself therefore remains in the interactive user session instead of running as LocalSystem.
+
+This service currently provides logged-in unattended persistence. It does not yet claim Windows logon-screen or UAC Secure Desktop capture/control; those require a separate, tightly scoped privileged broker/session design.
 
 ## Regional relay policy
 
