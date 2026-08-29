@@ -1,60 +1,149 @@
-# Signaling device registration authentication
+# Signaling and controller authentication
 
-DeskLink's signaling server supports an optional HMAC registration gate controlled by `DESKLINK_SIGNAL_AUTH_SECRET`.
+DeskLink separates three credentials with different responsibilities:
 
-## Why it exists
+- a long-lived **device bootstrap credential** (`dc2` preferred, legacy `dc1` supported) used only to obtain short-lived host tokens;
+- a long-lived **controller key** (`ck1`) whose SHA-256 hash and allowed devices live in the server-side controller registry;
+- short-lived **signaling/controller session tokens** signed by `DESKLINK_SIGNAL_AUTH_SECRET`.
 
-Without a registration credential, anyone who knows or guesses a `deviceId` can attempt to register that ID. Because the hub intentionally keeps one live connection per device ID, an unauthenticated duplicate connection can otherwise displace the existing registration.
+The Windows remote-control Access Code is a separate host secret and is not a signaling registration credential.
 
-Development remains backward-compatible: when `DESKLINK_SIGNAL_AUTH_SECRET` is empty/unset, `/ws?deviceId=...` behaves exactly as before.
+## Host registration
 
-## Token format
-
-When the secret is enabled, the WebSocket URL must also contain an `auth` query parameter:
-
-```text
-wss://control.example.com/ws?deviceId=office-pc&auth=<token>
-```
-
-The token format is:
+When `DESKLINK_SIGNAL_AUTH_SECRET` is configured, a Windows host must present a valid short-lived token bound to its exact `deviceId`. The host obtains that token from:
 
 ```text
-<unix-expiry>.<base64url-hmac-sha256>
+GET /api/v1/signal-token?deviceId=<device-id>
+Authorization: Bearer <dc1-or-dc2-device-credential>
 ```
 
-The signature input is:
+The response is `no-store`. The default lifetime is 15 minutes and configured issuance is capped at one hour.
+
+For compatibility with the native Agent, host WebSocket registration currently uses:
 
 ```text
-deviceId + "\n" + unix-expiry
+wss://control.example.com/ws?deviceId=win-office-01&auth=<short-lived-host-token>
 ```
 
-The HMAC key is `DESKLINK_SIGNAL_AUTH_SECRET`. Tokens must be unexpired and may not be valid for more than 24 hours from the signaling server's current clock.
+Do not log full signaling query strings at the reverse proxy. The token is short-lived, but it is still a bearer credential until expiry.
 
-## Provisioning model
+When `DESKLINK_SIGNAL_AUTH_SECRET` is empty, unauthenticated WebSocket registration remains available for local development only.
 
-Do **not** put `DESKLINK_SIGNAL_AUTH_SECRET` into a browser bundle or native client. The secret belongs only on trusted backend infrastructure.
+## Independent device credentials
 
-The intended production flow is:
+Production should configure:
 
-1. user/device authenticates to the product account/device service;
-2. that trusted service mints a short-lived registration token for the exact `deviceId`;
-3. the browser/native client connects to signaling with `deviceId` + token;
-4. signaling validates the HMAC before upgrading the connection to WebSocket;
-5. the raw shared secret never leaves trusted backend infrastructure.
+```bash
+DESKLINK_DEVICE_CREDENTIALS_FILE=/run/desklink-secrets/devices.json
+```
 
-The current repository contains token mint/validate primitives and server-side enforcement. The browser and Windows clients still need an authenticated provisioning API before production deployments should enable `DESKLINK_SIGNAL_AUTH_SECRET`.
+Use the provisioning tool to create or rotate one random `dc2` credential for one exact device ID:
+
+```bash
+go run ./tools/auth/rotate-device-registry-credential.go \
+  /secure/path/devices.json win-office-01
+```
+
+The command prints the new `dc2...` value once. The registry stores only its SHA-256 hash. Running it again for the same device immediately rotates only that device without changing other hosts or restarting the signaling service.
+
+If `DESKLINK_DEVICE_CREDENTIALS_FILE` is configured, registry errors fail closed and DeskLink does **not** fall back to the legacy master-secret derivation. `DESKLINK_DEVICE_AUTH_SECRET` + `dc1` remains a migration/development path.
+
+## Browser controller sessions
+
+Do not put a long-lived controller secret or production signaling token in `VITE_*` build variables. Vite values are embedded in public JavaScript.
+
+Production browser authentication uses a server-side controller registry:
+
+```bash
+DESKLINK_CONTROLLER_CREDENTIALS_FILE=/run/desklink-secrets/controllers.json
+DESKLINK_CONTROLLER_SESSION_TTL=15m
+```
+
+Provision/rotate an account and the exact devices it may control:
+
+```bash
+go run ./tools/auth/set-controller-registry-key.go \
+  /secure/path/controllers.json alice win-office-01 win-laptop-02
+```
+
+The command prints a new random `ck1...` key. The registry stores only the SHA-256 hash and the allow-list. The browser user enters the account ID and key at runtime.
+
+The browser then sends:
+
+```text
+POST /api/v1/controller-session
+Content-Type: application/json
+
+{
+  "accountId": "alice",
+  "controllerId": "web-1234abcd",
+  "targetDeviceId": "win-office-01",
+  "accessKey": "ck1...."
+}
+```
+
+The response contains a short-lived `ct1` token bound to all of:
+
+- the browser `controllerId`;
+- the one authorized target `deviceId`;
+- an expiry timestamp.
+
+The browser keeps this token only in memory. It is refreshed when necessary and is cleared on disconnect.
+
+### WebSocket token transport
+
+Runtime controller tokens are intentionally kept out of the WebSocket URL. The browser requests these WebSocket subprotocols:
+
+```text
+desklink-v1
+desklink-auth.<ct1-token>
+```
+
+The signaling server parses the auth-bearing request value but negotiates/echoes only the fixed `desklink-v1` subprotocol. This reduces accidental bearer-token retention in ordinary URL/access logs.
+
+The legacy `?auth=` query remains supported for the native host and controlled compatibility tests. If both are present, the legacy query takes precedence.
+
+## Target authorization
+
+A valid controller session is not a general signaling pass. The signaling hub stores the target scope from the `ct1` token and checks every outgoing offer/ICE/auth message. A controller cannot redirect an already-issued token to another device.
+
+The browser also checks that host-scoped `auth-*`, SDP answer and ICE messages come from the expected target and current session before processing them.
+
+Revoking the target device invalidates new controller sessions, TURN issuance and WebSocket registration for controllers scoped to that target; existing signaling connections are rechecked on the keepalive cycle.
 
 ## TURN credentials
 
-`apps/signal/turn_credentials.go` separately implements coturn TURN REST temporary credential generation. It intentionally has no anonymous HTTP endpoint yet. TURN credentials should be issued only after the same account/device authentication boundary exists; otherwise a public credential endpoint would allow third parties to consume relay bandwidth.
+`GET /api/v1/turn-credentials?deviceId=...` accepts either:
 
-## Deployment guidance
+- a host signaling token for the same host ID; or
+- a controller `ct1` token whose authorized target matches the requested target device.
 
-When client provisioning is implemented:
+The coturn `static-auth-secret` remains server-side. Clients receive only temporary TURN REST credentials.
 
-- generate a long random `DESKLINK_SIGNAL_AUTH_SECRET` and store it in a secret manager;
-- rotate it deliberately; rotation invalidates outstanding registration tokens;
-- keep token TTL short (minutes rather than the 24-hour maximum where practical);
-- use HTTPS/WSS so query-string tokens are encrypted in transit;
-- configure reverse-proxy access logs to avoid retaining full query strings containing `auth` tokens;
-- keep signaling auth and host remote-control access codes as separate credentials with separate responsibilities.
+## Host Access Code proof
+
+The controller no longer places the reusable Access Code inside the WebRTC offer. Before the first offer it performs:
+
+```text
+auth-request
+  -> auth-challenge { nonce, algorithm: hmac-sha256-v1 }
+auth-proof { proof }
+  -> auth-accepted
+  -> offer { sdp, type }
+```
+
+The Windows host creates a 256-bit CSPRNG nonce valid for 15 seconds and only one proof attempt. The proof is HMAC-SHA256 over a canonical string containing the controller ID, host ID, signaling session ID and nonce. A successful proof authorizes one initial offer for 15 seconds. An already-authorized live PeerConnection may subsequently renegotiate for ICE restart without resending the reusable Access Code.
+
+This prevents the signaling service from receiving a reusable Access Code and prevents replay of an observed proof against a different nonce/session/device. It is **not a PAKE**: a weak human PIN can still be vulnerable to offline guessing by an observer that has the challenge and proof. Production deployments should therefore use a long random Access Code until DeskLink adopts a PAKE/OPAQUE-style low-entropy-password protocol.
+
+## Deployment rules
+
+For public deployment:
+
+- use HTTPS/WSS with publicly trusted certificates;
+- set `DESKLINK_ALLOWED_ORIGINS` and disable `DESKLINK_ALLOW_ANY_ORIGIN`;
+- use independent random values for signal and TURN server secrets;
+- keep `devices.json`, `controllers.json` and revocation files administrator-owned, non-world-writable and outside source control;
+- configure the reverse proxy not to log sensitive Authorization headers or full host `auth` query strings;
+- keep controller keys, device credentials, Access Codes and TURN shared secrets out of application logs;
+- use high-entropy Access Codes; do not rely on a short numeric PIN with the current HMAC proof protocol.
