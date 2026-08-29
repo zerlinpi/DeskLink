@@ -8,11 +8,16 @@ namespace desklink {
 
 bool GpuColorConverter::Initialize(
     ID3D11Device* device,
-    uint32_t width,
-    uint32_t height,
+    uint32_t input_width,
+    uint32_t input_height,
+    uint32_t output_width,
+    uint32_t output_height,
     uint32_t fps) {
   Reset();
-  if (!device || width == 0 || height == 0 || fps == 0) return false;
+  if (!device || input_width == 0 || input_height == 0 ||
+      output_width == 0 || output_height == 0 || fps == 0) {
+    return false;
+  }
 
   device_ = device;
   device_->GetImmediateContext(&context_);
@@ -35,12 +40,12 @@ bool GpuColorConverter::Initialize(
   content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
   content.InputFrameRate.Numerator = fps;
   content.InputFrameRate.Denominator = 1;
-  content.InputWidth = width;
-  content.InputHeight = height;
+  content.InputWidth = input_width;
+  content.InputHeight = input_height;
   content.OutputFrameRate.Numerator = fps;
   content.OutputFrameRate.Denominator = 1;
-  content.OutputWidth = width;
-  content.OutputHeight = height;
+  content.OutputWidth = output_width;
+  content.OutputHeight = output_height;
   content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
 
   hr = video_device_->CreateVideoProcessorEnumerator(&content, &enumerator_);
@@ -66,8 +71,8 @@ bool GpuColorConverter::Initialize(
   }
 
   D3D11_TEXTURE2D_DESC surface{};
-  surface.Width = width;
-  surface.Height = height;
+  surface.Width = output_width;
+  surface.Height = output_height;
   surface.MipLevels = 1;
   surface.ArraySize = 1;
   surface.Format = DXGI_FORMAT_NV12;
@@ -96,18 +101,21 @@ bool GpuColorConverter::Initialize(
     return false;
   }
 
-  const RECT target{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
-  video_context_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &target);
+  const RECT source_rect{0, 0, static_cast<LONG>(input_width), static_cast<LONG>(input_height)};
+  const RECT target_rect{0, 0, static_cast<LONG>(output_width), static_cast<LONG>(output_height)};
+  video_context_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &target_rect);
   video_context_->VideoProcessorSetStreamFrameFormat(
       processor_.Get(),
       0,
       D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-  video_context_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &target);
-  video_context_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &target);
+  video_context_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &source_rect);
+  video_context_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &target_rect);
   video_context_->VideoProcessorSetStreamAutoProcessingMode(processor_.Get(), 0, FALSE);
 
-  width_ = width;
-  height_ = height;
+  input_width_ = input_width;
+  input_height_ = input_height;
+  output_width_ = output_width;
+  output_height_ = output_height;
   return true;
 }
 
@@ -117,7 +125,7 @@ Microsoft::WRL::ComPtr<ID3D11Texture2D> GpuColorConverter::Convert(
 
   D3D11_TEXTURE2D_DESC source_desc{};
   bgra_texture->GetDesc(&source_desc);
-  if (source_desc.Width != width_ || source_desc.Height != height_) {
+  if (source_desc.Width != input_width_ || source_desc.Height != input_height_) {
     std::wcerr << L"GpuColorConverter: source size changed; reinitialize converter\n";
     return {};
   }
@@ -177,8 +185,10 @@ void GpuColorConverter::Reset() {
   video_device_.Reset();
   context_.Reset();
   device_.Reset();
-  width_ = 0;
-  height_ = 0;
+  input_width_ = 0;
+  input_height_ = 0;
+  output_width_ = 0;
+  output_height_ = 0;
 }
 
 }  // namespace desklink
