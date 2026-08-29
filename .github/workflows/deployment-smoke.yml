@@ -1,0 +1,48 @@
+name: Deployment Smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/web/**
+      - infra/production/**
+      - .github/workflows/deployment-smoke.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - apps/web/**
+      - infra/production/**
+      - .github/workflows/deployment-smoke.yml
+
+concurrency:
+  group: desklink-deployment-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  production-stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate bootstrap shell syntax
+        run: sh -n infra/production/bootstrap.sh
+
+      - name: Validate production Compose
+        run: |
+          docker compose \
+            --env-file infra/production/.env.example \
+            -f infra/production/docker-compose.yml \
+            config >/dev/null
+
+      - name: Build production Web container
+        run: |
+          docker build \
+            --build-arg VITE_SIGNAL_URL=/ws \
+            --build-arg VITE_CONTROLLER_SESSION_URL=/api/v1/controller-session \
+            --build-arg VITE_CONTROLLER_AUTH_REQUIRED=1 \
+            --build-arg VITE_STUN_URL=stun:turn.example.com:3478 \
+            --build-arg VITE_TURN_URL=turn:turn.example.com:3478 \
+            --build-arg VITE_TURN_CREDENTIALS_URL=/api/v1/turn-credentials \
+            --build-arg VITE_TURN_RUNTIME_REQUIRED=1 \
+            -t desklink-web:ci \
+            apps/web
