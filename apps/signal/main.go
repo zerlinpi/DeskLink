@@ -167,6 +167,10 @@ func main() {
 			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
+		if !signalRegistrationAuthorized(r, id) {
+			http.Error(w, "unauthorized device registration", http.StatusUnauthorized)
+			return
+		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
