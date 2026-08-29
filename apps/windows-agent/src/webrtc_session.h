@@ -32,6 +32,7 @@ struct SessionConfig {
   std::string turn_username{"desklink"};
   std::string turn_password{"CHANGE_ME_NOW"};
   std::function<void(const NetworkFeedback&)> on_network_feedback;
+  std::function<void()> on_keyframe_requested;
 };
 
 class WebRtcSession {
