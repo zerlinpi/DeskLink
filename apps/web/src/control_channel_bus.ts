@@ -1,5 +1,6 @@
 type ControlChannelDetail = {
   channel: RTCDataChannel;
+  peer: RTCPeerConnection;
 };
 
 type ControlMessageDetail = {
@@ -11,9 +12,9 @@ const MAX_CONTROL_MESSAGE_CHARS = 512 * 1024;
 const peerPrototype = RTCPeerConnection.prototype;
 const originalCreateDataChannel = peerPrototype.createDataChannel;
 
-function dispatchChannel(name: string, channel: RTCDataChannel) {
+function dispatchChannel(name: string, channel: RTCDataChannel, peer: RTCPeerConnection) {
   window.dispatchEvent(new CustomEvent<ControlChannelDetail>(name, {
-    detail: { channel },
+    detail: { channel, peer },
   }));
 }
 
@@ -25,7 +26,7 @@ peerPrototype.createDataChannel = function createDeskLinkDataChannel(
   const channel = originalCreateDataChannel.call(this, label, dataChannelDict);
   if (label !== "control") return channel;
 
-  dispatchChannel("desklink:control-channel", channel);
+  dispatchChannel("desklink:control-channel", channel, this);
 
   channel.addEventListener("message", (event) => {
     if (typeof event.data !== "string" ||
@@ -48,7 +49,7 @@ peerPrototype.createDataChannel = function createDeskLinkDataChannel(
   });
 
   channel.addEventListener("close", () => {
-    dispatchChannel("desklink:control-channel-closed", channel);
+    dispatchChannel("desklink:control-channel-closed", channel, this);
   });
 
   return channel;
