@@ -53,15 +53,6 @@ func issuedSignalTokenTTL() time.Duration {
 	return parsed
 }
 
-func bearerToken(r *http.Request) string {
-	const prefix = "Bearer "
-	value := strings.TrimSpace(r.Header.Get("Authorization"))
-	if len(value) <= len(prefix) || !strings.EqualFold(value[:len(prefix)], prefix) {
-		return ""
-	}
-	return strings.TrimSpace(value[len(prefix):])
-}
-
 func signalTokenHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
