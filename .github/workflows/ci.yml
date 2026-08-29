@@ -62,3 +62,12 @@ jobs:
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64
       - name: Build
         run: cmake --build build/windows-agent --config Release --parallel
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: desklink-windows-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/windows-agent/Release/desklink-agent.exe
+            build/windows-agent/Release/desklink-service.exe
