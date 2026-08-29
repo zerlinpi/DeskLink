@@ -26,6 +26,26 @@ type StatsBaseline = {
   framesDecoded: number;
 };
 
+type NetworkView = {
+  route: "direct" | "relay" | "unknown";
+  protocol: string;
+  rttMs: number | null;
+  lossPct: number;
+  jitterMs: number | null;
+  decodeFps: number;
+  availableIncomingBitrate: number | null;
+};
+
+const EMPTY_NETWORK_VIEW: NetworkView = {
+  route: "unknown",
+  protocol: "-",
+  rttMs: null,
+  lossPct: 0,
+  jitterMs: null,
+  decodeFps: 0,
+  availableIncomingBitrate: null,
+};
+
 const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL ?? "ws://localhost:8080/ws";
 const STUN_URL = import.meta.env.VITE_STUN_URL ?? "stun:stun.l.google.com:19302";
 const TURN_URL = import.meta.env.VITE_TURN_URL ?? "turn:localhost:3478";
@@ -46,6 +66,7 @@ function App() {
   const [targetId, setTargetId] = useState("");
   const [accessCode, setAccessCode] = useState("");
   const [status, setStatus] = useState("idle");
+  const [networkView, setNetworkView] = useState<NetworkView>(EMPTY_NETWORK_VIEW);
   const videoRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -149,6 +170,22 @@ function App() {
 
       if (!inboundVideo) return;
 
+      const localCandidate = selectedPair?.localCandidateId
+        ? report.get(selectedPair.localCandidateId) as any
+        : null;
+      const remoteCandidate = selectedPair?.remoteCandidateId
+        ? report.get(selectedPair.remoteCandidateId) as any
+        : null;
+      const usesRelay = localCandidate?.candidateType === "relay" || remoteCandidate?.candidateType === "relay";
+      const hasCandidatePath = Boolean(localCandidate || remoteCandidate);
+      const route: NetworkView["route"] = usesRelay
+        ? "relay"
+        : (hasCandidatePath ? "direct" : "unknown");
+      const protocol = [
+        localCandidate?.protocol,
+        localCandidate?.relayProtocol,
+      ].filter(Boolean).join("/") || selectedPair?.protocol || "-";
+
       const nowMs = performance.now();
       const current: StatsBaseline = {
         atMs: nowMs,
@@ -174,6 +211,16 @@ function App() {
         ? Number(selectedPair.availableIncomingBitrate)
         : null;
 
+      setNetworkView({
+        route,
+        protocol,
+        rttMs,
+        lossPct,
+        jitterMs,
+        decodeFps,
+        availableIncomingBitrate,
+      });
+
       sendReliable({
         t: "telemetry",
         rttMs,
@@ -182,6 +229,10 @@ function App() {
         jitterMs,
         framesDropped: Number(inboundVideo.framesDropped ?? 0),
         availableIncomingBitrate,
+        route,
+        protocol,
+        localCandidateType: localCandidate?.candidateType ?? null,
+        remoteCandidateType: remoteCandidate?.candidateType ?? null,
       });
     } catch (error) {
       console.debug("DeskLink telemetry collection failed", error);
@@ -558,6 +609,7 @@ function App() {
     wsRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     sessionRef.current = crypto.randomUUID();
+    setNetworkView(EMPTY_NETWORK_VIEW);
     setStatus(nextStatus);
   };
 
@@ -565,11 +617,18 @@ function App() {
     if (!targetId.trim() || !accessCode || status !== "idle") return;
     manualDisconnectRef.current = false;
     signalReconnectAttemptRef.current = 0;
+    setNetworkView(EMPTY_NETWORK_VIEW);
     setStatus("signaling");
     openSignalSocket(true);
   };
 
   const canConnect = status === "idle" && Boolean(targetId.trim()) && Boolean(accessCode);
+  const routeLabel = networkView.route === "relay"
+    ? "TURN relay"
+    : networkView.route === "direct" ? "Direct P2P" : "Route pending";
+  const bitrateMbps = networkView.availableIncomingBitrate == null
+    ? "-"
+    : (networkView.availableIncomingBitrate / 1_000_000).toFixed(1);
 
   return (
     <main className="shell">
@@ -640,6 +699,19 @@ function App() {
             }
           }}
         />
+
+        {status !== "idle" && (
+          <div className="network-hud" aria-label="WebRTC network diagnostics">
+            <span className={`route route-${networkView.route}`}>{routeLabel}</span>
+            <span>{networkView.protocol.toUpperCase()}</span>
+            <span>RTT {networkView.rttMs == null ? "-" : `${networkView.rttMs.toFixed(0)} ms`}</span>
+            <span>Loss {networkView.lossPct.toFixed(1)}%</span>
+            <span>Jitter {networkView.jitterMs == null ? "-" : `${networkView.jitterMs.toFixed(1)} ms`}</span>
+            <span>Decode {networkView.decodeFps.toFixed(0)} fps</span>
+            <span>Avail {bitrateMbps} Mbps</span>
+          </div>
+        )}
+
         {status === "idle" && <div className="empty">Enter the device ID and access code to start a low-latency session.</div>}
       </section>
     </main>
