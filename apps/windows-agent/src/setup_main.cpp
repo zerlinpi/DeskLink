@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -79,8 +80,13 @@ std::wstring GetControlText(HWND parent, int id) {
   if (!control) return {};
   const int length = GetWindowTextLengthW(control);
   if (length <= 0) return {};
-  std::wstring text(static_cast<size_t>(length), L'\0');
-  GetWindowTextW(control, text.data(), length + 1);
+
+  // GetWindowTextW writes a trailing NUL. Keep one extra wchar in the mutable
+  // buffer, then shrink the std::wstring back to the exact user-entered length.
+  std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+  const int copied = GetWindowTextW(control, text.data(), length + 1);
+  if (copied <= 0) return {};
+  text.resize(static_cast<size_t>(copied));
   return text;
 }
 
@@ -277,7 +283,7 @@ bool WriteServiceEnvironment(
       KEY_SET_VALUE,
       &key);
   if (open != ERROR_SUCCESS) {
-    if (error) *error = L"无法写入 DeskLink 服务配置：" + LastErrorMessage(open);
+    if (error) *error = L"无法写入 DeskLink 服务配置：" + LastErrorMessage(static_cast<DWORD>(open));
     return false;
   }
   const LONG set = RegSetValueExW(
@@ -289,7 +295,7 @@ bool WriteServiceEnvironment(
       static_cast<DWORD>(buffer.size() * sizeof(wchar_t)));
   RegCloseKey(key);
   if (set != ERROR_SUCCESS) {
-    if (error) *error = L"保存 DeskLink 服务配置失败：" + LastErrorMessage(set);
+    if (error) *error = L"保存 DeskLink 服务配置失败：" + LastErrorMessage(static_cast<DWORD>(set));
     return false;
   }
   return true;
@@ -438,7 +444,7 @@ void InstallOrUpdate(HWND window) {
   }
   if (!ValidDeviceId(device_id)) {
     cleanup();
-    ShowError(window, L"设备 ID 只能包含字母、数字、点、短横线和下划线，长度 1–128。 ");
+    ShowError(window, L"设备 ID 只能包含字母、数字、点、短横线和下划线，长度 1–128。");
     return;
   }
   int parsed_port = 0;
@@ -449,24 +455,24 @@ void InstallOrUpdate(HWND window) {
   }
   if (parsed_port < 1 || parsed_port > 65535) {
     cleanup();
-    ShowError(window, L"TURN 端口必须是 1–65535。 ");
+    ShowError(window, L"TURN 端口必须是 1–65535。");
     return;
   }
   if (!access_code.empty() && (access_code.size() < 8 || access_code.size() > 256)) {
     cleanup();
-    ShowError(window, L"访问码长度必须为 8–256 个字符。建议使用随机高强度访问码。 ");
+    ShowError(window, L"访问码长度必须为 8–256 个字符。建议使用随机高强度访问码。");
     return;
   }
   if (access_code.empty() && !HasProtectedAccessCode()) {
     cleanup();
-    ShowError(window, L"首次安装必须设置访问码。后续更新时可以留空，以保留已加密保存的访问码。 ");
+    ShowError(window, L"首次安装必须设置访问码。后续更新时可以留空，以保留已加密保存的访问码。");
     return;
   }
   if (!signal_token_url.empty() && device_credential.empty() && !HasProtectedDeviceCredential()) {
     cleanup();
     ShowError(
         window,
-        L"你启用了信令令牌接口，但当前没有设备凭证。\n\n请输入服务器生成的 dc2 设备凭证，或清空信令令牌接口使用开发模式。 ");
+        L"你启用了信令令牌接口，但当前没有设备凭证。\n\n请输入服务器生成的 dc2 设备凭证，或清空信令令牌接口使用开发模式。");
     return;
   }
 
