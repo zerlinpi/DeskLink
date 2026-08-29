@@ -17,6 +17,7 @@ class GpuColorConverter {
       uint32_t output_height,
       uint32_t fps = 60);
   Microsoft::WRL::ComPtr<ID3D11Texture2D> Convert(ID3D11Texture2D* bgra_texture);
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> LatestFrame() const;
   void Reset();
 
  private:
@@ -32,6 +33,7 @@ class GpuColorConverter {
   uint32_t input_height_{0};
   uint32_t output_width_{0};
   uint32_t output_height_{0};
+  bool has_frame_{false};
 };
 
 }  // namespace desklink
