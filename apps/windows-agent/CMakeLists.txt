@@ -17,6 +17,14 @@ set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
 set(PREFER_SYSTEM_LIB OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.12.0
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+FetchContent_Declare(
   libdatachannel
   GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
   GIT_TAG v0.24.5
