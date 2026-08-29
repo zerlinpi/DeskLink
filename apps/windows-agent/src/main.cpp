@@ -11,9 +11,11 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <string>
 
+#include <nlohmann/json.hpp>
 #include <rtc/rtc.hpp>
 
 #include "desktop_capture.h"
@@ -27,6 +29,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 std::atomic_bool g_running{true};
+constexpr uint32_t kNoMonitorSwitch = std::numeric_limits<uint32_t>::max();
 
 struct VideoSize {
   uint32_t width;
@@ -172,14 +175,10 @@ VideoProfileLimits LimitsForVideoProfile(
 
   switch (profile) {
     case desklink::VideoProfile::Original:
-      // Keep the full configured resolution. Weak-network protection may still
-      // reduce bitrate/FPS, but it will not silently lower spatial resolution.
       return {0, 0, target_fps, target_bitrate, "original"};
     case desklink::VideoProfile::High:
-      // A stable high-definition profile: 900p-class, up to 45 fps / 8 Mbps.
       return {1, 3, std::min<uint32_t>(target_fps, 45), bitrate_cap(8'000'000), "high"};
     case desklink::VideoProfile::Clear:
-      // Bandwidth-friendly profile: 720p-class, up to 30 fps / 4 Mbps.
       return {2, 3, std::min<uint32_t>(target_fps, 30), bitrate_cap(4'000'000), "clear"};
     case desklink::VideoProfile::Auto:
     default:
@@ -337,6 +336,8 @@ int wmain(int argc, wchar_t** argv) {
   std::atomic<uint32_t> profile_max_fps{target_fps};
   std::atomic<uint32_t> profile_best_resolution_tier{0};
   std::atomic<uint32_t> profile_worst_resolution_tier{3};
+  std::atomic<uint32_t> requested_output_index{kNoMonitorSwitch};
+  std::atomic_bool monitor_state_requested{false};
   std::atomic_bool keyframe_requested{false};
   std::mutex adaptation_mutex;
   auto last_bitrate_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
@@ -358,6 +359,12 @@ int wmain(int argc, wchar_t** argv) {
   session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);
   session_config.on_keyframe_requested = [&]() {
     keyframe_requested.store(true, std::memory_order_relaxed);
+  };
+  session_config.on_monitor_state_requested = [&]() {
+    monitor_state_requested.store(true, std::memory_order_relaxed);
+  };
+  session_config.on_monitor_switch_requested = [&](uint32_t index) {
+    requested_output_index.store(index, std::memory_order_relaxed);
   };
   session_config.on_video_profile_requested = [&](desklink::VideoProfile profile) {
     std::scoped_lock lock(adaptation_mutex);
@@ -545,7 +552,7 @@ int wmain(int argc, wchar_t** argv) {
 
   std::wcout << L"DeskLink Windows Agent\n"
              << L"GPU: " << adapter_desc.Description << L"\n"
-             << L"Desktop: output " << output_index << L" ("
+             << L"Desktop: output " << capture.output_index() << L" ("
              << source_width << L"x" << source_height << L", origin "
              << controlled_left << L"," << controlled_top << L")\n"
              << L"Stream target: " << encode_size.width << L"x" << encode_size.height
@@ -570,6 +577,40 @@ int wmain(int argc, wchar_t** argv) {
   uint32_t active_resolution_tier = 0;
   bool was_connected = false;
   auto last_cached_recovery = clock::now() - std::chrono::seconds(1);
+
+  auto apply_capture_geometry = [&]() {
+    source_width = capture.width();
+    source_height = capture.height();
+    controlled_left = capture.left();
+    controlled_top = capture.top();
+    controlled_width = static_cast<long>(capture.width());
+    controlled_height = static_cast<long>(capture.height());
+    session.SetControlledDesktopRect(
+        controlled_left,
+        controlled_top,
+        controlled_width,
+        controlled_height);
+  };
+
+  auto send_monitor_state = [&]() {
+    nlohmann::json monitors = nlohmann::json::array();
+    for (const auto& display : capture.EnumerateOutputs()) {
+      monitors.push_back({
+          {"index", display.index},
+          {"name", display.name},
+          {"left", display.left},
+          {"top", display.top},
+          {"width", display.width},
+          {"height", display.height},
+          {"primary", display.primary},
+      });
+    }
+    session.SendControlMessage(nlohmann::json{
+        {"t", "monitor-state"},
+        {"activeIndex", capture.output_index()},
+        {"monitors", std::move(monitors)},
+    }.dump());
+  };
 
   auto encode_and_send = [&](ID3D11Texture2D* nv12, uint64_t timestamp100ns) -> bool {
     if (!nv12 || !encoder_ready) return false;
@@ -676,6 +717,8 @@ int wmain(int argc, wchar_t** argv) {
       requested_fps.store(automatic.max_fps, std::memory_order_relaxed);
       requested_resolution_tier.store(automatic.best_resolution_tier, std::memory_order_relaxed);
       requested_bitrate.store(automatic.max_bitrate_bps, std::memory_order_relaxed);
+      requested_output_index.store(kNoMonitorSwitch, std::memory_order_relaxed);
+      monitor_state_requested.store(false, std::memory_order_relaxed);
       if (encoder_ready && active_bitrate != automatic.max_bitrate_bps) {
         if (encoder.SetBitrate(automatic.max_bitrate_bps)) {
           active_bitrate = automatic.max_bitrate_bps;
@@ -683,6 +726,50 @@ int wmain(int argc, wchar_t** argv) {
       }
     }
     was_connected = connected;
+
+    if (monitor_state_requested.exchange(false, std::memory_order_relaxed)) {
+      send_monitor_state();
+    }
+
+    const uint32_t requested_output =
+        requested_output_index.exchange(kNoMonitorSwitch, std::memory_order_relaxed);
+    if (requested_output != kNoMonitorSwitch) {
+      const uint32_t previous_output = capture.output_index();
+      bool switch_ok = true;
+      std::string switch_error;
+
+      if (requested_output != previous_output) {
+        if (!capture.SwitchOutput(requested_output)) {
+          switch_ok = false;
+          switch_error = "monitor-unavailable";
+        } else {
+          apply_capture_geometry();
+          const uint32_t previous_tier = active_resolution_tier;
+          if (!rebuild_video_pipeline(previous_tier, L"Monitor switched", true)) {
+            switch_ok = false;
+            switch_error = "video-pipeline-rebuild-failed";
+            if (capture.SwitchOutput(previous_output)) {
+              apply_capture_geometry();
+              if (!rebuild_video_pipeline(previous_tier, L"Monitor switch rollback", true)) {
+                switch_error = "video-pipeline-rollback-failed";
+              }
+            } else {
+              switch_error = "monitor-rollback-failed";
+            }
+          }
+        }
+      }
+
+      nlohmann::json switch_result = {
+          {"t", "monitor-switch-result"},
+          {"index", requested_output},
+          {"ok", switch_ok},
+          {"activeIndex", capture.output_index()},
+      };
+      if (!switch_ok) switch_result["error"] = switch_error;
+      session.SendControlMessage(switch_result.dump());
+      send_monitor_state();
+    }
 
     const uint32_t fps_ceiling = connected
         ? profile_max_fps.load(std::memory_order_relaxed)
@@ -762,6 +849,7 @@ int wmain(int argc, wchar_t** argv) {
       std::wcout << L"\nControlled monitor moved/resized to "
                  << controlled_left << L"," << controlled_top << L" "
                  << controlled_width << L"x" << controlled_height << L"\n";
+      monitor_state_requested.store(true, std::memory_order_relaxed);
     }
 
     if (frame) {
@@ -782,6 +870,7 @@ int wmain(int argc, wchar_t** argv) {
             std::wcerr << L"Video disabled after display change; remote input remains active.\n";
           }
         }
+        monitor_state_requested.store(true, std::memory_order_relaxed);
       }
 
       const bool recovery_requested = keyframe_requested.load(std::memory_order_relaxed);
@@ -848,6 +937,7 @@ int wmain(int argc, wchar_t** argv) {
                  << L", fps-target=" << active_fps
                  << L", size=" << encode_size.width << L"x" << encode_size.height
                  << L", tier=" << active_resolution_tier
+                 << L", output=" << capture.output_index()
                  << L", idle=" << timeout_ticks
                  << (connected ? L", controller=connected" : L", controller=waiting")
                  << L"        \r" << std::flush;
