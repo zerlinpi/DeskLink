@@ -44,6 +44,8 @@ add_executable(desklink-agent
   src/input_injector.cpp
   src/input_injector.h
   src/performance_tuning.cpp
+  src/signal_token_client.cpp
+  src/signal_token_client.h
   src/turn_credential_client.cpp
   src/turn_credential_client.h
   src/webrtc_session.cpp
