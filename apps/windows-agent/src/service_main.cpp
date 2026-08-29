@@ -10,9 +10,11 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "protected_credential_store.h"
+#include "service_auth_broker.h"
 
 namespace {
 
@@ -34,6 +36,7 @@ std::wstring g_agent_stop_event_name;
 DWORD g_agent_session = kNoSession;
 DWORD g_checkpoint = 1;
 uint64_t g_stop_event_counter = 0;
+uint64_t g_auth_pipe_counter = 0;
 
 void LogEvent(WORD type, const std::wstring& message) {
   OutputDebugStringW((L"DeskLink Service: " + message + L"\n").c_str());
@@ -113,6 +116,45 @@ std::filesystem::path AgentExecutablePath() {
   return service_path.parent_path() / L"desklink-agent.exe";
 }
 
+std::wstring EnvironmentValue(const wchar_t* name) {
+  const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
+  if (required == 0 || required > 32768) return {};
+  std::vector<wchar_t> buffer(required);
+  const DWORD length = GetEnvironmentVariableW(
+      name,
+      buffer.data(),
+      static_cast<DWORD>(buffer.size()));
+  if (length == 0 || length >= buffer.size()) return {};
+  return std::wstring(buffer.data(), length);
+}
+
+std::string WideToUtf8(const std::wstring& value) {
+  if (value.empty()) return {};
+  const int required = WideCharToMultiByte(
+      CP_UTF8,
+      WC_ERR_INVALID_CHARS,
+      value.data(),
+      static_cast<int>(value.size()),
+      nullptr,
+      0,
+      nullptr,
+      nullptr);
+  if (required <= 0) return {};
+  std::string result(static_cast<size_t>(required), '\0');
+  if (WideCharToMultiByte(
+          CP_UTF8,
+          WC_ERR_INVALID_CHARS,
+          value.data(),
+          static_cast<int>(value.size()),
+          result.data(),
+          required,
+          nullptr,
+          nullptr) != required) {
+    return {};
+  }
+  return result;
+}
+
 std::wstring OutputIndexArgument() {
   wchar_t buffer[16]{};
   const DWORD length = GetEnvironmentVariableW(
@@ -135,16 +177,20 @@ void SecureWipe(std::wstring* value) {
   value->clear();
 }
 
+void SecureWipe(std::string* value) {
+  if (!value || value->empty()) return;
+  SecureZeroMemory(value->data(), value->size());
+  value->clear();
+}
+
 void SecureWipe(std::vector<wchar_t>* value) {
   if (!value || value->empty()) return;
   SecureZeroMemory(value->data(), value->size() * sizeof(wchar_t));
   value->clear();
 }
 
-std::vector<wchar_t> BuildEnvironmentWithDeviceCredential(
-    LPVOID base_environment,
-    const std::wstring& credential) {
-  std::vector<wchar_t> result;
+std::vector<wchar_t> BuildEnvironmentWithoutDeviceCredential(LPVOID base_environment) {
+  std::vector<std::wstring> entries;
   constexpr size_t prefix_length =
       (sizeof(kDeviceCredentialPrefix) / sizeof(kDeviceCredentialPrefix[0])) - 1;
 
@@ -155,17 +201,20 @@ std::vector<wchar_t> BuildEnvironmentWithDeviceCredential(
         length >= prefix_length &&
         _wcsnicmp(cursor, kDeviceCredentialPrefix, prefix_length) == 0;
     if (!is_device_credential) {
-      result.insert(result.end(), cursor, cursor + length + 1);
+      entries.emplace_back(cursor, length);
     }
     cursor += length + 1;
   }
 
-  result.insert(
-      result.end(),
-      kDeviceCredentialPrefix,
-      kDeviceCredentialPrefix + prefix_length);
-  result.insert(result.end(), credential.begin(), credential.end());
-  result.push_back(L'\0');
+  std::sort(entries.begin(), entries.end(), [](const std::wstring& left, const std::wstring& right) {
+    return _wcsicmp(left.c_str(), right.c_str()) < 0;
+  });
+
+  std::vector<wchar_t> result;
+  for (const auto& entry : entries) {
+    result.insert(result.end(), entry.begin(), entry.end());
+    result.push_back(L'\0');
+  }
   result.push_back(L'\0');
   return result;
 }
@@ -234,8 +283,6 @@ bool CreateAgentStopEvent(DWORD session_id) {
   CloseAgentStopEvent();
 
   PSECURITY_DESCRIPTOR descriptor = nullptr;
-  // LocalSystem may signal the event; authenticated users receive only generic
-  // execute, which maps to SYNCHRONIZE for event objects (wait, but no SetEvent).
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
           L"D:P(A;;GA;;;SY)(A;;GX;;;AU)",
           SDDL_REVISION_1,
@@ -275,6 +322,13 @@ bool CreateAgentStopEvent(DWORD session_id) {
   return true;
 }
 
+std::wstring NewServiceAuthPipeName(DWORD session_id) {
+  const uint64_t nonce = ++g_auth_pipe_counter;
+  return L"\\\\.\\pipe\\DeskLink.Auth." + std::to_wstring(session_id) + L"." +
+         std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetTickCount64()) + L"." +
+         std::to_wstring(nonce);
+}
+
 bool AgentAlive() {
   return g_agent_process && WaitForSingleObject(g_agent_process, 0) == WAIT_TIMEOUT;
 }
@@ -300,6 +354,8 @@ void StopAgent() {
     }
     WaitForSingleObject(g_agent_process, 3000);
   }
+
+  desklink::StopServiceAuthBroker();
 
   if (g_agent_job) {
     CloseHandle(g_agent_job);
@@ -351,21 +407,41 @@ bool LaunchAgent(DWORD session_id) {
     CloseHandle(user_token);
     LogEvent(
         EVENTLOG_ERROR_TYPE,
-        L"CreateEnvironmentBlock failed; refusing to expose protected credential through fallback environment");
+        L"CreateEnvironmentBlock failed; protected Service authentication requires a child environment block");
     return false;
   }
 
   std::vector<wchar_t> protected_environment;
   LPVOID child_environment = has_environment ? environment : nullptr;
+  std::string broker_device_id;
+  std::string broker_endpoint;
+  std::string broker_credential;
+  std::wstring auth_pipe_name;
+
   if (credential_status == desklink::ProtectedCredentialStatus::Loaded) {
-    protected_environment = BuildEnvironmentWithDeviceCredential(
-        environment,
-        protected_credential);
+    protected_environment = BuildEnvironmentWithoutDeviceCredential(environment);
     child_environment = protected_environment.data();
+
+    broker_device_id = WideToUtf8(EnvironmentValue(L"DESKLINK_DEVICE_ID"));
+    broker_endpoint = WideToUtf8(EnvironmentValue(L"DESKLINK_SIGNAL_TOKEN_URL"));
+    broker_credential = WideToUtf8(protected_credential);
+    auth_pipe_name = NewServiceAuthPipeName(session_id);
+    if (broker_device_id.empty() || broker_endpoint.empty() || broker_credential.empty()) {
+      SecureWipe(&protected_credential);
+      SecureWipe(&broker_credential);
+      SecureWipe(&protected_environment);
+      if (has_environment) DestroyEnvironmentBlock(environment);
+      CloseHandle(user_token);
+      LogEvent(
+          EVENTLOG_ERROR_TYPE,
+          L"DPAPI device credential requires DESKLINK_DEVICE_ID and DESKLINK_SIGNAL_TOKEN_URL");
+      return false;
+    }
   }
 
   if (!CreateAgentStopEvent(session_id)) {
     SecureWipe(&protected_credential);
+    SecureWipe(&broker_credential);
     SecureWipe(&protected_environment);
     if (has_environment) DestroyEnvironmentBlock(environment);
     CloseHandle(user_token);
@@ -377,6 +453,9 @@ bool LaunchAgent(DWORD session_id) {
   if (output_index.empty()) output_index = L"0";
   command += L" " + output_index;
   command += L" --service-stop-event=\"" + g_agent_stop_event_name + L"\"";
+  if (!auth_pipe_name.empty()) {
+    command += L" --service-auth-pipe=\"" + auth_pipe_name + L"\"";
+  }
   std::vector<wchar_t> command_line(command.begin(), command.end());
   command_line.push_back(L'\0');
 
@@ -404,17 +483,45 @@ bool LaunchAgent(DWORD session_id) {
       &process);
   const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
 
-  SecureWipe(&protected_credential);
-  SecureWipe(&protected_environment);
-  if (has_environment) DestroyEnvironmentBlock(environment);
-  CloseHandle(user_token);
-
   if (!created) {
+    SecureWipe(&protected_credential);
+    SecureWipe(&broker_credential);
+    SecureWipe(&protected_environment);
+    if (has_environment) DestroyEnvironmentBlock(environment);
+    CloseHandle(user_token);
     CloseAgentStopEvent();
     LogEvent(
         EVENTLOG_ERROR_TYPE,
         L"CreateProcessAsUser failed for session " + std::to_wstring(session_id) +
             L" (error " + std::to_wstring(create_error) + L")");
+    return false;
+  }
+
+  bool broker_started = true;
+  std::wstring broker_error;
+  if (credential_status == desklink::ProtectedCredentialStatus::Loaded) {
+    broker_started = desklink::StartServiceAuthBroker(
+        auth_pipe_name,
+        process.dwProcessId,
+        broker_endpoint,
+        broker_device_id,
+        std::move(broker_credential),
+        &broker_error);
+  }
+
+  SecureWipe(&protected_credential);
+  SecureWipe(&broker_credential);
+  SecureWipe(&protected_environment);
+  if (has_environment) DestroyEnvironmentBlock(environment);
+  CloseHandle(user_token);
+
+  if (!broker_started) {
+    TerminateProcess(process.hProcess, 0);
+    WaitForSingleObject(process.hProcess, 3000);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    CloseAgentStopEvent();
+    LogEvent(EVENTLOG_ERROR_TYPE, L"Unable to start local authentication broker: " + broker_error);
     return false;
   }
 
@@ -442,7 +549,7 @@ bool LaunchAgent(DWORD session_id) {
       EVENTLOG_INFORMATION_TYPE,
       L"Started desklink-agent.exe in session " + std::to_wstring(session_id) +
           (credential_status == desklink::ProtectedCredentialStatus::Loaded
-               ? L" with DPAPI-protected device credential"
+               ? L" with Service-owned authentication broker"
                : L""));
   return true;
 }
