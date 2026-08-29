@@ -29,6 +29,7 @@ function tuneReceiver(receiver: RTCRtpReceiver) {
 }
 
 prototype.addTransceiver = function addDeskLinkTransceiver(
+  this: RTCPeerConnection,
   trackOrKind: MediaStreamTrack | string,
   init?: RTCRtpTransceiverInit,
 ): RTCRtpTransceiver {
