@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cwctype>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -69,7 +71,7 @@ std::wstring Utf8ToWide(const std::string& value) {
 bool IsLocalHost(const std::wstring& host) {
   std::wstring normalized = host;
   std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
-    return static_cast<wchar_t>(towlower(ch));
+    return static_cast<wchar_t>(std::towlower(ch));
   });
   return normalized == L"localhost" ||
          normalized == L"127.0.0.1" ||
