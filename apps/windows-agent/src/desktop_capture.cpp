@@ -67,6 +67,8 @@ bool DesktopCapture::RecreateDuplication() {
   hr = output_->GetDesc(&desc);
   if (FAILED(hr)) return false;
 
+  left_ = desc.DesktopCoordinates.left;
+  top_ = desc.DesktopCoordinates.top;
   width_ = static_cast<uint32_t>(desc.DesktopCoordinates.right - desc.DesktopCoordinates.left);
   height_ = static_cast<uint32_t>(desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top);
 
@@ -134,6 +136,8 @@ void DesktopCapture::Reset() {
   device_.Reset();
   width_ = 0;
   height_ = 0;
+  left_ = 0;
+  top_ = 0;
 }
 
 }  // namespace desklink
