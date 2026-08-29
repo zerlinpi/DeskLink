@@ -348,6 +348,24 @@ void WebRtcSession::HandleOffer(
     std::cout << "Negotiated H264 RTP payload type " << static_cast<int>(h264_payload_type) << "\n";
   }
 
+  std::shared_ptr<rtc::PeerConnection> existing_peer;
+  {
+    std::scoped_lock lock(mutex_);
+    if (peer_ && from == controller_id_ && session == session_id_ &&
+        peer_->state() != rtc::PeerConnection::State::Closed) {
+      existing_peer = peer_;
+    }
+  }
+
+  if (existing_peer) {
+    // ICE restarts and network-path changes must renegotiate the already-authorized
+    // session in place. Replacing PeerConnection here would unnecessarily tear down
+    // the current DataChannels and can invalidate a browser-side ICE restart.
+    std::cout << "Renegotiating authorized session from " << from << "\n";
+    existing_peer->setRemoteDescription(rtc::Description(sdp, description_type));
+    return;
+  }
+
   std::cout << "Authorized remote-control session from " << from << "\n";
   input_.ReleaseAll();
   CreatePeer(from, session, h264_payload_type);
