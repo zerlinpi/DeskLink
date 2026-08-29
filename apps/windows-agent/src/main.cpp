@@ -105,6 +105,21 @@ VideoSize FitWithin(
   return {width, height};
 }
 
+uint32_t LowerFpsTier(uint32_t current, uint32_t target) {
+  if (target <= 15 || current <= 15) return std::min(current, target);
+  if (current > 45 && target > 45) return 45;
+  if (current > 30 && target > 30) return 30;
+  if (current > 24 && target > 24) return 24;
+  return std::max<uint32_t>(15, std::min(current, target));
+}
+
+uint32_t RaiseFpsTier(uint32_t current, uint32_t target) {
+  if (current >= target) return target;
+  if (current < 30 && target > current) return std::min<uint32_t>(target, 30);
+  if (current < 45 && target > current) return std::min<uint32_t>(target, 45);
+  return target;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -236,9 +251,13 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   std::atomic<uint32_t> requested_bitrate{target_bitrate};
+  std::atomic<uint32_t> requested_fps{target_fps};
   std::atomic_bool keyframe_requested{false};
   std::mutex adaptation_mutex;
   auto last_bitrate_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+  auto last_fps_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+  uint32_t severe_feedback_streak = 0;
+  uint32_t healthy_feedback_streak = 0;
 
   desklink::SessionConfig session_config;
   session_config.signal_url = EnvOr("DESKLINK_SIGNAL_URL", session_config.signal_url);
@@ -259,15 +278,28 @@ int wmain(int argc, wchar_t** argv) {
     const uint32_t current = requested_bitrate.load(std::memory_order_relaxed);
     uint32_t next = current;
 
+    const bool capacity_severe = feedback.available_incoming_bitrate_bps > 0.0 &&
+                                 feedback.available_incoming_bitrate_bps <
+                                     static_cast<double>(current) * 0.70;
+    const bool capacity_moderate = feedback.available_incoming_bitrate_bps > 0.0 &&
+                                   feedback.available_incoming_bitrate_bps <
+                                       static_cast<double>(current) * 0.95;
+    const bool capacity_healthy = feedback.available_incoming_bitrate_bps <= 0.0 ||
+                                  feedback.available_incoming_bitrate_bps >
+                                      static_cast<double>(current) * 1.25;
+
     const bool severe = feedback.loss_ratio >= 0.08 ||
                         feedback.rtt_ms >= 250.0 ||
-                        feedback.jitter_ms >= 80.0;
+                        feedback.jitter_ms >= 80.0 ||
+                        capacity_severe;
     const bool moderate = feedback.loss_ratio >= 0.03 ||
                           feedback.rtt_ms >= 160.0 ||
-                          feedback.jitter_ms >= 45.0;
+                          feedback.jitter_ms >= 45.0 ||
+                          capacity_moderate;
     const bool healthy = feedback.loss_ratio < 0.01 &&
                          (feedback.rtt_ms <= 0.0 || feedback.rtt_ms < 100.0) &&
-                         feedback.jitter_ms < 30.0;
+                         feedback.jitter_ms < 30.0 &&
+                         capacity_healthy;
 
     if (severe && since_change >= std::chrono::seconds(1)) {
       next = std::max<uint32_t>(min_bitrate, static_cast<uint32_t>(current * 0.65));
@@ -294,6 +326,36 @@ int wmain(int argc, wchar_t** argv) {
         keyframe_requested.store(true, std::memory_order_relaxed);
       }
     }
+
+    if (severe) {
+      severe_feedback_streak = std::min<uint32_t>(severe_feedback_streak + 1, 60);
+      healthy_feedback_streak = 0;
+    } else if (healthy) {
+      healthy_feedback_streak = std::min<uint32_t>(healthy_feedback_streak + 1, 60);
+      severe_feedback_streak = 0;
+    } else {
+      severe_feedback_streak = 0;
+      healthy_feedback_streak = 0;
+    }
+
+    const uint32_t current_fps = requested_fps.load(std::memory_order_relaxed);
+    if (severe_feedback_streak >= 3 &&
+        now - last_fps_change >= std::chrono::seconds(3)) {
+      const uint32_t lower = LowerFpsTier(current_fps, target_fps);
+      if (lower < current_fps) {
+        requested_fps.store(lower, std::memory_order_relaxed);
+        last_fps_change = now;
+      }
+      severe_feedback_streak = 0;
+    } else if (healthy_feedback_streak >= 8 &&
+               now - last_fps_change >= std::chrono::seconds(8)) {
+      const uint32_t higher = RaiseFpsTier(current_fps, target_fps);
+      if (higher > current_fps) {
+        requested_fps.store(higher, std::memory_order_relaxed);
+        last_fps_change = now;
+      }
+      healthy_feedback_streak = 0;
+    }
   };
 
   if (session_config.access_code.empty()) {
@@ -315,7 +377,7 @@ int wmain(int argc, wchar_t** argv) {
              << source_width << L"x" << source_height << L", origin "
              << controlled_left << L"," << controlled_top << L")\n"
              << L"Stream target: " << encode_size.width << L"x" << encode_size.height
-             << L" @ " << target_fps << L" fps, "
+             << L" @ up to " << target_fps << L" fps, "
              << std::fixed << std::setprecision(1)
              << (target_bitrate / 1'000'000.0) << L" Mbps max, "
              << (min_bitrate / 1'000'000.0) << L" Mbps min\n"
@@ -329,7 +391,10 @@ int wmain(int argc, wchar_t** argv) {
   uint64_t encoded_bytes = 0;
   uint64_t timeout_ticks = 0;
   uint64_t last_encoded_timestamp100ns = 0;
+  uint64_t last_fresh_encode_timestamp100ns = 0;
+  uint64_t last_cache_update_timestamp100ns = 0;
   uint32_t active_bitrate = target_bitrate;
+  uint32_t active_fps = target_fps;
   bool was_connected = false;
   auto last_cached_recovery = clock::now() - std::chrono::seconds(1);
 
@@ -364,13 +429,25 @@ int wmain(int argc, wchar_t** argv) {
     const bool connected = session.connected();
     if (connected && !was_connected && encoder_ready) {
       keyframe_requested.store(true, std::memory_order_relaxed);
-    } else if (!connected && was_connected && encoder_ready && active_bitrate != target_bitrate) {
-      if (encoder.SetBitrate(target_bitrate)) {
-        active_bitrate = target_bitrate;
-        requested_bitrate.store(target_bitrate, std::memory_order_relaxed);
+    } else if (!connected && was_connected) {
+      requested_fps.store(target_fps, std::memory_order_relaxed);
+      if (encoder_ready && active_bitrate != target_bitrate) {
+        if (encoder.SetBitrate(target_bitrate)) {
+          active_bitrate = target_bitrate;
+          requested_bitrate.store(target_bitrate, std::memory_order_relaxed);
+        }
       }
     }
     was_connected = connected;
+
+    const uint32_t desired_fps = connected
+        ? requested_fps.load(std::memory_order_relaxed)
+        : target_fps;
+    if (desired_fps != active_fps) {
+      active_fps = std::clamp<uint32_t>(desired_fps, 15, target_fps);
+      if (!connected) requested_fps.store(target_fps, std::memory_order_relaxed);
+      std::wcout << L"\nAdaptive frame-rate target: " << active_fps << L" fps\n";
+    }
 
     if (connected && encoder_ready) {
       const uint32_t desired_bitrate = requested_bitrate.load(std::memory_order_relaxed);
@@ -438,6 +515,8 @@ int wmain(int argc, wchar_t** argv) {
             restart_bitrate);
         active_bitrate = restart_bitrate;
         last_encoded_timestamp100ns = 0;
+        last_fresh_encode_timestamp100ns = 0;
+        last_cache_update_timestamp100ns = 0;
 
         if (encoder_ready) {
           keyframe_requested.store(true, std::memory_order_relaxed);
@@ -449,15 +528,38 @@ int wmain(int argc, wchar_t** argv) {
         }
       }
 
-      // Keep one recent NV12 frame warm even while nobody is connected. DXGI
-      // only emits frames on desktop/pointer changes, so this cache lets a new
-      // controller receive an immediate IDR even if the desktop is now static.
-      auto nv12 = converter_ready ? converter.Convert(frame->texture.Get()) : nullptr;
-      if (connected && encoder_ready && nv12) {
+      const bool recovery_requested = keyframe_requested.load(std::memory_order_relaxed);
+      const uint64_t min_frame_interval100ns =
+          10'000'000ULL / std::max<uint32_t>(1, active_fps);
+      const bool fresh_frame_due = last_fresh_encode_timestamp100ns == 0 ||
+                                   frame->timestamp100ns >=
+                                       last_fresh_encode_timestamp100ns + min_frame_interval100ns;
+
+      // While idle, refresh the cached GPU frame at no more than 10 fps. While
+      // connected, skip conversion work for frames that would be discarded by
+      // the adaptive frame-rate target. Input still travels independently.
+      const uint64_t idle_cache_interval100ns = 1'000'000ULL;
+      const bool cache_update_due = connected
+          ? (fresh_frame_due || recovery_requested)
+          : (last_cache_update_timestamp100ns == 0 ||
+             frame->timestamp100ns >=
+                 last_cache_update_timestamp100ns + idle_cache_interval100ns);
+
+      ComPtr<ID3D11Texture2D> nv12;
+      if (converter_ready && cache_update_due) {
+        nv12 = converter.Convert(frame->texture.Get());
+        if (nv12) last_cache_update_timestamp100ns = frame->timestamp100ns;
+      }
+
+      if (connected && encoder_ready && nv12 &&
+          (fresh_frame_due || recovery_requested)) {
         if (keyframe_requested.exchange(false, std::memory_order_relaxed)) {
           encoder.RequestKeyframe();
         }
         encoded_fresh_frame = encode_and_send(nv12.Get(), frame->timestamp100ns);
+        if (encoded_fresh_frame) {
+          last_fresh_encode_timestamp100ns = frame->timestamp100ns;
+        }
       }
     } else {
       ++timeout_ticks;
@@ -493,6 +595,7 @@ int wmain(int argc, wchar_t** argv) {
                  << L" fps, sent=" << sent_frames
                  << L", media=" << media_mbps << L" Mbps"
                  << L", target=" << (active_bitrate / 1'000'000.0) << L" Mbps"
+                 << L", fps-target=" << active_fps
                  << L", idle=" << timeout_ticks
                  << (connected ? L", controller=connected" : L", controller=waiting")
                  << L"        \r" << std::flush;
