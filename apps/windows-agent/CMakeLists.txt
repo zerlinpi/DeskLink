@@ -56,6 +56,7 @@ target_link_libraries(
     nlohmann_json::nlohmann_json
     d3d11
     dxgi
+    dxguid
     mfplat
     mf
     mfuuid
