@@ -9,6 +9,7 @@ type SignalMessage = {
   target?: string;
   session?: string;
   payload?: any;
+  message?: string;
 };
 
 type PointerPayload = {
@@ -646,7 +647,7 @@ function App() {
     } else if (msg.type === "auth-rejected") {
       const reason = msg.payload?.reason;
       disconnect(reason === "host-unconfigured" ? "host access code not configured" : "access code rejected");
-    } else if (msg.type === "error" && msg.message?.includes?.("authorization scope")) {
+    } else if (msg.type === "error" && msg.message?.includes("authorization scope")) {
       disconnect("controller authorization rejected");
     }
   };
