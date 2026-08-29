@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace desklink {
 
@@ -18,6 +19,25 @@ bool StartServiceAuthBroker(
     std::string device_credential,
     std::string access_code,
     std::wstring* error);
+
+// Compatibility overload for the already-deployed signal-token-only Service
+// launch path while protected access-code wiring is enabled incrementally.
+inline bool StartServiceAuthBroker(
+    const std::wstring& pipe_name,
+    uint32_t expected_client_pid,
+    const std::string& signal_token_endpoint,
+    const std::string& device_id,
+    std::string device_credential,
+    std::wstring* error) {
+  return StartServiceAuthBroker(
+      pipe_name,
+      expected_client_pid,
+      signal_token_endpoint,
+      device_id,
+      std::move(device_credential),
+      {},
+      error);
+}
 
 void StopServiceAuthBroker();
 
