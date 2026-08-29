@@ -1,0 +1,66 @@
+name: Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - apps/signal/**
+      - .github/workflows/packages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: desklink-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  signal-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        name: Read version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must be semantic major.minor.patch" >&2
+            exit 1
+          fi
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$owner/desklink-signal" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish signal image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/signal
+          file: ./apps/signal/Dockerfile
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.version.outputs.image }}:latest
+            ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
+            ${{ steps.version.outputs.image }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=DeskLink Signal
+            org.opencontainers.image.description=DeskLink signaling, authentication and temporary TURN credential service
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
