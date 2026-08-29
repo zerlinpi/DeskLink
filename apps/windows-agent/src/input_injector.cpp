@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 namespace desklink {
@@ -50,17 +51,58 @@ bool IsExtendedKey(unsigned short vk) {
   }
 }
 
+LONG NormalizeVirtualCoordinate(double pixel, LONG origin, LONG extent) {
+  if (extent <= 1) return 0;
+  const double normalized = (pixel - static_cast<double>(origin)) /
+                            static_cast<double>(extent - 1);
+  return static_cast<LONG>(std::lround(std::clamp(normalized, 0.0, 1.0) * 65535.0));
+}
+
 }  // namespace
+
+void InputInjector::SetDesktopRect(long left, long top, long width, long height) {
+  desktop_left_.store(left, std::memory_order_relaxed);
+  desktop_top_.store(top, std::memory_order_relaxed);
+  desktop_width_.store(std::max<long>(0, width), std::memory_order_relaxed);
+  desktop_height_.store(std::max<long>(0, height), std::memory_order_relaxed);
+}
 
 bool InputInjector::PointerMove(double normalized_x, double normalized_y) const {
   normalized_x = std::clamp(normalized_x, 0.0, 1.0);
   normalized_y = std::clamp(normalized_y, 0.0, 1.0);
 
+  LONG virtual_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+  LONG virtual_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  LONG virtual_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+  LONG virtual_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+  if (virtual_width <= 0 || virtual_height <= 0) {
+    virtual_left = 0;
+    virtual_top = 0;
+    virtual_width = std::max<LONG>(1, GetSystemMetrics(SM_CXSCREEN));
+    virtual_height = std::max<LONG>(1, GetSystemMetrics(SM_CYSCREEN));
+  }
+
+  LONG target_left = desktop_left_.load(std::memory_order_relaxed);
+  LONG target_top = desktop_top_.load(std::memory_order_relaxed);
+  LONG target_width = desktop_width_.load(std::memory_order_relaxed);
+  LONG target_height = desktop_height_.load(std::memory_order_relaxed);
+  if (target_width <= 0 || target_height <= 0) {
+    target_left = virtual_left;
+    target_top = virtual_top;
+    target_width = virtual_width;
+    target_height = virtual_height;
+  }
+
+  const double pixel_x = static_cast<double>(target_left) +
+                         normalized_x * static_cast<double>(std::max<LONG>(0, target_width - 1));
+  const double pixel_y = static_cast<double>(target_top) +
+                         normalized_y * static_cast<double>(std::max<LONG>(0, target_height - 1));
+
   INPUT input{};
   input.type = INPUT_MOUSE;
-  input.mi.dx = static_cast<LONG>(normalized_x * 65535.0);
-  input.mi.dy = static_cast<LONG>(normalized_y * 65535.0);
-  input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+  input.mi.dx = NormalizeVirtualCoordinate(pixel_x, virtual_left, virtual_width);
+  input.mi.dy = NormalizeVirtualCoordinate(pixel_y, virtual_top, virtual_height);
+  input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
   return Send(input);
 }
 
