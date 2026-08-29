@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <nlohmann/json_fwd.hpp>
 #include <rtc/rtc.hpp>
@@ -61,6 +62,11 @@ class WebRtcSession {
   bool SendH264AccessUnit(const uint8_t* data, size_t size, uint64_t timestamp100ns);
 
  private:
+  struct PendingAccessChallenge {
+    std::string nonce;
+    std::chrono::steady_clock::time_point expires{};
+  };
+
   void ConnectSignaling();
   void RequestSignalingReconnect();
   void SignalingReconnectLoop(std::stop_token stop_token);
@@ -96,12 +102,8 @@ class WebRtcSession {
   mutable std::mutex mutex_;
   std::string controller_id_;
   std::string session_id_;
-  std::string pending_auth_controller_;
-  std::string pending_auth_session_;
-  std::string pending_auth_nonce_;
-  std::chrono::steady_clock::time_point pending_auth_expires_{};
-  std::string authorized_offer_controller_;
-  std::string authorized_offer_session_;
+  std::unordered_map<std::string, PendingAccessChallenge> pending_access_challenges_;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> authorized_offer_sessions_;
 
   std::atomic_bool stopping_{true};
   std::atomic_uint32_t reconnect_attempt_{0};
