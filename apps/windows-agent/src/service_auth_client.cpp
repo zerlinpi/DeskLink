@@ -16,31 +16,50 @@ using namespace std::chrono_literals;
 
 constexpr wchar_t kArgumentPrefix[] = L"--service-auth-pipe=";
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\DeskLink.Auth.";
+constexpr wchar_t kSignalTokenBrokerFlag[] = L"--service-signal-token-broker";
+constexpr wchar_t kAccessCodeBrokerFlag[] = L"--service-access-code-broker";
 constexpr size_t kMaxResponseBytes = 64 * 1024;
 
-std::wstring ServiceAuthPipeName() {
+struct BrokerLaunchOptions {
+  std::wstring pipe_name;
+  bool signal_token{false};
+  bool access_code{false};
+};
+
+BrokerLaunchOptions ServiceBrokerOptions() {
+  BrokerLaunchOptions options;
   int argc = 0;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  if (!argv) return {};
+  if (!argv) return options;
 
   constexpr size_t prefix_length =
       (sizeof(kArgumentPrefix) / sizeof(kArgumentPrefix[0])) - 1;
-  std::wstring result;
   for (int i = 1; i < argc; ++i) {
     const std::wstring argument(argv[i]);
     if (argument.rfind(kArgumentPrefix, 0) == 0) {
-      result = argument.substr(prefix_length);
-      break;
+      options.pipe_name = argument.substr(prefix_length);
+    } else if (argument == kSignalTokenBrokerFlag) {
+      options.signal_token = true;
+    } else if (argument == kAccessCodeBrokerFlag) {
+      options.access_code = true;
     }
   }
   LocalFree(argv);
 
-  if (result.rfind(kPipePrefix, 0) != 0 || result.size() > 512) return {};
-  return result;
+  if (options.pipe_name.rfind(kPipePrefix, 0) != 0 || options.pipe_name.size() > 512) {
+    options = {};
+  }
+  return options;
 }
 
 void SetError(std::string* error, const std::string& value) {
   if (error) *error = value;
+}
+
+void SecureWipe(std::string* value) {
+  if (!value || value->empty()) return;
+  SecureZeroMemory(value->data(), value->size());
+  value->clear();
 }
 
 class LocalHandle {
@@ -60,23 +79,18 @@ class LocalHandle {
   HANDLE handle_{nullptr};
 };
 
-}  // namespace
-
-bool ServiceAuthBrokerConfigured() {
-  return !ServiceAuthPipeName().empty();
-}
-
-bool FetchServiceBrokerSignalToken(
-    RuntimeSignalToken* signal_token,
+bool BrokerRequest(
+    const std::string& command,
+    nlohmann::json* response_json,
     std::string* error) {
-  if (!signal_token) {
-    SetError(error, "signal token output is required");
+  if (!response_json) {
+    SetError(error, "local broker response output is required");
     return false;
   }
-  *signal_token = {};
+  *response_json = nlohmann::json{};
 
-  const std::wstring pipe_name = ServiceAuthPipeName();
-  if (pipe_name.empty()) {
+  const BrokerLaunchOptions options = ServiceBrokerOptions();
+  if (options.pipe_name.empty()) {
     SetError(error, "service authentication broker is not configured");
     return false;
   }
@@ -85,7 +99,7 @@ bool FetchServiceBrokerSignalToken(
   const auto deadline = std::chrono::steady_clock::now() + 5s;
   while (std::chrono::steady_clock::now() < deadline) {
     raw_pipe = CreateFileW(
-        pipe_name.c_str(),
+        options.pipe_name.c_str(),
         GENERIC_READ | GENERIC_WRITE,
         0,
         nullptr,
@@ -100,7 +114,7 @@ bool FetchServiceBrokerSignalToken(
       return false;
     }
     if (open_error == ERROR_PIPE_BUSY) {
-      WaitNamedPipeW(pipe_name.c_str(), 250);
+      WaitNamedPipeW(options.pipe_name.c_str(), 250);
     } else {
       std::this_thread::sleep_for(100ms);
     }
@@ -118,16 +132,15 @@ bool FetchServiceBrokerSignalToken(
     return false;
   }
 
-  constexpr char request[] = "signal-token";
   DWORD written = 0;
   if (!WriteFile(
           pipe.get(),
-          request,
-          static_cast<DWORD>(sizeof(request) - 1),
+          command.data(),
+          static_cast<DWORD>(command.size()),
           &written,
           nullptr) ||
-      written != sizeof(request) - 1) {
-    SetError(error, "unable to request signal token from local service");
+      written != command.size()) {
+    SetError(error, "unable to send local authentication request");
     return false;
   }
 
@@ -144,34 +157,100 @@ bool FetchServiceBrokerSignalToken(
     if (read > 0) response.append(buffer, read);
     if (ok) break;
     if (GetLastError() != ERROR_MORE_DATA) {
-      SetError(error, "unable to read signal token from local service");
+      SecureWipe(&response);
+      SetError(error, "unable to read local authentication response");
       return false;
     }
   }
   if (response.empty() || response.size() >= kMaxResponseBytes) {
+    SecureWipe(&response);
     SetError(error, "local service authentication response is invalid");
     return false;
   }
 
-  const auto json = nlohmann::json::parse(response, nullptr, false);
-  if (json.is_discarded() || !json.is_object()) {
+  auto parsed = nlohmann::json::parse(response, nullptr, false);
+  SecureWipe(&response);
+  if (parsed.is_discarded() || !parsed.is_object()) {
     SetError(error, "local service authentication response is not valid JSON");
     return false;
   }
-  if (!json.value("ok", false)) {
-    SetError(error, json.value("error", "local service authentication failed"));
+  if (!parsed.value("ok", false)) {
+    SetError(error, parsed.value("error", "local service authentication failed"));
     return false;
   }
 
+  *response_json = std::move(parsed);
+  return true;
+}
+
+}  // namespace
+
+bool ServiceAuthBrokerConfigured() {
+  return !ServiceBrokerOptions().pipe_name.empty();
+}
+
+bool ServiceSignalTokenBrokerConfigured() {
+  const BrokerLaunchOptions options = ServiceBrokerOptions();
+  return !options.pipe_name.empty() && options.signal_token;
+}
+
+bool ServiceAccessCodeBrokerConfigured() {
+  const BrokerLaunchOptions options = ServiceBrokerOptions();
+  return !options.pipe_name.empty() && options.access_code;
+}
+
+bool FetchServiceBrokerSignalToken(
+    RuntimeSignalToken* signal_token,
+    std::string* error) {
+  if (!signal_token) {
+    SetError(error, "signal token output is required");
+    return false;
+  }
+  *signal_token = {};
+  if (!ServiceSignalTokenBrokerConfigured()) {
+    SetError(error, "service signal-token broker is not enabled");
+    return false;
+  }
+
+  nlohmann::json response;
+  if (!BrokerRequest("signal-token", &response, error)) return false;
+
   RuntimeSignalToken result;
-  result.token = json.value("token", "");
-  result.expires_at = json.value("expiresAt", int64_t{0});
+  result.token = response.value("token", "");
+  result.expires_at = response.value("expiresAt", int64_t{0});
   if (result.token.empty() || result.expires_at <= 0) {
-    SetError(error, "local service authentication response is missing required fields");
+    SetError(error, "local service signal-token response is missing required fields");
     return false;
   }
 
   *signal_token = std::move(result);
+  return true;
+}
+
+bool FetchServiceBrokerAccessCode(
+    std::string* access_code,
+    std::string* error) {
+  if (!access_code) {
+    SetError(error, "access code output is required");
+    return false;
+  }
+  access_code->clear();
+  if (!ServiceAccessCodeBrokerConfigured()) {
+    SetError(error, "service access-code broker is not enabled");
+    return false;
+  }
+
+  nlohmann::json response;
+  if (!BrokerRequest("access-code", &response, error)) return false;
+
+  std::string result = response.value("accessCode", "");
+  if (result.size() < 8 || result.size() > 1024) {
+    SecureWipe(&result);
+    SetError(error, "local service access-code response is invalid");
+    return false;
+  }
+
+  *access_code = std::move(result);
   return true;
 }
 
