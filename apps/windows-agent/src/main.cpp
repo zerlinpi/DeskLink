@@ -207,6 +207,11 @@ int wmain(int argc, wchar_t** argv) {
   uint32_t source_height = capture.height();
   VideoSize encode_size = FitWithin(source_width, source_height, max_width, max_height);
 
+  long controlled_left = capture.left();
+  long controlled_top = capture.top();
+  long controlled_width = static_cast<long>(capture.width());
+  long controlled_height = static_cast<long>(capture.height());
+
   desklink::GpuColorConverter converter;
   bool converter_ready = converter.Initialize(
       device.Get(),
@@ -297,12 +302,18 @@ int wmain(int argc, wchar_t** argv) {
 
   rtc::InitLogger(rtc::LogLevel::Info);
   desklink::WebRtcSession session(std::move(session_config));
+  session.SetControlledDesktopRect(
+      controlled_left,
+      controlled_top,
+      controlled_width,
+      controlled_height);
   session.Start();
 
   std::wcout << L"DeskLink Windows Agent\n"
              << L"GPU: " << adapter_desc.Description << L"\n"
              << L"Desktop: output " << output_index << L" ("
-             << source_width << L"x" << source_height << L")\n"
+             << source_width << L"x" << source_height << L", origin "
+             << controlled_left << L"," << controlled_top << L")\n"
              << L"Stream target: " << encode_size.width << L"x" << encode_size.height
              << L" @ " << target_fps << L" fps, "
              << std::fixed << std::setprecision(1)
@@ -374,6 +385,29 @@ int wmain(int argc, wchar_t** argv) {
 
     bool encoded_fresh_frame = false;
     auto frame = capture.Acquire(16);
+
+    const long new_controlled_left = capture.left();
+    const long new_controlled_top = capture.top();
+    const long new_controlled_width = static_cast<long>(capture.width());
+    const long new_controlled_height = static_cast<long>(capture.height());
+    if (new_controlled_left != controlled_left ||
+        new_controlled_top != controlled_top ||
+        new_controlled_width != controlled_width ||
+        new_controlled_height != controlled_height) {
+      controlled_left = new_controlled_left;
+      controlled_top = new_controlled_top;
+      controlled_width = new_controlled_width;
+      controlled_height = new_controlled_height;
+      session.SetControlledDesktopRect(
+          controlled_left,
+          controlled_top,
+          controlled_width,
+          controlled_height);
+      std::wcout << L"\nControlled monitor moved/resized to "
+                 << controlled_left << L"," << controlled_top << L" "
+                 << controlled_width << L"x" << controlled_height << L"\n";
+    }
+
     if (frame) {
       ++captured_frames;
 
