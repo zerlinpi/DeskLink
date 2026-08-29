@@ -180,7 +180,7 @@ However, plain HMAC with a human-memorable low-entropy Access Code is not a PAKE
 
 - Video: host -> controller, H.264.
 - Audio: optional, later milestone.
-- `control` DataChannel: controller -> host; ordered/reliable. Used for clicks and keyboard input that must not be lost, session safety commands, telemetry and video-quality preferences.
+- `control` DataChannel: **bidirectional**, ordered/reliable. Controller -> host carries clicks/keyboard input that must not be lost, session safety commands, telemetry, video-quality preferences, monitor-switch requests and explicit clipboard operations. Host -> controller carries monitor state/switch results and explicit clipboard results/text.
 - `pointer` DataChannel: controller -> host; unordered with `maxRetransmits=0`. Used for pointer movement and wheel events where stale input should be discarded rather than retransmitted.
 - Telemetry: controller reports decoder/network observations over the reliable control channel for adaptive bitrate/FPS/resolution decisions.
 
@@ -214,7 +214,7 @@ The browser advertises H.264 receive codecs and the host reads the negotiated H.
 
 Coordinates are normalized to `[0, 1]` so controller and host resolutions can differ.
 
-Reliable `control` channel:
+Reliable `control` channel, controller -> host:
 
 ```json
 {"t":"pointer","kind":"down","button":0,"x":0.41,"y":0.63,"buttons":1}
@@ -222,8 +222,14 @@ Reliable `control` channel:
 {"t":"key","kind":"down","code":"KeyA","key":"a"}
 {"t":"key","kind":"up","code":"KeyA","key":"a"}
 {"t":"video-profile","mode":"auto"}
+{"t":"monitor-list-request"}
+{"t":"monitor-switch","index":1}
+{"t":"clipboard-read-request","requestId":"uuid"}
+{"t":"clipboard-write","requestId":"uuid","text":"hello"}
 {"t":"release-all"}
 ```
+
+### Video quality profile
 
 `video-profile.mode` is one of `auto`, `original`, `high`, or `clear`. Unknown values are ignored by the host. The current Windows implementation treats the four profiles as user-selected ceilings/bounds around the same congestion controller rather than bypassing network protection:
 
@@ -233,6 +239,55 @@ Reliable `control` channel:
 - `clear`: begins at up to the 1280x720 tier, 30 fps and 4 Mbps, while severe congestion may still reduce it to the 960x540 tier and lower transport targets.
 
 The profile is session-local. The browser sends the currently selected profile when the reliable control channel opens, profile changes take effect immediately, and disconnect returns the Windows host to `auto`. Quality changes request a fresh keyframe. These values are product defaults, not a wire-protocol promise; compatible hosts may choose different numerical ceilings while preserving the four profile semantics.
+
+### Runtime monitor switching
+
+When the reliable control channel opens, the host may immediately publish its monitor state; the controller can also explicitly request it with `monitor-list-request`.
+
+Host -> controller monitor state:
+
+```json
+{
+  "t": "monitor-state",
+  "activeIndex": 1,
+  "monitors": [
+    {"index":0,"name":"\\\\.\\DISPLAY1","left":0,"top":0,"width":1920,"height":1080,"primary":true},
+    {"index":1,"name":"\\\\.\\DISPLAY2","left":1920,"top":0,"width":2560,"height":1440,"primary":false}
+  ]
+}
+```
+
+A controller requests a switch with `monitor-switch`. The host releases remotely injected keyboard/mouse state before accepting the request. The Windows implementation performs the actual DXGI duplication switch on the capture/main thread, updates the controlled desktop rectangle used by normalized pointer mapping, rebuilds the GPU color-conversion/H.264 pipeline for the new source size, requests a fresh keyframe and returns a result:
+
+```json
+{"t":"monitor-switch-result","index":1,"activeIndex":1,"ok":true}
+```
+
+Failure retains/restores the previous monitor whenever possible and includes a short machine-readable `error`, for example `monitor-unavailable` or `video-pipeline-rebuild-failed`. A fresh `monitor-state` follows a switch result so controllers should use that state as the source of truth rather than optimistically changing the active monitor before host confirmation.
+
+The current Windows capture implementation enumerates and switches outputs attached to the **current DXGI adapter**. This covers normal single-GPU multi-monitor systems. Cross-GPU monitor switching and an all-monitors/split-screen composite stream are separate future capabilities and must not be inferred from `monitor-state` v0.
+
+### Explicit bidirectional text clipboard
+
+Clipboard transport is intentionally **text-only, P2P, explicit and session-local**. It never travels through signaling, is not persisted by DeskLink, and does not continuously monitor either endpoint clipboard.
+
+Controller -> host:
+
+```json
+{"t":"clipboard-write","requestId":"uuid","text":"copy this to Windows"}
+{"t":"clipboard-read-request","requestId":"uuid"}
+```
+
+Host -> controller:
+
+```json
+{"t":"clipboard-result","requestId":"uuid","direction":"local-to-remote","ok":true}
+{"t":"clipboard-text","requestId":"uuid","text":"text read from Windows"}
+```
+
+Failures use `clipboard-result` with `ok:false` and a short `error`. The current Windows/browser implementation caps one UTF-8 clipboard payload at **128 KiB** and uses Windows `CF_UNICODETEXT` on the host. Large content, images, directories and files are not clipboard-v0 payloads; they belong on the future chunked file-transfer channel.
+
+The browser UI only invokes local Clipboard APIs from explicit user actions. If browser permissions block `navigator.clipboard.readText()` or `writeText()`, the UI falls back to a visible text area so the user can manually paste/copy. Receiving remote text does not silently overwrite the controller's local clipboard.
 
 Unreliable `pointer` channel:
 
@@ -255,3 +310,5 @@ Browser pointer-move events are coalesced to at most display animation cadence w
 6. Default keyframe/GOP target is about one second, plus immediate keyframes after connection/recovery/PLI when needed.
 7. Do not continuously encode while no authenticated controller is connected; retain only the latest converted GPU frame for fast static-desktop recovery.
 8. Keep input/control traffic independent from video queue pressure.
+9. Monitor switches are transactional: if the new capture/video pipeline cannot be established, retain or restore the previous monitor rather than reporting a false successful switch.
+10. Clipboard v0 remains bounded text control traffic. Large or resumable transfers must use a separately flow-controlled file-transfer protocol instead of oversized reliable control messages.
