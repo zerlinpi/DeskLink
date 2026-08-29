@@ -48,7 +48,7 @@ uint16_t EnvPortOr(const char* name, uint16_t fallback) {
 
 std::string DefaultDeviceId() {
   char computer_name[MAX_COMPUTERNAME_LENGTH + 1]{};
-  DWORD size = static_cast<DWORD>(std::size(computer_name));
+  DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
   if (GetComputerNameA(computer_name, &size) && size > 0) {
     return std::string("win-") + computer_name;
   }
