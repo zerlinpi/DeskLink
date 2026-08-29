@@ -165,9 +165,9 @@ target_link_libraries(
 
 # User-facing Windows setup/management executable. This is deliberately a native
 # Win32 binary with no extra runtime dependency. It installs Agent/Service into
-# Program Files, stores the Access Code/device credential with DPAPI, and writes
-# service-scoped environment settings so configuration applies immediately after
-# a Service restart without relying on stale machine environment blocks.
+# Program Files, stores the Access Code/device credential with DPAPI, writes
+# service-scoped environment settings, and can run local Signal/TURN diagnostics
+# without requiring PowerShell or a separate support utility.
 add_executable(desklink-manager WIN32
   src/setup_main.cpp
   src/protected_credential_store.cpp
@@ -186,6 +186,8 @@ target_link_libraries(
     crypt32
     shell32
     user32
+    winhttp
+    ws2_32
 )
 
 add_executable(desklink-service-auth-smoke
