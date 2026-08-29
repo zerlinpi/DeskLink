@@ -16,6 +16,7 @@ namespace desklink {
 struct SessionConfig {
   std::string signal_url{"ws://localhost:8080/ws"};
   std::string device_id{"windows-host"};
+  std::string access_code;
   std::string stun_url{"stun:stun.l.google.com:19302"};
   std::string turn_host{"localhost"};
   uint16_t turn_port{3478};
@@ -48,8 +49,14 @@ class WebRtcSession {
   void AttachControlChannel(const std::shared_ptr<rtc::DataChannel>& channel);
   void HandleControl(const std::string& text);
   void SendSignal(const std::string& type, const nlohmann::json& payload);
+  void SendSignalTo(
+      const std::string& target,
+      const std::string& session,
+      const std::string& type,
+      const nlohmann::json& payload);
 
   static uint8_t FindH264PayloadType(const std::string& sdp);
+  static bool ConstantTimeEquals(const std::string& left, const std::string& right);
 
   SessionConfig config_;
   InputInjector input_;
