@@ -701,7 +701,9 @@ function App() {
     if (msg.type === "peer-offline") {
       const pc = pcRef.current;
       if (!pc) {
-        setStatus("host offline");
+        setStatus(msg.payload?.authQueued === true
+          ? "host offline · waiting for host"
+          : "host offline");
         return;
       }
       if (pc.connectionState === "connected") {
