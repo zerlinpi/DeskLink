@@ -169,7 +169,9 @@ func main() {
 			http.Error(w, "too many connection attempts", http.StatusTooManyRequests)
 			return
 		}
-		defer guard.release(clientIP, time.Now())
+		defer func() {
+			guard.release(clientIP, time.Now())
+		}()
 
 		id := r.URL.Query().Get("deviceId")
 		if !validDeviceID(id) {
