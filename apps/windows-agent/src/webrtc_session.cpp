@@ -1,5 +1,6 @@
 #include "webrtc_session.h"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <regex>
@@ -19,6 +20,12 @@ namespace {
 constexpr rtc::SSRC kVideoSsrc = 42;
 constexpr char kVideoCname[] = "desklink-video";
 constexpr char kVideoMsid[] = "desklink-stream";
+
+double JsonNumber(const json& object, const char* key, double fallback = 0.0) {
+  const auto it = object.find(key);
+  if (it == object.end() || !it->is_number()) return fallback;
+  return it->get<double>();
+}
 }  // namespace
 
 WebRtcSession::WebRtcSession(SessionConfig config) : config_(std::move(config)) {}
@@ -364,6 +371,21 @@ void WebRtcSession::HandleControl(const std::string& text) {
   if (event.is_discarded() || !event.is_object()) return;
 
   const std::string type = event.value("t", "");
+  if (type == "telemetry") {
+    if (config_.on_network_feedback) {
+      NetworkFeedback feedback;
+      feedback.loss_ratio = std::clamp(JsonNumber(event, "lossPct") / 100.0, 0.0, 1.0);
+      feedback.rtt_ms = std::clamp(JsonNumber(event, "rttMs"), 0.0, 5000.0);
+      feedback.jitter_ms = std::clamp(JsonNumber(event, "jitterMs"), 0.0, 5000.0);
+      feedback.decode_fps = std::clamp(JsonNumber(event, "decodeFps"), 0.0, 240.0);
+      feedback.available_incoming_bitrate_bps = std::max(
+          0.0,
+          JsonNumber(event, "availableIncomingBitrate"));
+      config_.on_network_feedback(feedback);
+    }
+    return;
+  }
+
   if (type == "pointer") {
     const std::string kind = event.value("kind", "");
     const double x = event.value("x", 0.0);
