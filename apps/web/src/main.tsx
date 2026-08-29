@@ -155,12 +155,30 @@ function App() {
     e: React.PointerEvent<HTMLVideoElement>,
     kind: PointerPayload["kind"],
   ): PointerPayload => {
-    const r = e.currentTarget.getBoundingClientRect();
+    const video = e.currentTarget;
+    const r = video.getBoundingClientRect();
+
+    let contentLeft = r.left;
+    let contentTop = r.top;
+    let contentWidth = r.width;
+    let contentHeight = r.height;
+
+    // object-fit: contain can introduce letterboxing. Map input to the actual
+    // rendered video pixels rather than the full HTML element, otherwise clicks
+    // are offset whenever the controller and remote aspect ratios differ.
+    if (video.videoWidth > 0 && video.videoHeight > 0 && r.width > 0 && r.height > 0) {
+      const scale = Math.min(r.width / video.videoWidth, r.height / video.videoHeight);
+      contentWidth = video.videoWidth * scale;
+      contentHeight = video.videoHeight * scale;
+      contentLeft = r.left + (r.width - contentWidth) / 2;
+      contentTop = r.top + (r.height - contentHeight) / 2;
+    }
+
     return {
       t: "pointer",
       kind,
-      x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
-      y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
+      x: Math.max(0, Math.min(1, (e.clientX - contentLeft) / Math.max(1, contentWidth))),
+      y: Math.max(0, Math.min(1, (e.clientY - contentTop) / Math.max(1, contentHeight))),
       button: e.button,
       buttons: e.buttons,
     };
