@@ -76,6 +76,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "DPAPI credential store failed with exit code $LASTEXITCODE" }
           & $service --clear-device-credential
           if ($LASTEXITCODE -ne 0) { throw "DPAPI credential cleanup failed with exit code $LASTEXITCODE" }
+      - name: Validate Service auth broker
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-service-auth-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Service auth broker smoke test failed with exit code $LASTEXITCODE" }
       - name: Upload Windows binaries
         uses: actions/upload-artifact@v4
         with:
