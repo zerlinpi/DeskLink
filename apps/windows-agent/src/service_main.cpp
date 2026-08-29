@@ -24,6 +24,7 @@ constexpr wchar_t kServiceDescription[] =
     L"Keeps the DeskLink remote desktop agent running in the active Windows user session.";
 constexpr DWORD kNoSession = 0xFFFFFFFF;
 constexpr wchar_t kDeviceCredentialPrefix[] = L"DESKLINK_DEVICE_CREDENTIAL=";
+constexpr wchar_t kAccessCodePrefix[] = L"DESKLINK_ACCESS_CODE=";
 
 SERVICE_STATUS_HANDLE g_status_handle = nullptr;
 SERVICE_STATUS g_status{};
@@ -189,18 +190,41 @@ void SecureWipe(std::vector<wchar_t>* value) {
   value->clear();
 }
 
-std::vector<wchar_t> BuildEnvironmentWithoutDeviceCredential(LPVOID base_environment) {
+bool EnvironmentEntryMatches(
+    const wchar_t* entry,
+    size_t length,
+    const wchar_t* prefix,
+    size_t prefix_length) {
+  return length >= prefix_length &&
+         _wcsnicmp(entry, prefix, prefix_length) == 0;
+}
+
+std::vector<wchar_t> BuildEnvironmentWithoutProtectedSecrets(
+    LPVOID base_environment,
+    bool remove_device_credential,
+    bool remove_access_code) {
   std::vector<std::wstring> entries;
-  constexpr size_t prefix_length =
+  constexpr size_t device_prefix_length =
       (sizeof(kDeviceCredentialPrefix) / sizeof(kDeviceCredentialPrefix[0])) - 1;
+  constexpr size_t access_prefix_length =
+      (sizeof(kAccessCodePrefix) / sizeof(kAccessCodePrefix[0])) - 1;
 
   const auto* cursor = static_cast<const wchar_t*>(base_environment);
   while (cursor && *cursor != L'\0') {
     const size_t length = std::wcslen(cursor);
-    const bool is_device_credential =
-        length >= prefix_length &&
-        _wcsnicmp(cursor, kDeviceCredentialPrefix, prefix_length) == 0;
-    if (!is_device_credential) {
+    const bool remove_device = remove_device_credential &&
+        EnvironmentEntryMatches(
+            cursor,
+            length,
+            kDeviceCredentialPrefix,
+            device_prefix_length);
+    const bool remove_access = remove_access_code &&
+        EnvironmentEntryMatches(
+            cursor,
+            length,
+            kAccessCodePrefix,
+            access_prefix_length);
+    if (!remove_device && !remove_access) {
       entries.emplace_back(cursor, length);
     }
     cursor += length + 1;
@@ -219,9 +243,11 @@ std::vector<wchar_t> BuildEnvironmentWithoutDeviceCredential(LPVOID base_environ
   return result;
 }
 
-bool ReadCredentialFromConsole(std::wstring* credential) {
-  if (!credential) return false;
-  credential->clear();
+bool ReadSecretFromConsole(
+    const wchar_t* prompt,
+    std::wstring* secret) {
+  if (!secret) return false;
+  secret->clear();
 
   HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
   DWORD original_mode = 0;
@@ -231,19 +257,19 @@ bool ReadCredentialFromConsole(std::wstring* credential) {
     SetConsoleMode(input, original_mode & ~ENABLE_ECHO_INPUT);
   }
 
-  std::wcout << L"Enter DeskLink dc1 device credential: " << std::flush;
-  std::getline(std::wcin, *credential);
+  std::wcout << prompt << std::flush;
+  std::getline(std::wcin, *secret);
 
   if (has_console_mode) {
     SetConsoleMode(input, original_mode);
   }
   std::wcout << L"\n";
-  return !credential->empty();
+  return !secret->empty();
 }
 
 int StoreDeviceCredentialCommand() {
   std::wstring credential;
-  if (!ReadCredentialFromConsole(&credential)) {
+  if (!ReadSecretFromConsole(L"Enter DeskLink dc1 device credential: ", &credential)) {
     std::wcerr << L"No credential was entered.\n";
     return 1;
   }
@@ -257,7 +283,7 @@ int StoreDeviceCredentialCommand() {
   }
 
   std::wcout << L"Device credential stored with machine-scope DPAPI protection.\n"
-             << L"Restart the DeskLink service to launch a new Agent with it.\n";
+             << L"Restart the DeskLink service to apply it.\n";
   return 0;
 }
 
@@ -268,6 +294,36 @@ int ClearDeviceCredentialCommand() {
     return 1;
   }
   std::wcout << L"Protected device credential removed.\n";
+  return 0;
+}
+
+int StoreAccessCodeCommand() {
+  std::wstring access_code;
+  if (!ReadSecretFromConsole(L"Enter DeskLink unattended access code: ", &access_code)) {
+    std::wcerr << L"No access code was entered.\n";
+    return 1;
+  }
+
+  std::wstring error;
+  const bool stored = desklink::StoreProtectedAccessCode(access_code, &error);
+  SecureWipe(&access_code);
+  if (!stored) {
+    std::wcerr << L"Unable to store access code: " << error << L"\n";
+    return 1;
+  }
+
+  std::wcout << L"Access code stored with machine-scope DPAPI protection.\n"
+             << L"Restart the DeskLink service to apply it.\n";
+  return 0;
+}
+
+int ClearAccessCodeCommand() {
+  std::wstring error;
+  if (!desklink::DeleteProtectedAccessCode(&error)) {
+    std::wcerr << L"Unable to clear protected access code: " << error << L"\n";
+    return 1;
+  }
+  std::wcout << L"Protected access code removed.\n";
   return 0;
 }
 
@@ -391,23 +447,42 @@ bool LaunchAgent(DWORD session_id) {
   const BOOL has_environment = CreateEnvironmentBlock(&environment, user_token, FALSE);
 
   std::wstring protected_credential;
-  std::wstring credential_error;
+  std::wstring protected_access_code;
+  std::wstring secret_error;
   const desklink::ProtectedCredentialStatus credential_status =
-      desklink::LoadProtectedDeviceCredential(&protected_credential, &credential_error);
+      desklink::LoadProtectedDeviceCredential(&protected_credential, &secret_error);
   if (credential_status == desklink::ProtectedCredentialStatus::Error) {
     if (has_environment) DestroyEnvironmentBlock(environment);
     CloseHandle(user_token);
     LogEvent(
         EVENTLOG_ERROR_TYPE,
-        L"Protected device credential could not be loaded: " + credential_error);
+        L"Protected device credential could not be loaded: " + secret_error);
     return false;
   }
-  if (credential_status == desklink::ProtectedCredentialStatus::Loaded && !has_environment) {
+
+  secret_error.clear();
+  const desklink::ProtectedCredentialStatus access_code_status =
+      desklink::LoadProtectedAccessCode(&protected_access_code, &secret_error);
+  if (access_code_status == desklink::ProtectedCredentialStatus::Error) {
     SecureWipe(&protected_credential);
+    if (has_environment) DestroyEnvironmentBlock(environment);
     CloseHandle(user_token);
     LogEvent(
         EVENTLOG_ERROR_TYPE,
-        L"CreateEnvironmentBlock failed; protected Service authentication requires a child environment block");
+        L"Protected access code could not be loaded: " + secret_error);
+    return false;
+  }
+
+  const bool signal_broker = credential_status == desklink::ProtectedCredentialStatus::Loaded;
+  const bool access_code_broker = access_code_status == desklink::ProtectedCredentialStatus::Loaded;
+  const bool broker_mode = signal_broker || access_code_broker;
+  if (broker_mode && !has_environment) {
+    SecureWipe(&protected_credential);
+    SecureWipe(&protected_access_code);
+    CloseHandle(user_token);
+    LogEvent(
+        EVENTLOG_ERROR_TYPE,
+        L"CreateEnvironmentBlock failed; protected Service secrets require a child environment block");
     return false;
   }
 
@@ -416,18 +491,25 @@ bool LaunchAgent(DWORD session_id) {
   std::string broker_device_id;
   std::string broker_endpoint;
   std::string broker_credential;
+  std::string broker_access_code;
   std::wstring auth_pipe_name;
 
-  if (credential_status == desklink::ProtectedCredentialStatus::Loaded) {
-    protected_environment = BuildEnvironmentWithoutDeviceCredential(environment);
+  if (broker_mode) {
+    protected_environment = BuildEnvironmentWithoutProtectedSecrets(
+        environment,
+        signal_broker,
+        access_code_broker);
     child_environment = protected_environment.data();
+    auth_pipe_name = NewServiceAuthPipeName(session_id);
+  }
 
+  if (signal_broker) {
     broker_device_id = WideToUtf8(EnvironmentValue(L"DESKLINK_DEVICE_ID"));
     broker_endpoint = WideToUtf8(EnvironmentValue(L"DESKLINK_SIGNAL_TOKEN_URL"));
     broker_credential = WideToUtf8(protected_credential);
-    auth_pipe_name = NewServiceAuthPipeName(session_id);
     if (broker_device_id.empty() || broker_endpoint.empty() || broker_credential.empty()) {
       SecureWipe(&protected_credential);
+      SecureWipe(&protected_access_code);
       SecureWipe(&broker_credential);
       SecureWipe(&protected_environment);
       if (has_environment) DestroyEnvironmentBlock(environment);
@@ -439,9 +521,25 @@ bool LaunchAgent(DWORD session_id) {
     }
   }
 
+  if (access_code_broker) {
+    broker_access_code = WideToUtf8(protected_access_code);
+    if (broker_access_code.empty()) {
+      SecureWipe(&protected_credential);
+      SecureWipe(&protected_access_code);
+      SecureWipe(&broker_credential);
+      SecureWipe(&protected_environment);
+      if (has_environment) DestroyEnvironmentBlock(environment);
+      CloseHandle(user_token);
+      LogEvent(EVENTLOG_ERROR_TYPE, L"Protected access code is not valid UTF-8");
+      return false;
+    }
+  }
+
   if (!CreateAgentStopEvent(session_id)) {
     SecureWipe(&protected_credential);
+    SecureWipe(&protected_access_code);
     SecureWipe(&broker_credential);
+    SecureWipe(&broker_access_code);
     SecureWipe(&protected_environment);
     if (has_environment) DestroyEnvironmentBlock(environment);
     CloseHandle(user_token);
@@ -453,8 +551,10 @@ bool LaunchAgent(DWORD session_id) {
   if (output_index.empty()) output_index = L"0";
   command += L" " + output_index;
   command += L" --service-stop-event=\"" + g_agent_stop_event_name + L"\"";
-  if (!auth_pipe_name.empty()) {
+  if (broker_mode) {
     command += L" --service-auth-pipe=\"" + auth_pipe_name + L"\"";
+    if (signal_broker) command += L" --service-signal-token-broker";
+    if (access_code_broker) command += L" --service-access-code-broker";
   }
   std::vector<wchar_t> command_line(command.begin(), command.end());
   command_line.push_back(L'\0');
@@ -465,7 +565,6 @@ bool LaunchAgent(DWORD session_id) {
   startup.lpDesktop = desktop.data();
 
   PROCESS_INFORMATION process{};
-  const bool broker_mode = credential_status == desklink::ProtectedCredentialStatus::Loaded;
   DWORD creation_flags = CREATE_NO_WINDOW;
   if (broker_mode) creation_flags |= CREATE_SUSPENDED;
   if (child_environment) creation_flags |= CREATE_UNICODE_ENVIRONMENT;
@@ -487,7 +586,9 @@ bool LaunchAgent(DWORD session_id) {
 
   if (!created) {
     SecureWipe(&protected_credential);
+    SecureWipe(&protected_access_code);
     SecureWipe(&broker_credential);
+    SecureWipe(&broker_access_code);
     SecureWipe(&protected_environment);
     if (has_environment) DestroyEnvironmentBlock(environment);
     CloseHandle(user_token);
@@ -499,9 +600,6 @@ bool LaunchAgent(DWORD session_id) {
     return false;
   }
 
-  // Put the still-suspended protected-mode Agent into its Job Object before any
-  // user-mode code can run. Non-broker development mode is already running here,
-  // but follows the same containment setup as before.
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   if (job) {
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -526,11 +624,14 @@ bool LaunchAgent(DWORD session_id) {
         broker_endpoint,
         broker_device_id,
         std::move(broker_credential),
+        std::move(broker_access_code),
         &broker_error);
   }
 
   SecureWipe(&protected_credential);
+  SecureWipe(&protected_access_code);
   SecureWipe(&broker_credential);
+  SecureWipe(&broker_access_code);
   SecureWipe(&protected_environment);
   if (has_environment) DestroyEnvironmentBlock(environment);
   CloseHandle(user_token);
@@ -575,10 +676,15 @@ bool LaunchAgent(DWORD session_id) {
   g_agent_process = process.hProcess;
   g_agent_job = job;
   g_agent_session = session_id;
+  std::wstring security_mode;
+  if (signal_broker) security_mode += L" signal-token";
+  if (access_code_broker) security_mode += L" access-code";
   LogEvent(
       EVENTLOG_INFORMATION_TYPE,
       L"Started desklink-agent.exe in session " + std::to_wstring(session_id) +
-          (broker_mode ? L" after Service authentication broker became ready" : L""));
+          (broker_mode
+               ? L" after Service broker became ready; protected capabilities:" + security_mode
+               : L""));
   return true;
 }
 
@@ -845,10 +951,13 @@ int wmain(int argc, wchar_t** argv) {
     if (command == L"--uninstall") return UninstallService();
     if (command == L"--store-device-credential") return StoreDeviceCredentialCommand();
     if (command == L"--clear-device-credential") return ClearDeviceCredentialCommand();
+    if (command == L"--store-access-code") return StoreAccessCodeCommand();
+    if (command == L"--clear-access-code") return ClearAccessCodeCommand();
     if (command != L"--service") {
       std::wcerr
           << L"Usage: desklink-service.exe --install | --uninstall | --service | "
-             L"--store-device-credential | --clear-device-credential\n";
+             L"--store-device-credential | --clear-device-credential | "
+             L"--store-access-code | --clear-access-code\n";
       return 2;
     }
   }
