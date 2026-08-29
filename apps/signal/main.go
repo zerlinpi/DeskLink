@@ -212,6 +212,16 @@ func main() {
 			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
+		revoked, revocationErr := deviceRevoked(id)
+		if revocationErr != nil {
+			http.Error(w, "device revocation state unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if revoked {
+			metrics.authFailures.Add(1)
+			http.Error(w, "device revoked", http.StatusForbidden)
+			return
+		}
 		if !signalRegistrationAuthorized(r, id) {
 			guard.authFailed(clientIP, time.Now())
 			metrics.authFailures.Add(1)
@@ -250,6 +260,17 @@ func main() {
 			for {
 				select {
 				case <-ticker.C:
+					revoked, err := deviceRevoked(id)
+					if err != nil {
+						log.Printf("device revocation check failed for %s: %v", id, err)
+						p.closeWithReason("device authorization unavailable")
+						return
+					}
+					if revoked {
+						log.Printf("disconnecting revoked device %s", id)
+						p.closeWithReason("device revoked")
+						return
+					}
 					if err := p.ping(); err != nil {
 						_ = conn.Close()
 						return
@@ -288,6 +309,16 @@ func main() {
 			}
 			if msg.Target == "" || !validDeviceID(msg.Target) {
 				_ = p.write(map[string]any{"type": "error", "message": "valid target is required"})
+				continue
+			}
+
+			targetRevoked, targetRevocationErr := deviceRevoked(msg.Target)
+			if targetRevocationErr != nil {
+				_ = p.write(map[string]any{"type": "error", "message": "device authorization temporarily unavailable"})
+				continue
+			}
+			if targetRevoked {
+				_ = p.write(map[string]any{"type": "peer-offline", "target": msg.Target})
 				continue
 			}
 
