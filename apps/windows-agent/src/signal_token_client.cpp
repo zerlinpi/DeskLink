@@ -12,6 +12,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "service_auth_client.h"
+
 namespace desklink {
 namespace {
 
@@ -83,6 +85,12 @@ void SetError(std::string* error, const std::string& value) {
   if (error) *error = value;
 }
 
+void SecureWipe(std::wstring* value) {
+  if (!value || value->empty()) return;
+  SecureZeroMemory(value->data(), value->size() * sizeof(wchar_t));
+  value->clear();
+}
+
 }  // namespace
 
 bool FetchRuntimeSignalToken(
@@ -96,6 +104,13 @@ bool FetchRuntimeSignalToken(
     return false;
   }
   *signal_token = {};
+
+  // A Service-launched Agent never needs the long-lived device credential. The
+  // LocalSystem Service owns it and returns only a short-lived token over a PID-
+  // bound named pipe. Direct/manual Agent launches fall through to HTTPS below.
+  if (ServiceAuthBrokerConfigured()) {
+    return FetchServiceBrokerSignalToken(signal_token, error);
+  }
 
   if (endpoint.empty() || device_id.empty() || device_credential.empty()) {
     SetError(error, "signal token endpoint, device ID and device credential are required");
@@ -187,24 +202,26 @@ bool FetchRuntimeSignalToken(
     return false;
   }
 
-  const std::wstring credential_w = Utf8ToWide(device_credential);
+  std::wstring credential_w = Utf8ToWide(device_credential);
   if (credential_w.empty()) {
     SetError(error, "device credential is not valid UTF-8");
     return false;
   }
-  const std::wstring headers =
+  std::wstring headers =
       L"Authorization: Bearer " + credential_w +
       L"\r\nAccept: application/json\r\nCache-Control: no-cache\r\n";
 
-  if (!WinHttpSendRequest(
-          request.get(),
-          headers.c_str(),
-          static_cast<DWORD>(headers.size()),
-          WINHTTP_NO_REQUEST_DATA,
-          0,
-          0,
-          0) ||
-      !WinHttpReceiveResponse(request.get(), nullptr)) {
+  const BOOL sent = WinHttpSendRequest(
+      request.get(),
+      headers.c_str(),
+      static_cast<DWORD>(headers.size()),
+      WINHTTP_NO_REQUEST_DATA,
+      0,
+      0,
+      0);
+  SecureWipe(&credential_w);
+  SecureWipe(&headers);
+  if (!sent || !WinHttpReceiveResponse(request.get(), nullptr)) {
     SetError(error, "signal token request failed");
     return false;
   }
