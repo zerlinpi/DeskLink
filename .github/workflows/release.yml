@@ -30,6 +30,11 @@ jobs:
             echo "VERSION must be semantic major.minor.patch" >&2
             exit 1
           fi
+          notes="docs/releases/v$version.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "Missing release notes: $notes" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
@@ -54,7 +59,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Build browser controller
+      - name: Validate and package browser controller
         shell: bash
         run: |
           set -euo pipefail
@@ -62,7 +67,18 @@ jobs:
           npm install
           npm run build
           popd
-          tar -czf "release/desklink-web-v${{ steps.version.outputs.version }}.tar.gz" -C apps/web/dist .
+
+          stage="release/web-package"
+          mkdir -p "$stage/app/src"
+          cp apps/web/index.html "$stage/app/"
+          cp apps/web/package.json "$stage/app/"
+          cp apps/web/tsconfig.json "$stage/app/"
+          cp apps/web/.env.restrictive.example "$stage/app/"
+          cp -R apps/web/src/. "$stage/app/src/"
+          cp packaging/web/README.txt "$stage/README.txt"
+          tar -czf "release/desklink-web-v${{ steps.version.outputs.version }}.tar.gz" \
+            -C "$stage" .
+          rm -rf "$stage"
 
       - name: Create server/web checksums
         shell: bash
@@ -79,7 +95,10 @@ jobs:
           name: desklink-release-server-web-${{ steps.version.outputs.version }}
           if-no-files-found: error
           retention-days: 7
-          path: release/*
+          path: |
+            release/desklink-signal-v${{ steps.version.outputs.version }}-linux-amd64
+            release/desklink-web-v${{ steps.version.outputs.version }}.tar.gz
+            release/SHA256SUMS.server-web.txt
 
   windows:
     runs-on: windows-latest
@@ -92,7 +111,28 @@ jobs:
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION must be semantic major.minor.patch" }
+          if (-not (Test-Path "docs/releases/v$version.md")) { throw "Missing release notes for v$version" }
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Validate packaging PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($script in @(
+            "packaging/windows/install-service.ps1",
+            "packaging/windows/uninstall-service.ps1"
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $messages = ($errors | ForEach-Object { $_.Message }) -join "; "
+              throw "$script has PowerShell syntax errors: $messages"
+            }
+          }
 
       - name: Configure Windows host
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
@@ -121,6 +161,19 @@ jobs:
             & $smoke
             if ($LASTEXITCODE -ne 0) { throw "$smokePath failed with exit code $LASTEXITCODE" }
           }
+
+      - name: Validate DPAPI protected secrets
+        shell: pwsh
+        run: |
+          $service = Resolve-Path "build/windows-agent/Release/desklink-service.exe"
+          "dc2.RELEASE_DPAPI_SMOKE_0123456789" | & $service --store-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI device credential smoke failed" }
+          "Release-Access-Code-Smoke-0123456789!" | & $service --store-access-code
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI access code smoke failed" }
+          & $service --clear-access-code
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI access code cleanup failed" }
+          & $service --clear-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI device credential cleanup failed" }
 
       - name: Validate portable Windows dependencies
         shell: pwsh
