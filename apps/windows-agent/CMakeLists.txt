@@ -1,9 +1,48 @@
 cmake_minimum_required(VERSION 3.24)
-project(desklink_windows_agent LANGUAGES CXX)
+project(desklink_windows_agent LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" DESKLINK_VERSION)
+string(STRIP "${DESKLINK_VERSION}" DESKLINK_VERSION)
+if(NOT DESKLINK_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+  message(FATAL_ERROR "../../VERSION must contain semantic major.minor.patch")
+endif()
+set(DESKLINK_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(DESKLINK_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(DESKLINK_VERSION_PATCH "${CMAKE_MATCH_3}")
+
+function(configure_desklink_version_resource output_name file_description internal_name original_filename)
+  set(DESKLINK_FILE_DESCRIPTION "${file_description}")
+  set(DESKLINK_INTERNAL_NAME "${internal_name}")
+  set(DESKLINK_ORIGINAL_FILENAME "${original_filename}")
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/version.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/${output_name}.rc"
+    @ONLY
+  )
+endfunction()
+
+configure_desklink_version_resource(
+  desklink-agent-version
+  "DeskLink Remote Desktop Agent"
+  "desklink-agent"
+  "desklink-agent.exe"
+)
+configure_desklink_version_resource(
+  desklink-service-version
+  "DeskLink Remote Desktop Service"
+  "desklink-service"
+  "desklink-service.exe"
+)
+configure_desklink_version_resource(
+  desklink-manager-version
+  "DeskLink Windows Host Setup"
+  "DeskLink"
+  "DeskLink.exe"
+)
 
 # Release artifacts are intended to be copy-deployable on supported Windows
 # machines. Use the static MSVC runtime for this project and all CMake
@@ -72,6 +111,7 @@ add_executable(desklink-agent
   src/turn_credential_client.h
   src/webrtc_session.cpp
   src/webrtc_session.h
+  "${CMAKE_CURRENT_BINARY_DIR}/desklink-agent-version.rc"
 )
 
 target_compile_definitions(desklink-agent PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -107,6 +147,7 @@ add_executable(desklink-service
   src/service_auth_client.h
   src/signal_token_client.cpp
   src/signal_token_client.h
+  "${CMAKE_CURRENT_BINARY_DIR}/desklink-service-version.rc"
 )
 target_compile_definitions(desklink-service PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-service PRIVATE /W4 /permissive-)
@@ -131,6 +172,7 @@ add_executable(desklink-manager WIN32
   src/setup_main.cpp
   src/protected_credential_store.cpp
   src/protected_credential_store.h
+  "${CMAKE_CURRENT_BINARY_DIR}/desklink-manager-version.rc"
 )
 set_target_properties(desklink-manager PROPERTIES OUTPUT_NAME "DeskLink")
 target_compile_definitions(desklink-manager PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
