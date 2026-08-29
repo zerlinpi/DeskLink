@@ -38,6 +38,17 @@ jobs:
       - run: npm install
       - run: npm run build
 
+  repo-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate network helper syntax
+        run: bash -n tools/network/shape-linux.sh tools/network/reset-linux.sh tools/network/check-turn-tls.sh
+      - name: Validate development Compose config
+        env:
+          DESKLINK_SIGNAL_AUTH_SECRET: ci-test-secret
+        run: docker compose -f infra/docker-compose.yml config >/dev/null
+
   windows-agent:
     runs-on: windows-latest
     steps:
