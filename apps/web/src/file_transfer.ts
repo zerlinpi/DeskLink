@@ -30,20 +30,68 @@ type UploadMessage = Record<string, unknown> & {
   id?: unknown;
 };
 
+type RemoteFile = {
+  name: string;
+  size: number;
+};
+
+type FileSystemWritableLike = {
+  write(data: BufferSource | Blob | string | {
+    type: "write";
+    position: number;
+    data: BufferSource | Blob | string;
+  }): Promise<void>;
+  close(): Promise<void>;
+  abort?(reason?: unknown): Promise<void>;
+};
+
+type FileSystemHandleLike = {
+  createWritable(options?: { keepExistingData?: boolean }): Promise<FileSystemWritableLike>;
+};
+
+type FilePickerWindow = Window & typeof globalThis & {
+  showSaveFilePicker?: (options?: { suggestedName?: string }) => Promise<FileSystemHandleLike>;
+};
+
+type DownloadSink =
+  | { kind: "filesystem"; writable: FileSystemWritableLike }
+  | { kind: "memory"; chunks: BlobPart[] };
+
+type DownloadState = "waiting" | "receiving" | "paused" | "complete" | "cancelled" | "error";
+
+type DownloadJob = {
+  id: string;
+  file: RemoteFile;
+  sink: DownloadSink;
+  state: DownloadState;
+  received: number;
+  requested: number;
+  outstanding: number;
+  token: number;
+  error: string;
+};
+
 const CHUNK_BYTES = 32 * 1024;
 const CHUNK_HEADER_BYTES = 8 + 32;
 const BUFFER_LOW_BYTES = 512 * 1024;
 const BUFFER_HIGH_BYTES = 2 * 1024 * 1024;
+const DOWNLOAD_WINDOW_CHUNKS = 8;
 const MAX_TRANSFER_BYTES = 20 * 1024 * 1024 * 1024;
+const MAX_MEMORY_DOWNLOAD_BYTES = 256 * 1024 * 1024;
 
 let peer: RTCPeerConnection | null = null;
 let transferChannel: RTCDataChannel | null = null;
 let activeJob: UploadJob | null = null;
 const jobs: UploadJob[] = [];
+let remoteFiles: RemoteFile[] = [];
+let activeDownload: DownloadJob | null = null;
+let downloadProcessChain: Promise<void> = Promise.resolve();
 
 let transferButton: HTMLButtonElement | null = null;
 let transferPanel: HTMLDivElement | null = null;
 let transferList: HTMLDivElement | null = null;
+let remoteFileList: HTMLDivElement | null = null;
+let downloadProgress: HTMLDivElement | null = null;
 let transferStatus: HTMLSpanElement | null = null;
 let fileInput: HTMLInputElement | null = null;
 let dropOverlay: HTMLDivElement | null = null;
@@ -80,6 +128,17 @@ function stateLabel(job: UploadJob) {
   }
 }
 
+function downloadStateLabel(job: DownloadJob) {
+  switch (job.state) {
+    case "waiting": return "准备下载…";
+    case "receiving": return `下载中 · ${Math.floor((job.received / Math.max(1, job.file.size)) * 100)}%`;
+    case "paused": return "网络中断 · 等待自动续传";
+    case "complete": return "下载完成";
+    case "cancelled": return "已取消";
+    case "error": return job.error || "下载失败";
+  }
+}
+
 function setStatus(value: string, error = false) {
   if (!transferStatus) return;
   transferStatus.textContent = value;
@@ -108,7 +167,9 @@ function sendText(message: Record<string, unknown>) {
 
 function renderJobs() {
   if (transferButton) {
-    const pending = jobs.filter((job) => !["complete", "cancelled", "error"].includes(job.state)).length;
+    const pendingUploads = jobs.filter((job) => !["complete", "cancelled", "error"].includes(job.state)).length;
+    const pendingDownloads = activeDownload && !["complete", "cancelled", "error"].includes(activeDownload.state) ? 1 : 0;
+    const pending = pendingUploads + pendingDownloads;
     transferButton.textContent = pending > 0 ? `文件 · ${pending}` : "文件";
     transferButton.classList.toggle("is-active", pending > 0);
   }
@@ -170,6 +231,92 @@ function renderJobs() {
     row.append(header, progress, footer);
     transferList.append(row);
   }
+}
+
+function renderRemoteFiles() {
+  if (!remoteFileList) return;
+  remoteFileList.replaceChildren();
+  if (remoteFiles.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "transfer-empty";
+    empty.textContent = "远端 DeskLink 目录暂无可下载文件。";
+    remoteFileList.append(empty);
+    return;
+  }
+
+  for (const file of remoteFiles) {
+    const row = document.createElement("div");
+    row.className = "remote-file-item";
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = file.name;
+    name.title = file.name;
+    const size = document.createElement("span");
+    size.textContent = formatBytes(file.size);
+    info.append(name, size);
+
+    const download = document.createElement("button");
+    download.type = "button";
+    download.textContent = "下载";
+    download.disabled = Boolean(activeDownload && !["complete", "cancelled", "error"].includes(activeDownload.state));
+    download.addEventListener("click", () => void startDownload(file));
+    row.append(info, download);
+    remoteFileList.append(row);
+  }
+}
+
+function renderDownload() {
+  if (!downloadProgress) return;
+  downloadProgress.replaceChildren();
+  const job = activeDownload;
+  if (!job) {
+    downloadProgress.hidden = true;
+    renderJobs();
+    renderRemoteFiles();
+    return;
+  }
+
+  downloadProgress.hidden = false;
+  const row = document.createElement("div");
+  row.className = "transfer-item download-item";
+  row.dataset.state = job.state;
+
+  const header = document.createElement("div");
+  header.className = "transfer-item-header";
+  const name = document.createElement("strong");
+  name.textContent = `↓ ${job.file.name}`;
+  name.title = job.file.name;
+  const size = document.createElement("span");
+  size.textContent = formatBytes(job.file.size);
+  header.append(name, size);
+
+  const progress = document.createElement("div");
+  progress.className = "transfer-progress";
+  const bar = document.createElement("span");
+  const ratio = job.file.size === 0
+    ? (job.state === "complete" ? 1 : 0)
+    : Math.max(0, Math.min(1, job.received / job.file.size));
+  bar.style.width = `${(ratio * 100).toFixed(2)}%`;
+  progress.append(bar);
+
+  const footer = document.createElement("div");
+  footer.className = "transfer-item-footer";
+  const state = document.createElement("span");
+  state.textContent = downloadStateLabel(job);
+  state.classList.toggle("is-error", job.state === "error");
+  footer.append(state);
+  if (!["complete", "cancelled", "error"].includes(job.state)) {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", () => void cancelDownload());
+    footer.append(cancel);
+  }
+
+  row.append(header, progress, footer);
+  downloadProgress.append(row);
+  renderJobs();
+  renderRemoteFiles();
 }
 
 function closePanel() {
@@ -351,6 +498,7 @@ function handleUploadMessage(message: UploadMessage) {
     const savedName = typeof message.name === "string" && message.name ? message.name : job.file.name;
     setStatus(`已发送：${savedName}`);
     renderJobs();
+    requestRemoteFiles();
     queueMicrotask(pumpQueue);
     return;
   }
@@ -376,6 +524,276 @@ function handleUploadMessage(message: UploadMessage) {
   }
 }
 
+function requestRemoteFiles() {
+  if (!sendText({ t: "download-list-request" })) {
+    setStatus("远程文件通道未连接", true);
+    return;
+  }
+  setStatus("正在读取远端 DeskLink 文件列表…");
+}
+
+function normalizeRemoteFiles(raw: unknown): RemoteFile[] {
+  if (!Array.isArray(raw)) return [];
+  const output: RemoteFile[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.name !== "string" || typeof record.size !== "number" ||
+        !Number.isSafeInteger(record.size) || record.size < 0 || record.size > MAX_TRANSFER_BYTES) {
+      continue;
+    }
+    output.push({ name: record.name, size: record.size });
+  }
+  return output.slice(0, 200);
+}
+
+async function makeDownloadSink(file: RemoteFile): Promise<DownloadSink> {
+  const picker = (window as FilePickerWindow).showSaveFilePicker;
+  if (picker) {
+    const handle = await picker({ suggestedName: file.name });
+    const writable = await handle.createWritable({ keepExistingData: false });
+    return { kind: "filesystem", writable };
+  }
+  if (file.size > MAX_MEMORY_DOWNLOAD_BYTES) {
+    throw new Error("此浏览器不支持流式保存，超过 256 MiB 的远端文件请使用最新版 Chrome/Edge");
+  }
+  return { kind: "memory", chunks: [] };
+}
+
+function beginDownload(job: DownloadJob) {
+  if (!channelReady()) {
+    job.state = "paused";
+    renderDownload();
+    return;
+  }
+  job.token += 1;
+  job.state = "waiting";
+  job.requested = job.received;
+  job.outstanding = 0;
+  if (!sendText({
+    t: "download-begin",
+    id: job.id,
+    name: job.file.name,
+    offset: job.received,
+  })) {
+    job.state = "paused";
+  }
+  renderDownload();
+}
+
+async function startDownload(file: RemoteFile) {
+  if (activeDownload && !["complete", "cancelled", "error"].includes(activeDownload.state)) {
+    setStatus("一次只能下载一个远端文件，请先完成或取消当前下载", true);
+    return;
+  }
+
+  try {
+    const sink = await makeDownloadSink(file);
+    activeDownload = {
+      id: transferId(),
+      file,
+      sink,
+      state: "waiting",
+      received: 0,
+      requested: 0,
+      outstanding: 0,
+      token: 0,
+      error: "",
+    };
+    setStatus(`准备下载 ${file.name}`);
+    renderDownload();
+    beginDownload(activeDownload);
+  } catch (error) {
+    const message = error instanceof DOMException && error.name === "AbortError"
+      ? "已取消选择保存位置"
+      : (error instanceof Error ? error.message : "无法准备本地保存位置");
+    setStatus(message, !(error instanceof DOMException && error.name === "AbortError"));
+  }
+}
+
+function pumpDownloadReads(job: DownloadJob) {
+  if (activeDownload !== job || job.state !== "receiving" || !channelReady()) return;
+  while (job.outstanding < DOWNLOAD_WINDOW_CHUNKS && job.requested < job.file.size) {
+    const length = Math.min(CHUNK_BYTES, job.file.size - job.requested);
+    if (!sendText({
+      t: "download-read",
+      id: job.id,
+      offset: job.requested,
+      length,
+    })) {
+      job.state = "paused";
+      renderDownload();
+      return;
+    }
+    job.requested += length;
+    job.outstanding += 1;
+  }
+}
+
+async function writeDownloadChunk(job: DownloadJob, offset: number, payload: Uint8Array) {
+  if (job.sink.kind === "filesystem") {
+    await job.sink.writable.write({ type: "write", position: offset, data: payload });
+  } else {
+    job.sink.chunks.push(payload.slice());
+  }
+}
+
+function digestEqual(expected: Uint8Array, actual: Uint8Array) {
+  if (expected.byteLength !== actual.byteLength) return false;
+  let difference = 0;
+  for (let index = 0; index < expected.byteLength; index += 1) {
+    difference |= expected[index] ^ actual[index];
+  }
+  return difference === 0;
+}
+
+async function failDownload(job: DownloadJob, message: string, cancelRemote = true) {
+  if (activeDownload !== job) return;
+  job.token += 1;
+  job.state = "error";
+  job.error = message;
+  if (cancelRemote && channelReady()) sendText({ t: "download-cancel", id: job.id });
+  if (job.sink.kind === "filesystem" && job.sink.writable.abort) {
+    try { await job.sink.writable.abort(message); } catch { /* ignored */ }
+  }
+  setStatus(message, true);
+  renderDownload();
+}
+
+async function finishDownload(job: DownloadJob) {
+  if (activeDownload !== job || job.state === "complete") return;
+  if (job.sink.kind === "filesystem") {
+    await job.sink.writable.close();
+  } else {
+    const blob = new Blob(job.sink.chunks);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = job.file.name;
+    anchor.style.display = "none";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+  job.state = "complete";
+  setStatus(`已下载：${job.file.name}`);
+  renderDownload();
+}
+
+async function processDownloadBinary(buffer: ArrayBuffer, token: number) {
+  const job = activeDownload;
+  if (!job || job.token !== token || job.state !== "receiving") return;
+  const bytes = new Uint8Array(buffer);
+  if (bytes.byteLength < CHUNK_HEADER_BYTES || bytes.byteLength > CHUNK_HEADER_BYTES + CHUNK_BYTES) {
+    await failDownload(job, "远端返回了非法文件分块");
+    return;
+  }
+
+  const view = new DataView(buffer, bytes.byteOffset, bytes.byteLength);
+  const rawOffset = view.getBigUint64(0, true);
+  if (rawOffset > BigInt(Number.MAX_SAFE_INTEGER)) {
+    await failDownload(job, "远端文件偏移超出浏览器安全范围");
+    return;
+  }
+  const offset = Number(rawOffset);
+  const expectedDigest = bytes.slice(8, 40);
+  const payload = bytes.slice(CHUNK_HEADER_BYTES);
+  if (offset !== job.received || offset + payload.byteLength > job.file.size) {
+    await failDownload(job, "远端文件分块顺序不一致");
+    return;
+  }
+
+  const actualDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", payload));
+  if (!digestEqual(expectedDigest, actualDigest)) {
+    await failDownload(job, "远端文件分块 SHA-256 校验失败");
+    return;
+  }
+
+  try {
+    await writeDownloadChunk(job, offset, payload);
+  } catch (error) {
+    console.debug("DeskLink local download write failed", error);
+    await failDownload(job, "写入本地文件失败");
+    return;
+  }
+
+  if (activeDownload !== job || job.token !== token) return;
+  job.received += payload.byteLength;
+  job.outstanding = Math.max(0, job.outstanding - 1);
+  renderDownload();
+  if (job.received === job.file.size) {
+    try {
+      await finishDownload(job);
+    } catch (error) {
+      console.debug("DeskLink download finalize failed", error);
+      await failDownload(job, "完成本地文件保存失败", false);
+    }
+    return;
+  }
+  pumpDownloadReads(job);
+}
+
+async function cancelDownload() {
+  const job = activeDownload;
+  if (!job || ["complete", "cancelled", "error"].includes(job.state)) return;
+  job.token += 1;
+  if (channelReady()) sendText({ t: "download-cancel", id: job.id });
+  if (job.sink.kind === "filesystem" && job.sink.writable.abort) {
+    try { await job.sink.writable.abort("cancelled"); } catch { /* ignored */ }
+  }
+  job.state = "cancelled";
+  setStatus(`已取消下载 ${job.file.name}`);
+  renderDownload();
+}
+
+function handleDownloadMessage(message: UploadMessage) {
+  if (message.t === "download-list") {
+    remoteFiles = normalizeRemoteFiles(message.files);
+    renderRemoteFiles();
+    const error = typeof message.error === "string" ? message.error : "";
+    setStatus(error ? `读取远端文件失败：${error}` : `远端共有 ${remoteFiles.length} 个可下载文件`, Boolean(error));
+    return true;
+  }
+
+  const job = activeDownload;
+  const id = typeof message.id === "string" ? message.id : "";
+  if (!job || id !== job.id) return false;
+
+  if (message.t === "download-ready") {
+    const offset = typeof message.offset === "number" ? message.offset : NaN;
+    const size = typeof message.size === "number" ? message.size : NaN;
+    if (!Number.isSafeInteger(offset) || offset !== job.received ||
+        !Number.isSafeInteger(size) || size !== job.file.size) {
+      void failDownload(job, "远端文件在下载过程中发生变化");
+      return true;
+    }
+    job.state = "receiving";
+    job.requested = offset;
+    job.outstanding = 0;
+    setStatus(offset > 0
+      ? `从 ${formatBytes(offset)} 继续下载 ${job.file.name}`
+      : `正在下载 ${job.file.name}`);
+    renderDownload();
+    if (job.file.size === 0) {
+      void finishDownload(job).catch(() => failDownload(job, "完成空文件保存失败", false));
+    } else {
+      pumpDownloadReads(job);
+    }
+    return true;
+  }
+
+  if (message.t === "download-error") {
+    const reason = typeof message.error === "string" ? message.error : "remote-download-error";
+    void failDownload(job, `远端下载失败：${reason}`, false);
+    return true;
+  }
+
+  if (message.t === "download-cancelled") return true;
+  if (message.t === "download-complete") return true;
+  return false;
+}
+
 function attachTransferChannel(channel: RTCDataChannel) {
   if (transferChannel && transferChannel !== channel && transferChannel.readyState !== "closed") {
     try { transferChannel.close(); } catch { /* ignored */ }
@@ -388,16 +806,35 @@ function attachTransferChannel(channel: RTCDataChannel) {
     if (transferChannel !== channel) return;
     setStatus("WebRTC 文件通道已就绪");
     pumpQueue();
+    if (activeDownload && activeDownload.state === "paused") beginDownload(activeDownload);
+    requestRemoteFiles();
   });
 
   channel.addEventListener("message", (event) => {
-    if (transferChannel !== channel || typeof event.data !== "string" || event.data.length > 16 * 1024) return;
-    try {
-      const parsed = JSON.parse(event.data) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-      handleUploadMessage(parsed as UploadMessage);
-    } catch {
-      // Binary chunks are controller -> host only; host responses are compact JSON.
+    if (transferChannel !== channel) return;
+    if (typeof event.data === "string") {
+      if (event.data.length > 64 * 1024) return;
+      try {
+        const parsed = JSON.parse(event.data) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+        const message = parsed as UploadMessage;
+        if (!handleDownloadMessage(message)) handleUploadMessage(message);
+      } catch {
+        // Ignore invalid application messages.
+      }
+      return;
+    }
+
+    if (event.data instanceof ArrayBuffer) {
+      const job = activeDownload;
+      if (!job) return;
+      const token = job.token;
+      const buffer = event.data;
+      downloadProcessChain = downloadProcessChain
+        .then(() => processDownloadBinary(buffer, token))
+        .catch((error) => {
+          console.debug("DeskLink download processing chain failed", error);
+        });
     }
   });
 
@@ -407,9 +844,16 @@ function attachTransferChannel(channel: RTCDataChannel) {
     if (activeJob && !["complete", "cancelled", "error"].includes(activeJob.state)) {
       activeJob.streamToken += 1;
       activeJob.state = "paused";
-      setStatus("文件通道已断开，重连后自动从远端确认位置续传");
-      renderJobs();
     }
+    if (activeDownload && !["complete", "cancelled", "error"].includes(activeDownload.state)) {
+      activeDownload.token += 1;
+      activeDownload.state = "paused";
+      activeDownload.requested = activeDownload.received;
+      activeDownload.outstanding = 0;
+    }
+    setStatus("文件通道已断开，网络恢复后自动从已确认位置续传");
+    renderJobs();
+    renderDownload();
   });
 }
 
@@ -494,7 +938,11 @@ function clearFinished() {
   for (let index = jobs.length - 1; index >= 0; index -= 1) {
     if (["complete", "cancelled", "error"].includes(jobs[index].state)) jobs.splice(index, 1);
   }
+  if (activeDownload && ["complete", "cancelled", "error"].includes(activeDownload.state)) {
+    activeDownload = null;
+  }
   renderJobs();
+  renderDownload();
 }
 
 function mountTransferControl() {
@@ -511,33 +959,37 @@ function mountTransferControl() {
   transferButton.textContent = "文件";
   transferButton.setAttribute("aria-haspopup", "dialog");
   transferButton.setAttribute("aria-expanded", "false");
-  transferButton.title = "WebRTC 分块发送文件到远端 Windows，网络重连可续传";
+  transferButton.title = "WebRTC 双向文件传输：拖拽上传、远端文件下载、网络重连续传";
 
   transferPanel = document.createElement("div");
   transferPanel.className = "file-transfer-panel";
   transferPanel.hidden = true;
   transferPanel.setAttribute("role", "dialog");
-  transferPanel.setAttribute("aria-label", "发送文件到远端");
+  transferPanel.setAttribute("aria-label", "远程文件传输");
 
   const heading = document.createElement("div");
   heading.className = "transfer-heading";
   const title = document.createElement("strong");
-  title.textContent = "发送文件到远端";
+  title.textContent = "文件传输";
   const hint = document.createElement("span");
-  hint.textContent = "WebRTC · 32 KiB SHA-256 分块 · 网络重连自动续传";
+  hint.textContent = "WebRTC · 32 KiB SHA-256 分块 · 网络重连续传 · 仅 DeskLink 目录";
   heading.append(title, hint);
 
   const toolbar = document.createElement("div");
   toolbar.className = "transfer-toolbar";
   const choose = document.createElement("button");
   choose.type = "button";
-  choose.textContent = "选择文件";
+  choose.textContent = "发送文件";
   choose.addEventListener("click", () => fileInput?.click());
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.textContent = "刷新远端文件";
+  refresh.addEventListener("click", requestRemoteFiles);
   const clear = document.createElement("button");
   clear.type = "button";
   clear.textContent = "清除已结束";
   clear.addEventListener("click", clearFinished);
-  toolbar.append(choose, clear);
+  toolbar.append(choose, refresh, clear);
 
   fileInput = document.createElement("input");
   fileInput.type = "file";
@@ -548,8 +1000,21 @@ function mountTransferControl() {
     if (fileInput) fileInput.value = "";
   });
 
+  const sendLabel = document.createElement("strong");
+  sendLabel.className = "transfer-section-label";
+  sendLabel.textContent = "发送到远端";
   transferList = document.createElement("div");
   transferList.className = "transfer-list";
+
+  const remoteLabel = document.createElement("strong");
+  remoteLabel.className = "transfer-section-label";
+  remoteLabel.textContent = "远端 DeskLink 文件";
+  remoteFileList = document.createElement("div");
+  remoteFileList.className = "remote-file-list";
+
+  downloadProgress = document.createElement("div");
+  downloadProgress.className = "download-progress-container";
+  downloadProgress.hidden = true;
 
   transferStatus = document.createElement("span");
   transferStatus.className = "transfer-status";
@@ -557,15 +1022,27 @@ function mountTransferControl() {
 
   const destination = document.createElement("small");
   destination.className = "transfer-destination";
-  destination.textContent = "远端默认保存：Downloads\\DeskLink（单文件最多 20 GiB）";
+  destination.textContent = "远端目录：Downloads\\DeskLink（可由管理员覆盖；单文件最多 20 GiB）";
 
-  transferPanel.append(heading, toolbar, fileInput, transferList, transferStatus, destination);
+  transferPanel.append(
+    heading,
+    toolbar,
+    fileInput,
+    downloadProgress,
+    sendLabel,
+    transferList,
+    remoteLabel,
+    remoteFileList,
+    transferStatus,
+    destination,
+  );
   transferButton.addEventListener("click", (event) => {
     event.stopPropagation();
     if (!transferPanel) return;
     const opening = transferPanel.hidden;
     transferPanel.hidden = !opening;
     transferButton?.setAttribute("aria-expanded", opening ? "true" : "false");
+    if (opening && channelReady()) requestRemoteFiles();
   });
 
   wrapper.append(transferButton, transferPanel);
@@ -580,6 +1057,7 @@ function mountTransferControl() {
   stage.append(dropOverlay);
 
   renderJobs();
+  renderRemoteFiles();
 }
 
 function hasFiles(event: DragEvent) {
