@@ -276,6 +276,7 @@ void WebRtcSession::Start() {
   bool expected_stopped = true;
   if (!stopping_.compare_exchange_strong(expected_stopped, false)) return;
 
+  registration_revoked_.store(false, std::memory_order_relaxed);
   reconnect_attempt_.store(0, std::memory_order_relaxed);
   {
     std::scoped_lock lock(reconnect_mutex_);
@@ -289,7 +290,10 @@ void WebRtcSession::Start() {
 }
 
 void WebRtcSession::ConnectSignaling() {
-  if (stopping_.load(std::memory_order_relaxed)) return;
+  if (stopping_.load(std::memory_order_relaxed) ||
+      registration_revoked_.load(std::memory_order_relaxed)) {
+    return;
+  }
 
   std::string signal_auth_token;
   std::string token_error;
@@ -312,7 +316,11 @@ void WebRtcSession::ConnectSignaling() {
 
   ws->onOpen([this, weak_ws]() {
     auto opened = weak_ws.lock();
-    if (!opened || stopping_.load(std::memory_order_relaxed)) return;
+    if (!opened || stopping_.load(std::memory_order_relaxed) ||
+        registration_revoked_.load(std::memory_order_relaxed)) {
+      if (opened) opened->close();
+      return;
+    }
 
     {
       std::scoped_lock lock(mutex_);
@@ -335,7 +343,8 @@ void WebRtcSession::ConnectSignaling() {
 
     if (!was_current) return;
     std::cout << "Signaling connection closed\n";
-    if (!stopping_.load(std::memory_order_relaxed)) {
+    if (!stopping_.load(std::memory_order_relaxed) &&
+        !registration_revoked_.load(std::memory_order_relaxed)) {
       RequestSignalingReconnect();
     }
   });
@@ -362,7 +371,10 @@ void WebRtcSession::ConnectSignaling() {
 
   {
     std::scoped_lock lock(mutex_);
-    if (stopping_.load(std::memory_order_relaxed)) return;
+    if (stopping_.load(std::memory_order_relaxed) ||
+        registration_revoked_.load(std::memory_order_relaxed)) {
+      return;
+    }
     websocket_ = ws;
   }
 
@@ -378,7 +390,10 @@ void WebRtcSession::ConnectSignaling() {
 }
 
 void WebRtcSession::RequestSignalingReconnect() {
-  if (stopping_.load(std::memory_order_relaxed)) return;
+  if (stopping_.load(std::memory_order_relaxed) ||
+      registration_revoked_.load(std::memory_order_relaxed)) {
+    return;
+  }
   {
     std::scoped_lock lock(reconnect_mutex_);
     if (reconnect_requested_) return;
@@ -389,13 +404,20 @@ void WebRtcSession::RequestSignalingReconnect() {
 
 void WebRtcSession::SignalingReconnectLoop(std::stop_token stop_token) {
   std::unique_lock lock(reconnect_mutex_);
-  while (!stop_token.stop_requested() && !stopping_.load(std::memory_order_relaxed)) {
+  while (!stop_token.stop_requested() &&
+         !stopping_.load(std::memory_order_relaxed) &&
+         !registration_revoked_.load(std::memory_order_relaxed)) {
     reconnect_cv_.wait(lock, [this, &stop_token]() {
       return reconnect_requested_ || stop_token.stop_requested() ||
-             stopping_.load(std::memory_order_relaxed);
+             stopping_.load(std::memory_order_relaxed) ||
+             registration_revoked_.load(std::memory_order_relaxed);
     });
 
-    if (stop_token.stop_requested() || stopping_.load(std::memory_order_relaxed)) return;
+    if (stop_token.stop_requested() ||
+        stopping_.load(std::memory_order_relaxed) ||
+        registration_revoked_.load(std::memory_order_relaxed)) {
+      return;
+    }
     reconnect_requested_ = false;
 
     const uint32_t attempt = reconnect_attempt_.fetch_add(1, std::memory_order_relaxed);
@@ -405,11 +427,17 @@ void WebRtcSession::SignalingReconnectLoop(std::stop_token stop_token) {
 
     std::cout << "Reconnecting signaling in " << delay_seconds << "s\n";
     for (uint32_t tick = 0; tick < delay_seconds * 10; ++tick) {
-      if (stop_token.stop_requested() || stopping_.load(std::memory_order_relaxed)) return;
+      if (stop_token.stop_requested() ||
+          stopping_.load(std::memory_order_relaxed) ||
+          registration_revoked_.load(std::memory_order_relaxed)) {
+        return;
+      }
       std::this_thread::sleep_for(100ms);
     }
 
-    if (!stop_token.stop_requested() && !stopping_.load(std::memory_order_relaxed)) {
+    if (!stop_token.stop_requested() &&
+        !stopping_.load(std::memory_order_relaxed) &&
+        !registration_revoked_.load(std::memory_order_relaxed)) {
       ConnectSignaling();
     }
 
@@ -510,6 +538,38 @@ void WebRtcSession::HandleSignal(const std::string& text) {
   const std::string type = message.value("type", "");
   if (type == "registered") {
     std::cout << "Device registered with signaling server\n";
+    return;
+  }
+
+  if (type == "device-revoked") {
+    const std::string revoked_target = message.value("target", "");
+    if (revoked_target != config_.device_id) {
+      std::cerr << "Ignored device-revoked for unexpected target " << revoked_target << "\n";
+      return;
+    }
+
+    registration_revoked_.store(true, std::memory_order_relaxed);
+    input_.ReleaseAll();
+    {
+      std::scoped_lock lock(reconnect_mutex_);
+      reconnect_requested_ = false;
+    }
+    reconnect_cv_.notify_all();
+
+    std::shared_ptr<rtc::PeerConnection> peer;
+    {
+      std::scoped_lock lock(mutex_);
+      control_.reset();
+      video_track_.reset();
+      video_timestamp_base100ns_ = 0;
+      peer = std::move(peer_);
+      controller_id_.clear();
+      session_id_.clear();
+      pending_access_challenges_.clear();
+      authorized_offer_sessions_.clear();
+    }
+    if (peer) peer->close();
+    std::cerr << "Device registration revoked; active remote-control session terminated\n";
     return;
   }
 
