@@ -190,10 +190,9 @@ HANDLE ConnectPipeWithRetry(const std::wstring& pipe_name) {
   return INVALID_HANDLE_VALUE;
 }
 
-bool ValidateUnsupportedCommandOnPipe(const std::wstring& pipe_name) {
-  // StartServiceAuthBroker promises that the first pipe instance already exists.
-  // Deliberately do not retry for this first connection; a readiness race should
-  // fail CI instead of being hidden by the test.
+bool ValidateUnsupportedCommandOnReadyPipe(const std::wstring& pipe_name) {
+  // Do not retry this first connection. Broker startup promises that the first
+  // pipe instance is already created before StartServiceAuthBroker returns.
   ScopedKernelHandle pipe(CreateFileW(
       pipe_name.c_str(),
       GENERIC_READ | GENERIC_WRITE,
@@ -230,9 +229,14 @@ bool ValidateUnsupportedCommandOnPipe(const std::wstring& pipe_name) {
          body.find("\"ok\":false") != std::string::npos;
 }
 
-int AuthorizedChild() {
-  // This connection uses the same client helper compiled into desklink-agent.exe.
-  // The --service-auth-pipe argument is parsed internally by that helper.
+int AuthorizedChild(const std::wstring& pipe_name) {
+  if (!ValidateUnsupportedCommandOnReadyPipe(pipe_name)) {
+    std::cerr << "Broker first pipe was not immediately ready or command validation failed\n";
+    return 9;
+  }
+
+  // This second connection uses the same client helper compiled into
+  // desklink-agent.exe. The --service-auth-pipe argument is parsed internally.
   desklink::RuntimeSignalToken token;
   std::string error;
   if (!desklink::FetchServiceBrokerSignalToken(&token, &error)) {
@@ -341,8 +345,8 @@ bool RunUnauthorizedChildProcess(const std::wstring& pipe_name) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-  if (argc >= 2 && std::wstring(argv[1]) == L"--authorized-child") {
-    return AuthorizedChild();
+  if (argc >= 3 && std::wstring(argv[1]) == L"--authorized-child") {
+    return AuthorizedChild(argv[2]);
   }
   if (argc == 3 && std::wstring(argv[1]) == L"--unauthorized-child") {
     return UnauthorizedChild(argv[2]);
@@ -362,7 +366,8 @@ int wmain(int argc, wchar_t** argv) {
   // the exact child PID and make the Pipe ready before any Agent-side code runs.
   PROCESS_INFORMATION authorized{};
   if (!RunChildProcess(
-          L"--authorized-child --service-auth-pipe=\"" + pipe_name + L"\"",
+          L"--authorized-child \"" + pipe_name + L"\" --service-auth-pipe=\"" +
+              pipe_name + L"\"",
           CREATE_NO_WINDOW | CREATE_SUSPENDED,
           &authorized)) {
     std::wcerr << L"Unable to create authorized broker child\n";
@@ -384,9 +389,6 @@ int wmain(int argc, wchar_t** argv) {
     return 3;
   }
 
-  // Exercise the first ready Pipe from the authorized PID before the real token
-  // request. This verifies both synchronous first-instance creation and command
-  // validation without contacting the HTTP mock yet.
   if (ResumeThread(authorized.hThread) == static_cast<DWORD>(-1)) {
     TerminateProcess(authorized.hProcess, 4);
     CloseHandle(authorized.hThread);
@@ -395,8 +397,8 @@ int wmain(int argc, wchar_t** argv) {
     return 4;
   }
 
-  // The authorized child immediately uses the production Agent-side broker
-  // client. Wait for it to complete the Service -> HTTP -> Pipe token chain.
+  // The authorized child first proves synchronous pipe readiness and then uses
+  // the production Agent-side client for Service -> HTTP -> Pipe token exchange.
   if (!WaitForSuccessfulChild(&authorized, 15000)) {
     std::wcerr << L"Authorized Agent-side broker token exchange failed\n";
     desklink::StopServiceAuthBroker();
