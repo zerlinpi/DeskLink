@@ -312,6 +312,7 @@ func main() {
 		}()
 
 		_ = p.write(map[string]any{"type": "registered", "deviceId": id})
+		flushPendingHostAuthRequests(h, p, &metrics)
 
 		for {
 			var msg envelope
@@ -359,6 +360,19 @@ func main() {
 
 			target := h.get(msg.Target)
 			if target == nil {
+				if msg.Type == "auth-request" {
+					if pendingHostAuthRequests.enqueue(
+						msg.Target,
+						id,
+						msg.Session,
+						msg.Payload,
+						time.Now(),
+					) {
+						metrics.pendingHostAuthQueued.Add(1)
+					} else {
+						metrics.pendingHostAuthDropped.Add(1)
+					}
+				}
 				_ = p.write(map[string]any{"type": "peer-offline", "target": msg.Target})
 				continue
 			}
