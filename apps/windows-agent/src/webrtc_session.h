@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -13,6 +14,12 @@
 
 namespace desklink {
 
+struct NetworkFeedback {
+  double loss_ratio{0.0};
+  double jitter_ms{0.0};
+  double rtt_ms{0.0};
+};
+
 struct SessionConfig {
   std::string signal_url{"ws://localhost:8080/ws"};
   std::string device_id{"windows-host"};
@@ -22,6 +29,7 @@ struct SessionConfig {
   uint16_t turn_port{3478};
   std::string turn_username{"desklink"};
   std::string turn_password{"CHANGE_ME_NOW"};
+  std::function<void(const NetworkFeedback&)> on_network_feedback;
 };
 
 class WebRtcSession {
