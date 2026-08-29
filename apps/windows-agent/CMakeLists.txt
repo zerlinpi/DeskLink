@@ -75,6 +75,7 @@ target_link_libraries(
     winmm
     winhttp
     shell32
+    bcrypt
 )
 
 add_executable(desklink-service
