@@ -120,4 +120,5 @@ target_link_libraries(
     advapi32
     shell32
     winhttp
+    ws2_32
 )
