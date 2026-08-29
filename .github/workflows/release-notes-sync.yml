@@ -1,0 +1,59 @@
+name: Release Notes Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - docs/releases/**
+      - .github/workflows/release-notes-sync.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desklink-release-notes
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        name: Resolve release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must be semantic major.minor.patch" >&2
+            exit 1
+          fi
+          notes="docs/releases/v$version.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "Missing release notes: $notes" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+
+      - name: Sync published release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          notes="${{ steps.version.outputs.notes }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --title "DeskLink v${{ steps.version.outputs.version }}" \
+              --notes-file "$notes"
+            echo "Updated release notes for $tag"
+          else
+            echo "Release $tag does not exist yet; the main Release workflow will create it."
+          fi
