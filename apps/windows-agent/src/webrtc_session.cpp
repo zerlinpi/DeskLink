@@ -2,14 +2,24 @@
 
 #include <chrono>
 #include <iostream>
+#include <regex>
 #include <utility>
 #include <variant>
 
 #include <nlohmann/json.hpp>
+#include <rtc/h264rtppacketizer.hpp>
+#include <rtc/rtcpsrreporter.hpp>
+#include <rtc/rtcpnackresponder.hpp>
 
 namespace desklink {
 using nlohmann::json;
 using namespace std::chrono_literals;
+
+namespace {
+constexpr rtc::SSRC kVideoSsrc = 42;
+constexpr char kVideoCname[] = "desklink-video";
+constexpr char kVideoMsid[] = "desklink-stream";
+}  // namespace
 
 WebRtcSession::WebRtcSession(SessionConfig config) : config_(std::move(config)) {}
 
@@ -53,6 +63,8 @@ void WebRtcSession::Stop() {
   {
     std::scoped_lock lock(mutex_);
     control_.reset();
+    video_track_.reset();
+    video_timestamp_base100ns_ = 0;
     peer = std::move(peer_);
     ws = std::move(websocket_);
     controller_id_.clear();
@@ -70,6 +82,39 @@ bool WebRtcSession::connected() const {
 std::string WebRtcSession::controller_id() const {
   std::scoped_lock lock(mutex_);
   return controller_id_;
+}
+
+bool WebRtcSession::SendH264AccessUnit(
+    const uint8_t* data,
+    size_t size,
+    uint64_t timestamp100ns) {
+  if (!data || size == 0) return false;
+
+  std::shared_ptr<rtc::Track> track;
+  uint64_t base = 0;
+  {
+    std::scoped_lock lock(mutex_);
+    track = video_track_;
+    if (!track || !track->isOpen()) return false;
+    if (video_timestamp_base100ns_ == 0) {
+      video_timestamp_base100ns_ = timestamp100ns;
+    }
+    base = video_timestamp_base100ns_;
+  }
+
+  const uint64_t relative = timestamp100ns >= base ? timestamp100ns - base : 0;
+  const auto pts = std::chrono::duration<double>(static_cast<double>(relative) / 10'000'000.0);
+
+  try {
+    track->sendFrame(
+        reinterpret_cast<const rtc::byte*>(data),
+        size,
+        rtc::FrameInfo(pts));
+    return true;
+  } catch (const std::exception& error) {
+    std::cerr << "H264 WebRTC send failed: " << error.what() << "\n";
+    return false;
+  }
 }
 
 void WebRtcSession::HandleSignal(const std::string& text) {
@@ -95,6 +140,21 @@ void WebRtcSession::HandleSignal(const std::string& text) {
   }
 }
 
+uint8_t WebRtcSession::FindH264PayloadType(const std::string& sdp) {
+  static const std::regex pattern(
+      R"(a=rtpmap:([0-9]+)[ \t]+H264/90000)",
+      std::regex_constants::icase);
+  std::smatch match;
+  if (!std::regex_search(sdp, match, pattern) || match.size() < 2) return 0;
+
+  try {
+    const int value = std::stoi(match[1].str());
+    if (value > 0 && value <= 127) return static_cast<uint8_t>(value);
+  } catch (...) {
+  }
+  return 0;
+}
+
 void WebRtcSession::HandleOffer(
     const std::string& from,
     const std::string& session,
@@ -103,8 +163,15 @@ void WebRtcSession::HandleOffer(
   const std::string description_type = payload.value("type", "offer");
   if (sdp.empty()) return;
 
+  const uint8_t h264_payload_type = FindH264PayloadType(sdp);
+  if (h264_payload_type == 0) {
+    std::cerr << "Controller offer does not contain H264; control will connect without video\n";
+  } else {
+    std::cout << "Negotiated H264 RTP payload type " << static_cast<int>(h264_payload_type) << "\n";
+  }
+
   std::cout << "Incoming remote-control session from " << from << "\n";
-  CreatePeer(from, session);
+  CreatePeer(from, session, h264_payload_type);
 
   std::shared_ptr<rtc::PeerConnection> peer;
   {
@@ -117,9 +184,17 @@ void WebRtcSession::HandleOffer(
 }
 
 void WebRtcSession::HandleIce(const json& payload) {
-  const std::string candidate = payload.value("candidate", "");
-  const std::string mid = payload.value("sdpMid", "0");
+  if (!payload.is_object()) return;
+  const auto candidate_it = payload.find("candidate");
+  if (candidate_it == payload.end() || !candidate_it->is_string()) return;
+  const std::string candidate = candidate_it->get<std::string>();
   if (candidate.empty()) return;
+
+  std::string mid = "0";
+  const auto mid_it = payload.find("sdpMid");
+  if (mid_it != payload.end() && mid_it->is_string()) {
+    mid = mid_it->get<std::string>();
+  }
 
   std::shared_ptr<rtc::PeerConnection> peer;
   {
@@ -131,7 +206,10 @@ void WebRtcSession::HandleIce(const json& payload) {
   }
 }
 
-void WebRtcSession::CreatePeer(const std::string& controller, const std::string& session) {
+void WebRtcSession::CreatePeer(
+    const std::string& controller,
+    const std::string& session,
+    uint8_t h264_payload_type) {
   rtc::Configuration rtc_config;
   if (!config_.stun_url.empty()) {
     rtc_config.iceServers.emplace_back(config_.stun_url);
@@ -152,12 +230,41 @@ void WebRtcSession::CreatePeer(const std::string& controller, const std::string&
   }
 
   auto peer = std::make_shared<rtc::PeerConnection>(rtc_config);
+  std::shared_ptr<rtc::Track> video_track;
+
+  if (h264_payload_type != 0) {
+    rtc::Description::Video media("video", rtc::Description::Direction::SendOnly);
+    media.addH264Codec(h264_payload_type);
+    media.addSSRC(kVideoSsrc, kVideoCname, kVideoMsid, kVideoCname);
+    video_track = peer->addTrack(media);
+
+    auto rtp_config = std::make_shared<rtc::RtpPacketizationConfig>(
+        kVideoSsrc,
+        kVideoCname,
+        h264_payload_type,
+        rtc::H264RtpPacketizer::ClockRate);
+    auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+        rtc::NalUnit::Separator::StartSequence,
+        rtp_config);
+    packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtp_config));
+    packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+    video_track->setMediaHandler(packetizer);
+    video_track->onOpen([]() {
+      std::cout << "H264 video track open\n";
+    });
+    video_track->onClosed([]() {
+      std::cout << "H264 video track closed\n";
+    });
+  }
+
   std::shared_ptr<rtc::PeerConnection> previous;
   {
     std::scoped_lock lock(mutex_);
     previous = std::move(peer_);
     peer_ = peer;
     control_.reset();
+    video_track_ = video_track;
+    video_timestamp_base100ns_ = 0;
     controller_id_ = controller;
     session_id_ = session;
   }
