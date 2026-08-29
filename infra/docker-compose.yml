@@ -8,6 +8,10 @@ services:
     environment:
       DESKLINK_SIGNAL_ADDR: :8080
       DESKLINK_ALLOW_ANY_ORIGIN: "1"
+      # Empty keeps local development backward-compatible. Production should
+      # inject a long random secret only after clients receive short-lived
+      # registration tokens from a trusted provisioning service.
+      DESKLINK_SIGNAL_AUTH_SECRET: ${DESKLINK_SIGNAL_AUTH_SECRET:-}
     ports:
       - "8080:8080"
 
