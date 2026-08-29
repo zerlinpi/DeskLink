@@ -40,9 +40,11 @@ A reusable Access Code is **never sent in an offer**. A new remote-control sessi
 }
 ```
 
-If the host is temporarily offline, signaling still returns `peer-offline` so the controller can show the state. For `auth-request` only, signaling also keeps a bounded in-memory pending request for up to 30 seconds. Requests are deduplicated by target + controller + session, capped at 32 per target and 512 globally. When that host registers/reconnects, still-valid requests are automatically forwarded. SDP, ICE and arbitrary application messages are never queued this way.
+If the host is temporarily offline, signaling still returns `peer-offline` so the controller can show the state. For `auth-request` only, signaling keeps a bounded in-memory pending request for up to 10 minutes. The request is bound to the exact authenticated controller WebSocket connection plus session, deduplicated on that connection, capped at 32 requests per target and 512 globally, and removed immediately when that controller connection closes. When the host registers/reconnects, still-valid requests are automatically forwarded. SDP, ICE and arbitrary application messages are never queued this way.
 
-Offline queuing is available only to a peer authenticated with controller scope. Host identities and unauthenticated local-development peers still receive `peer-offline` but cannot occupy the pending controller-auth queue. A short dispatch guard also suppresses duplicate `auth-request` delivery from the same live controller connection/session when queue flush and WebSocket reconnect overlap; a genuinely new controller connection is not blocked by the previous connection's dedupe window.
+Offline queuing is available only to a peer authenticated with controller scope. Host identities and unauthenticated local-development peers still receive `peer-offline` but cannot occupy the pending controller-auth queue. A short dispatch guard also suppresses duplicate `auth-request` delivery from the same live controller connection/session when queue flush and direct forwarding overlap. A genuinely new controller connection is a different queue/dispatch identity and cannot inherit stale pending state from the previous connection.
+
+If signaling finds a target online but the WebSocket write fails during forwarding, it removes that stale target registration and reports `peer-offline`. For a controller `auth-request`, the dispatch claim is released and the request is returned to the connection-bound pending queue so the next host registration can resume authentication immediately.
 
 ### 2. Host issues a one-time challenge
 
