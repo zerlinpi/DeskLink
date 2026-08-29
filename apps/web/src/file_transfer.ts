@@ -153,7 +153,13 @@ function renderJobs() {
     state.classList.toggle("is-error", job.state === "error");
     footer.append(state);
 
-    if (!["complete", "cancelled", "error"].includes(job.state)) {
+    if (job.state === "error") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "续传重试";
+      retry.addEventListener("click", () => retryJob(job));
+      footer.append(retry);
+    } else if (!["complete", "cancelled"].includes(job.state)) {
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.textContent = "取消";
@@ -364,7 +370,7 @@ function handleUploadMessage(message: UploadMessage) {
     job.error = reason;
     job.streamToken += 1;
     activeJob = null;
-    setStatus(`远端拒绝文件：${reason}`, true);
+    setStatus(`文件传输失败：${reason}；可从已校验位置重试`, true);
     renderJobs();
     queueMicrotask(pumpQueue);
   }
@@ -380,7 +386,7 @@ function attachTransferChannel(channel: RTCDataChannel) {
 
   channel.addEventListener("open", () => {
     if (transferChannel !== channel) return;
-    setStatus("P2P 文件通道已就绪");
+    setStatus("WebRTC 文件通道已就绪");
     pumpQueue();
   });
 
@@ -415,7 +421,7 @@ function attachPeer(nextPeer: RTCPeerConnection) {
     attachTransferChannel(channel);
   } catch (error) {
     console.debug("DeskLink file transfer channel creation failed", error);
-    setStatus("无法创建 P2P 文件通道", true);
+    setStatus("无法创建 WebRTC 文件通道", true);
   }
 }
 
@@ -449,6 +455,18 @@ function enqueueFiles(fileList: FileList | File[]) {
     renderJobs();
     pumpQueue();
   }
+}
+
+function retryJob(job: UploadJob) {
+  if (job.state !== "error") return;
+  job.state = "queued";
+  job.error = "";
+  job.cancelRequested = false;
+  job.streamToken += 1;
+  job.offset = job.confirmed;
+  setStatus(`准备从远端已校验位置重试 ${job.file.name}`);
+  renderJobs();
+  pumpQueue();
 }
 
 function cancelJob(job: UploadJob) {
@@ -493,7 +511,7 @@ function mountTransferControl() {
   transferButton.textContent = "文件";
   transferButton.setAttribute("aria-haspopup", "dialog");
   transferButton.setAttribute("aria-expanded", "false");
-  transferButton.title = "P2P 分块发送文件到远端 Windows，网络重连可续传";
+  transferButton.title = "WebRTC 分块发送文件到远端 Windows，网络重连可续传";
 
   transferPanel = document.createElement("div");
   transferPanel.className = "file-transfer-panel";
@@ -506,7 +524,7 @@ function mountTransferControl() {
   const title = document.createElement("strong");
   title.textContent = "发送文件到远端";
   const hint = document.createElement("span");
-  hint.textContent = "P2P · 32 KiB SHA-256 分块 · 网络重连自动续传";
+  hint.textContent = "WebRTC · 32 KiB SHA-256 分块 · 网络重连自动续传";
   heading.append(title, hint);
 
   const toolbar = document.createElement("div");
@@ -517,7 +535,7 @@ function mountTransferControl() {
   choose.addEventListener("click", () => fileInput?.click());
   const clear = document.createElement("button");
   clear.type = "button";
-  clear.textContent = "清除完成项";
+  clear.textContent = "清除已结束";
   clear.addEventListener("click", clearFinished);
   toolbar.append(choose, clear);
 
@@ -558,7 +576,7 @@ function mountTransferControl() {
   dropOverlay = document.createElement("div");
   dropOverlay.className = "file-drop-overlay";
   dropOverlay.hidden = true;
-  dropOverlay.innerHTML = "<strong>发送到远端</strong><span>松开鼠标开始 P2P 传输</span>";
+  dropOverlay.innerHTML = "<strong>发送到远端</strong><span>松开鼠标开始 WebRTC 文件传输</span>";
   stage.append(dropOverlay);
 
   renderJobs();
@@ -566,6 +584,11 @@ function mountTransferControl() {
 
 function hasFiles(event: DragEvent) {
   return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+}
+
+function clearDragOverlay() {
+  dragDepth = 0;
+  if (dropOverlay) dropOverlay.hidden = true;
 }
 
 window.addEventListener("desklink:control-channel", (event) => {
@@ -586,17 +609,18 @@ window.addEventListener("dragover", (event) => {
   if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
 });
 
-window.addEventListener("dragleave", (event) => {
-  if (!hasFiles(event)) return;
-  dragDepth = Math.max(0, dragDepth - 1);
+window.addEventListener("dragleave", () => {
+  if (dragDepth <= 0) return;
+  dragDepth -= 1;
   if (dragDepth === 0 && dropOverlay) dropOverlay.hidden = true;
 });
+
+window.addEventListener("dragend", clearDragOverlay);
 
 window.addEventListener("drop", (event) => {
   if (!sessionActive() || !hasFiles(event)) return;
   event.preventDefault();
-  dragDepth = 0;
-  if (dropOverlay) dropOverlay.hidden = true;
+  clearDragOverlay();
   const files = event.dataTransfer?.files;
   if (files?.length) {
     enqueueFiles(files);
