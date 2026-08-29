@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -18,9 +17,8 @@ const maxSignalAuthLifetime = 24 * time.Hour
 //
 //   <unix-expiry>.<base64url(HMAC-SHA256(secret, deviceID + "\n" + expiry))>
 //
-// A production account/device service can mint these tokens after authenticating
-// the user/device. The signaling server only validates them and never learns the
-// host's remote-control access code.
+// These tokens are used by hosts and remain unrestricted at the signaling layer.
+// Browser controllers use the separate ct1 target-scoped token format.
 func mintSignalAuthToken(secret, deviceID string, expiresAt time.Time) string {
 	if secret == "" || !validDeviceID(deviceID) {
 		return ""
@@ -71,17 +69,9 @@ func validateSignalAuthToken(secret, deviceID, token string, now time.Time) bool
 	return hmac.Equal(providedSig, expectedSig)
 }
 
+// Retained for existing tests/callers. The richer scope is obtained through
+// signalRegistrationScopeForRequest and is enforced by the WebSocket handler.
 func signalRegistrationAuthorized(r *http.Request, deviceID string) bool {
-	secret := os.Getenv("DESKLINK_SIGNAL_AUTH_SECRET")
-	if secret == "" {
-		// Development compatibility. Production deployments should set the secret
-		// only after clients are provisioned with short-lived registration tokens.
-		return true
-	}
-	return validateSignalAuthToken(
-		secret,
-		deviceID,
-		r.URL.Query().Get("auth"),
-		time.Now(),
-	)
+	_, ok := signalRegistrationScopeForRequest(r, deviceID)
+	return ok
 }
