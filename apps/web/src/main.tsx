@@ -36,6 +36,12 @@ type NetworkView = {
   availableIncomingBitrate: number | null;
 };
 
+type TurnCredentialResponse = {
+  username: string;
+  password: string;
+  expiresAt: number;
+};
+
 const EMPTY_NETWORK_VIEW: NetworkView = {
   route: "unknown",
   protocol: "-",
@@ -54,6 +60,8 @@ const TURN_URL = import.meta.env.VITE_TURN_URL ?? "turn:localhost:3478";
 const TURN_TLS_URL = import.meta.env.VITE_TURN_TLS_URL ?? "";
 const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME ?? "desklink";
 const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD ?? "CHANGE_ME_NOW";
+const TURN_CREDENTIALS_URL = import.meta.env.VITE_TURN_CREDENTIALS_URL ?? "";
+const TURN_RUNTIME_REQUIRED = import.meta.env.VITE_TURN_RUNTIME_REQUIRED === "1";
 const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
 
 const TURN_URLS = TURN_URL.startsWith("turns:")
@@ -61,14 +69,54 @@ const TURN_URLS = TURN_URL.startsWith("turns:")
   : [`${TURN_URL}?transport=udp`, `${TURN_URL}?transport=tcp`];
 if (TURN_TLS_URL) TURN_URLS.push(TURN_TLS_URL);
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: STUN_URL },
-  {
-    urls: TURN_URLS,
-    username: TURN_USERNAME,
-    credential: TURN_PASSWORD,
-  },
-];
+function staticIceServers(username = TURN_USERNAME, password = TURN_PASSWORD): RTCIceServer[] {
+  const servers: RTCIceServer[] = [];
+  if (STUN_URL) servers.push({ urls: STUN_URL });
+  if (TURN_URLS.length && username && password) {
+    servers.push({
+      urls: TURN_URLS,
+      username,
+      credential: password,
+    });
+  }
+  return servers;
+}
+
+async function resolveIceServers(deviceId: string): Promise<RTCIceServer[]> {
+  if (!TURN_CREDENTIALS_URL) return staticIceServers();
+
+  if (!SIGNAL_AUTH_TOKEN) {
+    if (TURN_RUNTIME_REQUIRED) {
+      throw new Error("runtime TURN credentials require VITE_SIGNAL_AUTH_TOKEN");
+    }
+    console.warn("DeskLink runtime TURN credentials unavailable: signal auth token is missing");
+    return staticIceServers();
+  }
+
+  try {
+    const url = new URL(TURN_CREDENTIALS_URL, window.location.href);
+    url.searchParams.set("deviceId", deviceId);
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${SIGNAL_AUTH_TOKEN}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const credentials = await response.json() as TurnCredentialResponse;
+    if (!credentials.username || !credentials.password || !Number.isFinite(credentials.expiresAt)) {
+      throw new Error("credential response is incomplete");
+    }
+    return staticIceServers(credentials.username, credentials.password);
+  } catch (error) {
+    if (TURN_RUNTIME_REQUIRED) throw error;
+    console.warn("DeskLink runtime TURN credential fetch failed; using configured fallback", error);
+    return staticIceServers();
+  }
+}
 
 function buildSignalUrl(deviceId: string) {
   const url = new URL(SIGNAL_URL, window.location.href);
@@ -370,6 +418,15 @@ function App() {
     setStatus("reconnecting network");
 
     try {
+      if (TURN_CREDENTIALS_URL) {
+        const iceServers = await resolveIceServers(localId);
+        if (pcRef.current !== pc || manualDisconnectRef.current) return;
+        pc.setConfiguration({
+          ...pc.getConfiguration(),
+          iceServers,
+        });
+      }
+
       const sent = await sendOffer(pc, true);
       if (!sent) {
         iceRestartInFlightRef.current = false;
@@ -394,14 +451,14 @@ function App() {
     }
   };
 
-  const createPeer = () => {
+  const createPeer = (iceServers: RTCIceServer[]) => {
     offerSentRef.current = false;
     negotiationPendingRef.current = false;
     pendingLocalIceRef.current = [];
     pendingRemoteIceRef.current = [];
 
     const pc = new RTCPeerConnection({
-      iceServers: ICE_SERVERS,
+      iceServers,
       bundlePolicy: "max-bundle",
       iceTransportPolicy: FORCE_RELAY ? "relay" : "all",
     });
@@ -553,21 +610,24 @@ function App() {
       clearSignalReconnectTimer();
 
       if (initial) {
-        const pc = createPeer();
-        const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
-        const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
-        const h264Codecs = videoCapabilities?.codecs.filter(
-          (codec) => codec.mimeType.toLowerCase() === "video/h264",
-        );
-        if (h264Codecs?.length) transceiver.setCodecPreferences(h264Codecs);
-
         try {
+          const iceServers = await resolveIceServers(localId);
+          if (wsRef.current !== ws || manualDisconnectRef.current) return;
+
+          const pc = createPeer(iceServers);
+          const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+          const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
+          const h264Codecs = videoCapabilities?.codecs.filter(
+            (codec) => codec.mimeType.toLowerCase() === "video/h264",
+          );
+          if (h264Codecs?.length) transceiver.setCodecPreferences(h264Codecs);
+
           if (!await sendOffer(pc, false)) {
             setStatus("signal error");
           }
         } catch (error) {
-          console.debug("DeskLink initial offer failed", error);
-          setStatus("signal error");
+          console.debug("DeskLink initial connection setup failed", error);
+          disconnect(TURN_RUNTIME_REQUIRED ? "TURN credential error" : "signal error");
         }
         return;
       }
