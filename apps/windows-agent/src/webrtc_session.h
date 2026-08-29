@@ -34,6 +34,7 @@ class WebRtcSession {
   void Start();
   void Stop();
   bool connected() const;
+  bool video_ready() const;
   std::string controller_id() const;
 
   // Encoded access units must be Annex-B (00 00 01 / 00 00 00 01 separated NAL units).
