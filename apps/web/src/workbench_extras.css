@@ -48,6 +48,24 @@
   filter: none;
 }
 
+.browser-preflight {
+  grid-column: 1 / -1;
+  padding: 9px 11px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.browser-preflight[data-level="warning"] {
+  border: 1px solid rgba(238, 185, 76, .2);
+  background: rgba(238, 185, 76, .07);
+  color: #d8bd82;
+}
+.browser-preflight[data-level="error"] {
+  border: 1px solid rgba(239, 106, 106, .23);
+  background: rgba(239, 106, 106, .075);
+  color: #f0adad;
+}
+
 [data-workbench-action="network"]::before {
   content: "";
   display: inline-block;
