@@ -98,6 +98,7 @@ function App() {
     pc.ontrack = (event) => {
       if (!videoRef.current) return;
       videoRef.current.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+      void videoRef.current.play().catch(() => undefined);
     };
     pc.onicecandidate = (event) => {
       if (event.candidate) sendSignal("ice", event.candidate.toJSON());
@@ -145,7 +146,18 @@ function App() {
 
     ws.onopen = async () => {
       const pc = createPeer();
-      pc.addTransceiver("video", { direction: "recvonly" });
+      const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+
+      // Keep M0/M1 deterministic: the native Windows host sends hardware H.264.
+      // Payload type numbers are still negotiated dynamically from the generated SDP.
+      const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
+      const h264Codecs = videoCapabilities?.codecs.filter(
+        (codec) => codec.mimeType.toLowerCase() === "video/h264",
+      );
+      if (h264Codecs?.length) {
+        transceiver.setCodecPreferences(h264Codecs);
+      }
+
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       sendSignal("offer", offer);
