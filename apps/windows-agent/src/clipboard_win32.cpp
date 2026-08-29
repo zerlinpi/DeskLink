@@ -2,9 +2,9 @@
 
 #include <windows.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -12,7 +12,7 @@ namespace desklink {
 namespace {
 using namespace std::chrono_literals;
 
-constexpr size_t kMaxClipboardUtf8Bytes = 1 * 1024 * 1024;
+constexpr size_t kMaxClipboardUtf8Bytes = 128 * 1024;
 constexpr size_t kMaxClipboardWideChars = kMaxClipboardUtf8Bytes;
 
 void SetError(std::string* error, const char* message) {
@@ -72,8 +72,7 @@ bool WideToUtf8(const wchar_t* text, size_t length, std::string* utf8) {
       0,
       nullptr,
       nullptr);
-  if (required < 0 || static_cast<size_t>(required) > kMaxClipboardUtf8Bytes) return false;
-  if (required == 0) return true;
+  if (required <= 0 || static_cast<size_t>(required) > kMaxClipboardUtf8Bytes) return false;
 
   utf8->resize(static_cast<size_t>(required));
   return WideCharToMultiByte(
@@ -130,7 +129,7 @@ bool ReadClipboardTextUtf8(std::string* text, std::string* error) {
   if (length > kMaxClipboardWideChars || length >= capacity) {
     SetError(error, "remote clipboard text is too large or invalid");
   } else if (!WideToUtf8(value, length, text)) {
-    SetError(error, "remote clipboard text is not valid Unicode");
+    SetError(error, "remote clipboard text is not valid Unicode or exceeds 128 KiB");
   } else {
     ok = true;
   }
@@ -143,13 +142,13 @@ bool ReadClipboardTextUtf8(std::string* text, std::string* error) {
 bool WriteClipboardTextUtf8(const std::string& text, std::string* error) {
   if (error) error->clear();
   if (text.size() > kMaxClipboardUtf8Bytes) {
-    SetError(error, "clipboard text exceeds 1 MiB limit");
+    SetError(error, "clipboard text exceeds 128 KiB limit");
     return false;
   }
 
   std::wstring wide;
   if (!Utf8ToWide(text, &wide)) {
-    SetError(error, "clipboard text is not valid UTF-8");
+    SetError(error, "clipboard text is not valid UTF-8 or exceeds 128 KiB");
     return false;
   }
   if (wide.size() > (SIZE_MAX / sizeof(wchar_t)) - 1) {
