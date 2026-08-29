@@ -43,6 +43,12 @@ configure_desklink_version_resource(
   "DeskLink"
   "DeskLink.exe"
 )
+configure_desklink_version_resource(
+  desklink-media-probe-version
+  "DeskLink GPU Media Pipeline Probe"
+  "desklink-media-probe"
+  "desklink-media-probe.exe"
+)
 
 # Release artifacts are intended to be copy-deployable on supported Windows
 # machines. Use the static MSVC runtime for this project and all CMake
@@ -188,6 +194,37 @@ target_link_libraries(
     user32
     winhttp
     ws2_32
+)
+
+# Runs the same local media primitives used by the Agent without opening any
+# network connection. Keeping this as a separate process makes GPU/driver hangs
+# diagnosable without freezing the DeskLink settings UI.
+add_executable(desklink-media-probe
+  src/media_probe_main.cpp
+  src/desktop_capture.cpp
+  src/desktop_capture.h
+  src/gpu_color_converter.cpp
+  src/gpu_color_converter.h
+  src/h264_annexb.cpp
+  src/h264_annexb.h
+  src/h264_encoder.cpp
+  src/h264_encoder.h
+  "${CMAKE_CURRENT_BINARY_DIR}/desklink-media-probe-version.rc"
+)
+target_compile_definitions(desklink-media-probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-media-probe PRIVATE /W4 /permissive-)
+target_link_libraries(
+  desklink-media-probe
+  PRIVATE
+    d3d11
+    dxgi
+    dxguid
+    mfplat
+    mf
+    mfuuid
+    strmiids
+    user32
+    ole32
 )
 
 add_executable(desklink-service-auth-smoke
