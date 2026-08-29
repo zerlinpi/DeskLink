@@ -73,6 +73,15 @@ func signalTokenHandler() http.HandlerFunc {
 			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
+		revoked, err := deviceRevoked(deviceID)
+		if err != nil {
+			http.Error(w, "device revocation state unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if revoked {
+			http.Error(w, "device revoked", http.StatusForbidden)
+			return
+		}
 		if !validateDeviceCredential(deviceSecret, deviceID, bearerToken(r)) {
 			http.Error(w, "unauthorized device credential", http.StatusUnauthorized)
 			return
