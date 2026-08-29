@@ -136,8 +136,31 @@ void WebRtcSession::HandleSignal(const std::string& text) {
   }
 
   if (type == "ice" && message.contains("payload")) {
-    HandleIce(message["payload"]);
+    const std::string from = message.value("from", "");
+    const std::string session = message.value("session", "");
+    bool authorized_session = false;
+    {
+      std::scoped_lock lock(mutex_);
+      authorized_session = !from.empty() && !session.empty() &&
+                           from == controller_id_ && session == session_id_;
+    }
+    if (authorized_session) {
+      HandleIce(message["payload"]);
+    }
   }
+}
+
+bool WebRtcSession::ConstantTimeEquals(
+    const std::string& left,
+    const std::string& right) {
+  const size_t longest = std::max(left.size(), right.size());
+  unsigned char difference = static_cast<unsigned char>(left.size() ^ right.size());
+  for (size_t i = 0; i < longest; ++i) {
+    const unsigned char a = i < left.size() ? static_cast<unsigned char>(left[i]) : 0;
+    const unsigned char b = i < right.size() ? static_cast<unsigned char>(right[i]) : 0;
+    difference |= static_cast<unsigned char>(a ^ b);
+  }
+  return difference == 0;
 }
 
 uint8_t WebRtcSession::FindH264PayloadType(const std::string& sdp) {
@@ -159,6 +182,29 @@ void WebRtcSession::HandleOffer(
     const std::string& from,
     const std::string& session,
     const json& payload) {
+  if (!payload.is_object()) return;
+
+  if (config_.access_code.empty()) {
+    std::cerr << "Rejected remote session: DESKLINK_ACCESS_CODE is not configured\n";
+    SendSignalTo(
+        from,
+        session,
+        "auth-rejected",
+        json{{"reason", "host-unconfigured"}});
+    return;
+  }
+
+  const std::string supplied_access_code = payload.value("accessCode", "");
+  if (!ConstantTimeEquals(supplied_access_code, config_.access_code)) {
+    std::cerr << "Rejected remote session from " << from << ": invalid access code\n";
+    SendSignalTo(
+        from,
+        session,
+        "auth-rejected",
+        json{{"reason", "invalid-access-code"}});
+    return;
+  }
+
   const std::string sdp = payload.value("sdp", "");
   const std::string description_type = payload.value("type", "offer");
   if (sdp.empty()) return;
@@ -170,7 +216,7 @@ void WebRtcSession::HandleOffer(
     std::cout << "Negotiated H264 RTP payload type " << static_cast<int>(h264_payload_type) << "\n";
   }
 
-  std::cout << "Incoming remote-control session from " << from << "\n";
+  std::cout << "Authorized remote-control session from " << from << "\n";
   CreatePeer(from, session, h264_payload_type);
 
   std::shared_ptr<rtc::PeerConnection> peer;
@@ -351,21 +397,32 @@ void WebRtcSession::HandleControl(const std::string& text) {
 }
 
 void WebRtcSession::SendSignal(const std::string& type, const json& payload) {
-  std::shared_ptr<rtc::WebSocket> ws;
   std::string controller;
   std::string session;
   {
     std::scoped_lock lock(mutex_);
-    ws = websocket_;
     controller = controller_id_;
     session = session_id_;
   }
+  SendSignalTo(controller, session, type, payload);
+}
 
-  if (!ws || !ws->isOpen() || controller.empty() || session.empty()) return;
+void WebRtcSession::SendSignalTo(
+    const std::string& target,
+    const std::string& session,
+    const std::string& type,
+    const json& payload) {
+  std::shared_ptr<rtc::WebSocket> ws;
+  {
+    std::scoped_lock lock(mutex_);
+    ws = websocket_;
+  }
+
+  if (!ws || !ws->isOpen() || target.empty() || session.empty()) return;
 
   const json message = {
       {"type", type},
-      {"target", controller},
+      {"target", target},
       {"session", session},
       {"payload", payload},
   };
