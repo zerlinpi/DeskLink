@@ -119,7 +119,8 @@ jobs:
         run: |
           foreach ($script in @(
             "packaging/windows/install-service.ps1",
-            "packaging/windows/uninstall-service.ps1"
+            "packaging/windows/uninstall-service.ps1",
+            "packaging/windows/sign-binaries.ps1"
           )) {
             $tokens = $null
             $errors = $null
@@ -189,6 +190,7 @@ jobs:
 
           $forbidden = '(?im)^\s*(VCRUNTIME[^\s]*\.dll|MSVCP[^\s]*\.dll|libcrypto[^\s]*\.dll|libssl[^\s]*\.dll|datachannel[^\s]*\.dll)\s*$'
           foreach ($binary in @(
+            "build/windows-agent/Release/DeskLink.exe",
             "build/windows-agent/Release/desklink-agent.exe",
             "build/windows-agent/Release/desklink-service.exe"
           )) {
@@ -200,12 +202,22 @@ jobs:
             }
           }
 
+      - name: Authenticode sign Windows binaries when certificate is configured
+        shell: pwsh
+        env:
+          DESKLINK_WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          DESKLINK_WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          DESKLINK_WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: |
+          ./packaging/windows/sign-binaries.ps1 -BinaryDirectory "build/windows-agent/Release"
+
       - name: Package Windows host
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
           $packageRoot = Join-Path $PWD "release\desklink-windows-v$version-x64"
           New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          Copy-Item "build/windows-agent/Release/DeskLink.exe" $packageRoot
           Copy-Item "build/windows-agent/Release/desklink-agent.exe" $packageRoot
           Copy-Item "build/windows-agent/Release/desklink-service.exe" $packageRoot
           Copy-Item "packaging/windows/install-service.ps1" $packageRoot
@@ -261,7 +273,7 @@ jobs:
           rm release-assets/SHA256SUMS.server-web.txt release-assets/SHA256SUMS.windows.txt
           cat release-assets/SHA256SUMS.txt
 
-      - name: Publish GitHub Release
+      - name: Publish or repair GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -270,11 +282,15 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           version="${{ steps.version.outputs.version }}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists; refusing to overwrite it." >&2
-            exit 1
+            echo "Release $tag already exists; refreshing notes and assets."
+            gh release edit "$tag" \
+              --title "DeskLink v$version" \
+              --notes-file "docs/releases/v$version.md"
+            gh release upload "$tag" release-assets/* --clobber
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "DeskLink v$version" \
+              --notes-file "docs/releases/v$version.md" \
+              release-assets/*
           fi
-          gh release create "$tag" \
-            --target "$GITHUB_SHA" \
-            --title "DeskLink v$version" \
-            --notes-file "docs/releases/v$version.md" \
-            release-assets/*
