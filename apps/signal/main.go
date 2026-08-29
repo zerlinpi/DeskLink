@@ -38,6 +38,7 @@ type peer struct {
 	conn          *websocket.Conn
 	allowedTarget string
 	controller    bool
+	authExpiresAt time.Time
 	mu            sync.Mutex
 
 	rateMu     sync.Mutex
@@ -62,6 +63,7 @@ func newPeer(id string, conn *websocket.Conn, scopes ...signalRegistrationScope)
 		conn:          conn,
 		allowedTarget: scope.AllowedTarget,
 		controller:    scope.Controller,
+		authExpiresAt: scope.ExpiresAt,
 		tokens:         signalBurst,
 		lastRefill:    time.Now(),
 	}
@@ -301,8 +303,26 @@ func main() {
 		go func() {
 			ticker := time.NewTicker(pingPeriod)
 			defer ticker.Stop()
+
+			var authExpiryTimer *time.Timer
+			var authExpiry <-chan time.Time
+			if !p.authExpiresAt.IsZero() {
+				remaining := time.Until(p.authExpiresAt)
+				if remaining <= 0 {
+					p.closeWithReason("registration token expired")
+					return
+				}
+				authExpiryTimer = time.NewTimer(remaining)
+				authExpiry = authExpiryTimer.C
+				defer authExpiryTimer.Stop()
+			}
+
 			for {
 				select {
+				case <-authExpiry:
+					log.Printf("disconnecting peer %s because registration token expired", id)
+					p.closeWithReason("registration token expired")
+					return
 				case <-ticker.C:
 					recheckID := id
 					if p.controller {
