@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Release artifacts are intended to be copy-deployable on supported Windows
+# machines. Use the static MSVC runtime for this project and all CMake
+# FetchContent dependencies so desklink-agent/service do not require a separately
+# installed Visual C++ Redistributable merely to start.
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+endif()
+
 include(FetchContent)
 
 # Keep the native host self-contained. libdatachannel supplies WebRTC media,
