@@ -5,6 +5,7 @@ function friendlyStatus(value: string) {
   const normalized = value.trim().toLowerCase();
   if (!normalized || normalized === "idle") return "未连接";
   if (normalized.includes("control ready")) return "已连接";
+  if (normalized === "signaling") return "正在连接信令";
   if (normalized.includes("authorizing controller")) return "正在验证控制端";
   if (normalized.includes("authorizing host")) return "正在验证远端";
   if (normalized.includes("proving host access")) return "正在验证访问码";
