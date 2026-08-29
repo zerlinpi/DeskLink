@@ -207,6 +207,13 @@ func peerOfflineSignal(target string, authQueued bool) map[string]any {
 	return message
 }
 
+func deviceRevokedSignal(target string) map[string]any {
+	return map[string]any{
+		"type":   "device-revoked",
+		"target": target,
+	}
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -336,6 +343,7 @@ func main() {
 					}
 					if revoked {
 						log.Printf("disconnecting peer %s because target/device %s is revoked", id, recheckID)
+						_ = p.write(deviceRevokedSignal(recheckID))
 						p.closeWithReason("device revoked")
 						return
 					}
@@ -392,7 +400,11 @@ func main() {
 				continue
 			}
 			if targetRevoked {
-				_ = p.write(peerOfflineSignal(msg.Target, false))
+				_ = p.write(deviceRevokedSignal(msg.Target))
+				if p.controller && p.allowedTarget == msg.Target {
+					p.closeWithReason("device revoked")
+					return
+				}
 				continue
 			}
 
