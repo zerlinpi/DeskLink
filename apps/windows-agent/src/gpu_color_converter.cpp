@@ -116,6 +116,7 @@ bool GpuColorConverter::Initialize(
   input_height_ = input_height;
   output_width_ = output_width;
   output_height_ = output_height;
+  has_frame_ = false;
   return true;
 }
 
@@ -173,6 +174,12 @@ Microsoft::WRL::ComPtr<ID3D11Texture2D> GpuColorConverter::Convert(
     return {};
   }
 
+  has_frame_ = true;
+  return nv12_texture_;
+}
+
+Microsoft::WRL::ComPtr<ID3D11Texture2D> GpuColorConverter::LatestFrame() const {
+  if (!has_frame_) return {};
   return nv12_texture_;
 }
 
@@ -189,6 +196,7 @@ void GpuColorConverter::Reset() {
   input_height_ = 0;
   output_width_ = 0;
   output_height_ = 0;
+  has_frame_ = false;
 }
 
 }  // namespace desklink
