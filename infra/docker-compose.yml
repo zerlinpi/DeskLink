@@ -1,0 +1,21 @@
+services:
+  signal:
+    image: golang:1.23-alpine
+    working_dir: /src
+    command: sh -c "go mod download && go run ."
+    volumes:
+      - ../apps/signal:/src
+    environment:
+      DESKLINK_SIGNAL_ADDR: :8080
+      DESKLINK_ALLOW_ANY_ORIGIN: "1"
+    ports:
+      - "8080:8080"
+
+  turn:
+    image: coturn/coturn:4.6.3
+    network_mode: host
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
