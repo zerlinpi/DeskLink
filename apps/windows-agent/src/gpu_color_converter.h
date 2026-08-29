@@ -20,6 +20,8 @@ class GpuColorConverter {
   Microsoft::WRL::ComPtr<ID3D11VideoContext> video_context_;
   Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> enumerator_;
   Microsoft::WRL::ComPtr<ID3D11VideoProcessor> processor_;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> nv12_texture_;
+  Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> output_view_;
   uint32_t width_{0};
   uint32_t height_{0};
 };
