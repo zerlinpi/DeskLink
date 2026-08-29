@@ -57,6 +57,7 @@ type controllerSessionResponse struct {
 type signalRegistrationScope struct {
 	AllowedTarget string
 	Controller    bool
+	ExpiresAt     time.Time
 }
 
 func controllerRegistryPath() string {
@@ -234,15 +235,46 @@ func validateControllerSignalToken(
 	return targetDeviceID, true
 }
 
+func validatedRegistrationTokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) == 2 {
+		expiresUnix, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return time.Unix(expiresUnix, 0), true
+	}
+	if len(parts) == 4 && parts[0] == controllerTokenPrefix {
+		expiresUnix, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return time.Unix(expiresUnix, 0), true
+	}
+	return time.Time{}, false
+}
+
 func registrationScopeForToken(
 	secret, peerID, token string,
 	now time.Time,
 ) (signalRegistrationScope, bool) {
 	if validateSignalAuthToken(secret, peerID, token, now) {
-		return signalRegistrationScope{}, true
+		expiresAt, ok := validatedRegistrationTokenExpiry(token)
+		if !ok {
+			return signalRegistrationScope{}, false
+		}
+		return signalRegistrationScope{ExpiresAt: expiresAt}, true
 	}
 	if target, ok := validateControllerSignalToken(secret, peerID, token, now); ok {
-		return signalRegistrationScope{AllowedTarget: target, Controller: true}, true
+		expiresAt, expiryOK := validatedRegistrationTokenExpiry(token)
+		if !expiryOK {
+			return signalRegistrationScope{}, false
+		}
+		return signalRegistrationScope{
+			AllowedTarget: target,
+			Controller:    true,
+			ExpiresAt:     expiresAt,
+		}, true
 	}
 	return signalRegistrationScope{}, false
 }
