@@ -4,6 +4,7 @@
 #include <mutex>
 #include <string>
 
+#include <nlohmann/json_fwd.hpp>
 #include <rtc/rtc.hpp>
 
 #include "input_injector.h"
