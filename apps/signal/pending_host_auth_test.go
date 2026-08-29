@@ -10,11 +10,12 @@ import (
 func TestPendingHostAuthQueueDeduplicatesAndRefreshes(t *testing.T) {
 	queue := newPendingHostAuthQueue()
 	now := time.Unix(1_700_000_000, 0)
+	controller := &peer{id: "controller-a", controller: true}
 
-	if !queue.enqueue("host-a", "controller-a", "session-a", json.RawMessage(`{"version":1}`), now) {
+	if !queue.enqueue("host-a", controller, "session-a", json.RawMessage(`{"version":1}`), now) {
 		t.Fatal("first auth request should be queued")
 	}
-	if !queue.enqueue("host-a", "controller-a", "session-a", json.RawMessage(`{"version":2}`), now.Add(time.Second)) {
+	if !queue.enqueue("host-a", controller, "session-a", json.RawMessage(`{"version":2}`), now.Add(time.Second)) {
 		t.Fatal("duplicate controller/session should refresh in place")
 	}
 	if queue.size(now.Add(time.Second)) != 1 {
@@ -25,8 +26,8 @@ func TestPendingHostAuthQueueDeduplicatesAndRefreshes(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected one pending request, got %d", len(entries))
 	}
-	if string(entries[0].payload) != `{"version":2}` {
-		t.Fatalf("expected refreshed payload, got %s", entries[0].payload)
+	if entries[0].source != controller || string(entries[0].payload) != `{"version":2}` {
+		t.Fatalf("expected refreshed request bound to original controller, got %+v", entries[0])
 	}
 	if queue.size(now.Add(2*time.Second)) != 0 {
 		t.Fatal("take should remove delivered requests")
@@ -36,7 +37,8 @@ func TestPendingHostAuthQueueDeduplicatesAndRefreshes(t *testing.T) {
 func TestPendingHostAuthQueueExpiresRequests(t *testing.T) {
 	queue := newPendingHostAuthQueue()
 	now := time.Unix(1_700_000_000, 0)
-	if !queue.enqueue("host-a", "controller-a", "session-a", nil, now) {
+	controller := &peer{id: "controller-a", controller: true}
+	if !queue.enqueue("host-a", controller, "session-a", nil, now) {
 		t.Fatal("request should be queued")
 	}
 	if got := queue.take("host-a", now.Add(pendingHostAuthTTL+time.Millisecond)); len(got) != 0 {
@@ -52,9 +54,10 @@ func TestPendingHostAuthQueueEnforcesPerTargetLimit(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 
 	for i := 0; i < maxPendingHostAuthPerTarget; i++ {
+		controller := &peer{id: fmt.Sprintf("controller-%d", i), controller: true}
 		if !queue.enqueue(
 			"host-a",
-			fmt.Sprintf("controller-%d", i),
+			controller,
 			fmt.Sprintf("session-%d", i),
 			nil,
 			now,
@@ -62,7 +65,8 @@ func TestPendingHostAuthQueueEnforcesPerTargetLimit(t *testing.T) {
 			t.Fatalf("request %d should fit within the per-target limit", i)
 		}
 	}
-	if queue.enqueue("host-a", "controller-overflow", "session-overflow", nil, now) {
+	overflow := &peer{id: "controller-overflow", controller: true}
+	if queue.enqueue("host-a", overflow, "session-overflow", nil, now) {
 		t.Fatal("queue must reject requests beyond the per-target limit")
 	}
 }
@@ -70,8 +74,9 @@ func TestPendingHostAuthQueueEnforcesPerTargetLimit(t *testing.T) {
 func TestPendingHostAuthQueueCopiesPayload(t *testing.T) {
 	queue := newPendingHostAuthQueue()
 	now := time.Unix(1_700_000_000, 0)
+	controller := &peer{id: "controller-a", controller: true}
 	payload := json.RawMessage(`{"version":1}`)
-	if !queue.enqueue("host-a", "controller-a", "session-a", payload, now) {
+	if !queue.enqueue("host-a", controller, "session-a", payload, now) {
 		t.Fatal("request should be queued")
 	}
 	payload[0] = '['
@@ -79,6 +84,45 @@ func TestPendingHostAuthQueueCopiesPayload(t *testing.T) {
 	entries := queue.take("host-a", now.Add(time.Second))
 	if len(entries) != 1 || string(entries[0].payload) != `{"version":1}` {
 		t.Fatalf("queue must own an immutable payload copy, got %q", entries[0].payload)
+	}
+}
+
+func TestPendingHostAuthQueueRemovesDisconnectedController(t *testing.T) {
+	queue := newPendingHostAuthQueue()
+	now := time.Unix(1_700_000_000, 0)
+	controller := &peer{id: "controller-a", controller: true}
+	otherController := &peer{id: "controller-b", controller: true}
+
+	if !queue.enqueue("host-a", controller, "session-a", nil, now) ||
+		!queue.enqueue("host-b", controller, "session-b", nil, now) ||
+		!queue.enqueue("host-a", otherController, "session-c", nil, now) {
+		t.Fatal("test requests should be queued")
+	}
+	if removed := queue.removeSource(controller); removed != 2 {
+		t.Fatalf("expected two requests removed with disconnected controller, got %d", removed)
+	}
+	if queue.size(now) != 1 {
+		t.Fatalf("expected only other controller request to remain, got %d", queue.size(now))
+	}
+}
+
+func TestPendingHostAuthQueueDoesNotMergeReconnectedController(t *testing.T) {
+	queue := newPendingHostAuthQueue()
+	now := time.Unix(1_700_000_000, 0)
+	oldConnection := &peer{id: "controller-a", controller: true}
+	newConnection := &peer{id: "controller-a", controller: true}
+
+	if !queue.enqueue("host-a", oldConnection, "session-a", nil, now) ||
+		!queue.enqueue("host-a", newConnection, "session-a", nil, now.Add(time.Second)) {
+		t.Fatal("old and new controller connections should have independent queue entries")
+	}
+	if queue.size(now.Add(time.Second)) != 2 {
+		t.Fatalf("expected two connection-bound requests, got %d", queue.size(now.Add(time.Second)))
+	}
+	queue.removeSource(oldConnection)
+	entries := queue.take("host-a", now.Add(2*time.Second))
+	if len(entries) != 1 || entries[0].source != newConnection {
+		t.Fatal("disconnect cleanup must preserve only the replacement controller connection")
 	}
 }
 
