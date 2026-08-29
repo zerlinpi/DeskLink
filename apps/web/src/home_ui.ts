@@ -88,6 +88,8 @@ function syncConnectionCard() {
       ?? document.querySelector<HTMLElement>(STATUS_SELECTOR)?.textContent
       ?? "idle";
     const idle = status.trim().toLowerCase() === "idle" || status === "未连接";
+    primary.dataset.connectionAction = idle ? "connect" : "disconnect";
+    primary.setAttribute("aria-label", idle ? "连接远程设备" : "断开远程设备");
     setText(primary, idle ? "连接设备" : "断开连接");
     primary.classList.toggle("is-disconnect", !idle);
   }
