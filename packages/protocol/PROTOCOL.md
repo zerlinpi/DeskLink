@@ -42,6 +42,8 @@ A reusable Access Code is **never sent in an offer**. A new remote-control sessi
 
 If the host is temporarily offline, signaling still returns `peer-offline` so the controller can show the state. For `auth-request` only, signaling also keeps a bounded in-memory pending request for up to 30 seconds. Requests are deduplicated by target + controller + session, capped at 32 per target and 512 globally. When that host registers/reconnects, still-valid requests are automatically forwarded. SDP, ICE and arbitrary application messages are never queued this way.
 
+Offline queuing is available only to a peer authenticated with controller scope. Host identities and unauthenticated local-development peers still receive `peer-offline` but cannot occupy the pending controller-auth queue. A short dispatch guard also suppresses duplicate `auth-request` delivery from the same live controller connection/session when queue flush and WebSocket reconnect overlap; a genuinely new controller connection is not blocked by the previous connection's dedupe window.
+
 ### 2. Host issues a one-time challenge
 
 ```json
