@@ -92,6 +92,14 @@ std::string WebRtcSession::controller_id() const {
   return controller_id_;
 }
 
+void WebRtcSession::SetControlledDesktopRect(
+    long left,
+    long top,
+    long width,
+    long height) {
+  input_.SetDesktopRect(left, top, width, height);
+}
+
 bool WebRtcSession::SendH264AccessUnit(
     const uint8_t* data,
     size_t size,
