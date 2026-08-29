@@ -25,6 +25,31 @@ DWORD MouseButtonFlag(int button, bool down) {
   }
 }
 
+bool IsExtendedKey(unsigned short vk) {
+  switch (vk) {
+    case VK_RMENU:
+    case VK_RCONTROL:
+    case VK_INSERT:
+    case VK_DELETE:
+    case VK_HOME:
+    case VK_END:
+    case VK_PRIOR:
+    case VK_NEXT:
+    case VK_LEFT:
+    case VK_RIGHT:
+    case VK_UP:
+    case VK_DOWN:
+    case VK_NUMLOCK:
+    case VK_SNAPSHOT:
+    case VK_DIVIDE:
+    case VK_LWIN:
+    case VK_RWIN:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
 bool InputInjector::PointerMove(double normalized_x, double normalized_y) const {
@@ -66,6 +91,10 @@ unsigned short InputInjector::VirtualKeyFromCode(const std::string& code) {
     const char c = code[5];
     if (c >= '0' && c <= '9') return static_cast<unsigned short>(c);
   }
+  if (code.size() == 7 && code.rfind("Numpad", 0) == 0) {
+    const char c = code[6];
+    if (c >= '0' && c <= '9') return static_cast<unsigned short>(VK_NUMPAD0 + (c - '0'));
+  }
   if (code.size() >= 2 && code[0] == 'F') {
     try {
       const int n = std::stoi(code.substr(1));
@@ -74,7 +103,7 @@ unsigned short InputInjector::VirtualKeyFromCode(const std::string& code) {
     }
   }
 
-  static const std::unordered_map<std::string, unsigned short> kKeys = {
+  static const std::unordered_map<std::string, int> kKeys = {
       {"Enter", VK_RETURN},       {"Escape", VK_ESCAPE},       {"Backspace", VK_BACK},
       {"Tab", VK_TAB},           {"Space", VK_SPACE},         {"Delete", VK_DELETE},
       {"Insert", VK_INSERT},     {"Home", VK_HOME},           {"End", VK_END},
@@ -86,10 +115,14 @@ unsigned short InputInjector::VirtualKeyFromCode(const std::string& code) {
       {"NumLock", VK_NUMLOCK},   {"ScrollLock", VK_SCROLL},   {"PrintScreen", VK_SNAPSHOT},
       {"Pause", VK_PAUSE},       {"NumpadAdd", VK_ADD},       {"NumpadSubtract", VK_SUBTRACT},
       {"NumpadMultiply", VK_MULTIPLY}, {"NumpadDivide", VK_DIVIDE}, {"NumpadDecimal", VK_DECIMAL},
+      {"NumpadEnter", VK_RETURN}, {"Semicolon", VK_OEM_1},    {"Equal", VK_OEM_PLUS},
+      {"Comma", VK_OEM_COMMA},   {"Minus", VK_OEM_MINUS},    {"Period", VK_OEM_PERIOD},
+      {"Slash", VK_OEM_2},       {"Backquote", VK_OEM_3},    {"BracketLeft", VK_OEM_4},
+      {"Backslash", VK_OEM_5},   {"BracketRight", VK_OEM_6}, {"Quote", VK_OEM_7},
   };
 
   const auto it = kKeys.find(code);
-  return it == kKeys.end() ? 0 : it->second;
+  return it == kKeys.end() ? 0 : static_cast<unsigned short>(it->second);
 }
 
 bool InputInjector::Key(const std::string& code, bool down) const {
@@ -100,6 +133,7 @@ bool InputInjector::Key(const std::string& code, bool down) const {
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = vk;
   input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+  if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   return Send(input);
 }
 
