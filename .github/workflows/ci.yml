@@ -58,6 +58,8 @@ jobs:
         with:
           path: build/windows-agent
           key: desklink-windows-${{ runner.os }}-${{ hashFiles('apps/windows-agent/CMakeLists.txt') }}
+          restore-keys: |
+            desklink-windows-${{ runner.os }}-
       - name: Configure
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64
       - name: Build
