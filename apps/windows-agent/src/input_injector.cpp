@@ -4,11 +4,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace desklink {
 namespace {
+
+std::mutex g_pressed_mutex;
+std::unordered_set<unsigned short> g_pressed_keys;
+std::unordered_set<int> g_pressed_buttons;
 
 bool Send(INPUT& input) {
   return SendInput(1, &input, sizeof(INPUT)) == 1;
@@ -60,6 +66,39 @@ LONG NormalizeVirtualCoordinate(double pixel, LONG origin, LONG extent) {
 }
 
 }  // namespace
+
+bool ReleaseAllInjectedInput() {
+  std::vector<unsigned short> keys;
+  std::vector<int> buttons;
+  {
+    std::scoped_lock lock(g_pressed_mutex);
+    keys.assign(g_pressed_keys.begin(), g_pressed_keys.end());
+    buttons.assign(g_pressed_buttons.begin(), g_pressed_buttons.end());
+    g_pressed_keys.clear();
+    g_pressed_buttons.clear();
+  }
+
+  bool all_released = true;
+  for (const unsigned short vk : keys) {
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    all_released = Send(input) && all_released;
+  }
+
+  for (const int button : buttons) {
+    const DWORD flag = MouseButtonFlag(button, false);
+    if (flag == 0) continue;
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = flag;
+    all_released = Send(input) && all_released;
+  }
+
+  return all_released;
+}
 
 void InputInjector::SetDesktopRect(long left, long top, long width, long height) {
   desktop_left_.store(left, std::memory_order_relaxed);
@@ -116,11 +155,11 @@ bool InputInjector::PointerButton(int button, bool down) const {
   input.mi.dwFlags = flag;
   if (!Send(input)) return false;
 
-  std::scoped_lock lock(pressed_mutex_);
+  std::scoped_lock lock(g_pressed_mutex);
   if (down) {
-    pressed_buttons_.insert(button);
+    g_pressed_buttons.insert(button);
   } else {
-    pressed_buttons_.erase(button);
+    g_pressed_buttons.erase(button);
   }
   return true;
 }
@@ -187,46 +226,17 @@ bool InputInjector::Key(const std::string& code, bool down) const {
   if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (!Send(input)) return false;
 
-  std::scoped_lock lock(pressed_mutex_);
+  std::scoped_lock lock(g_pressed_mutex);
   if (down) {
-    pressed_keys_.insert(vk);
+    g_pressed_keys.insert(vk);
   } else {
-    pressed_keys_.erase(vk);
+    g_pressed_keys.erase(vk);
   }
   return true;
 }
 
 bool InputInjector::ReleaseAll() const {
-  std::vector<unsigned short> keys;
-  std::vector<int> buttons;
-  {
-    std::scoped_lock lock(pressed_mutex_);
-    keys.assign(pressed_keys_.begin(), pressed_keys_.end());
-    buttons.assign(pressed_buttons_.begin(), pressed_buttons_.end());
-    pressed_keys_.clear();
-    pressed_buttons_.clear();
-  }
-
-  bool all_released = true;
-  for (const unsigned short vk : keys) {
-    INPUT input{};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = vk;
-    input.ki.dwFlags = KEYEVENTF_KEYUP;
-    if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-    all_released = Send(input) && all_released;
-  }
-
-  for (const int button : buttons) {
-    const DWORD flag = MouseButtonFlag(button, false);
-    if (flag == 0) continue;
-    INPUT input{};
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = flag;
-    all_released = Send(input) && all_released;
-  }
-
-  return all_released;
+  return ReleaseAllInjectedInput();
 }
 
 }  // namespace desklink
