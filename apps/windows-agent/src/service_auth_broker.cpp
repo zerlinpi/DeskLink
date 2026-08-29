@@ -3,7 +3,6 @@
 #include <windows.h>
 #include <sddl.h>
 
-#include <chrono>
 #include <ctime>
 #include <mutex>
 #include <string>
@@ -150,10 +149,6 @@ LocalHandle CreateBrokerPipe(
     return {};
   }
 
-  // LocalSystem owns the server side. Only the exact Windows user identity that
-  // owns the launched Agent gets read/write access. PID verification is still
-  // performed after connection, so the SID ACL is an additional boundary rather
-  // than a replacement for process identity checking.
   const std::wstring pipe_dacl =
       L"D:P(A;;GA;;;SY)(A;;GRGW;;;" + client_sid + L")";
 
@@ -195,22 +190,69 @@ LocalHandle CreateBrokerPipe(
   return LocalHandle(pipe);
 }
 
-bool WriteJsonResponse(HANDLE pipe, const nlohmann::json& response) {
-  std::string payload = response.dump();
-  if (payload.empty() || payload.size() > kPipeBufferBytes) {
-    SecureWipe(&payload);
+bool WriteRawResponse(HANDLE pipe, std::string* payload) {
+  if (!payload || payload->empty() || payload->size() > kPipeBufferBytes) {
+    SecureWipe(payload);
     return false;
   }
+  const DWORD size = static_cast<DWORD>(payload->size());
   DWORD written = 0;
-  const bool ok = WriteFile(
-                      pipe,
-                      payload.data(),
-                      static_cast<DWORD>(payload.size()),
-                      &written,
-                      nullptr) &&
-                  written == payload.size();
-  SecureWipe(&payload);
+  const bool ok = WriteFile(pipe, payload->data(), size, &written, nullptr) && written == size;
+  SecureWipe(payload);
   return ok;
+}
+
+bool WriteJsonResponse(HANDLE pipe, const nlohmann::json& response) {
+  std::string payload = response.dump();
+  return WriteRawResponse(pipe, &payload);
+}
+
+void AppendJsonEscapedString(const std::string& value, std::string* output) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  output->push_back('"');
+  for (unsigned char ch : value) {
+    switch (ch) {
+      case '"':
+        output->append("\\\"");
+        break;
+      case '\\':
+        output->append("\\\\");
+        break;
+      case '\b':
+        output->append("\\b");
+        break;
+      case '\f':
+        output->append("\\f");
+        break;
+      case '\n':
+        output->append("\\n");
+        break;
+      case '\r':
+        output->append("\\r");
+        break;
+      case '\t':
+        output->append("\\t");
+        break;
+      default:
+        if (ch < 0x20) {
+          output->append("\\u00");
+          output->push_back(kHex[(ch >> 4) & 0x0F]);
+          output->push_back(kHex[ch & 0x0F]);
+        } else {
+          output->push_back(static_cast<char>(ch));
+        }
+        break;
+    }
+  }
+  output->push_back('"');
+}
+
+bool WriteAccessCodeResponse(HANDLE pipe, const std::string& access_code) {
+  std::string payload = "{\"ok\":true,\"accessCode\":";
+  payload.reserve(payload.size() + access_code.size() + 4);
+  AppendJsonEscapedString(access_code, &payload);
+  payload.push_back('}');
+  return WriteRawResponse(pipe, &payload);
 }
 
 void WakeBroker(const std::wstring& pipe_name) {
@@ -234,9 +276,12 @@ void BrokerLoop(
     uint32_t expected_client_pid,
     std::string endpoint,
     std::string device_id,
-    std::string device_credential) {
+    std::string device_credential,
+    std::string access_code) {
   LocalHandle ready_pipe(initial_pipe);
   RuntimeSignalToken cached_token;
+  const bool signal_enabled = !endpoint.empty() && !device_id.empty() && !device_credential.empty();
+  const bool access_code_enabled = !access_code.empty();
 
   while (!stop_token.stop_requested()) {
     LocalHandle pipe;
@@ -271,10 +316,31 @@ void BrokerLoop(
     }
 
     const std::string command(request, read);
+    if (command == "access-code") {
+      if (!access_code_enabled) {
+        WriteJsonResponse(
+            pipe.get(),
+            nlohmann::json{{"ok", false}, {"error", "access-code capability is not enabled"}});
+      } else {
+        WriteAccessCodeResponse(pipe.get(), access_code);
+      }
+      FlushFileBuffers(pipe.get());
+      DisconnectNamedPipe(pipe.get());
+      continue;
+    }
+
     if (command != "signal-token") {
       WriteJsonResponse(
           pipe.get(),
           nlohmann::json{{"ok", false}, {"error", "unsupported request"}});
+      DisconnectNamedPipe(pipe.get());
+      continue;
+    }
+
+    if (!signal_enabled) {
+      WriteJsonResponse(
+          pipe.get(),
+          nlohmann::json{{"ok", false}, {"error", "signal-token capability is not enabled"}});
       DisconnectNamedPipe(pipe.get());
       continue;
     }
@@ -311,6 +377,7 @@ void BrokerLoop(
 
   WipeToken(&cached_token);
   SecureWipe(&device_credential);
+  SecureWipe(&access_code);
 }
 
 }  // namespace
@@ -321,11 +388,21 @@ bool StartServiceAuthBroker(
     const std::string& signal_token_endpoint,
     const std::string& device_id,
     std::string device_credential,
+    std::string access_code,
     std::wstring* error) {
+  const bool any_signal_field = !signal_token_endpoint.empty() ||
+                                !device_id.empty() ||
+                                !device_credential.empty();
+  const bool signal_enabled = !signal_token_endpoint.empty() &&
+                              !device_id.empty() &&
+                              !device_credential.empty();
+  const bool access_code_enabled = !access_code.empty();
   if (pipe_name.rfind(L"\\\\.\\pipe\\DeskLink.Auth.", 0) != 0 ||
-      expected_client_pid == 0 || signal_token_endpoint.empty() ||
-      device_id.empty() || device_credential.empty()) {
+      expected_client_pid == 0 ||
+      (any_signal_field && !signal_enabled) ||
+      (!signal_enabled && !access_code_enabled)) {
     SecureWipe(&device_credential);
+    SecureWipe(&access_code);
     SetError(error, L"Invalid local authentication broker configuration");
     return false;
   }
@@ -335,16 +412,14 @@ bool StartServiceAuthBroker(
   std::wstring client_sid;
   if (!ProcessUserSidString(expected_client_pid, &client_sid, error)) {
     SecureWipe(&device_credential);
+    SecureWipe(&access_code);
     return false;
   }
 
-  // Reserve and validate the first named-pipe instance synchronously. This makes
-  // StartServiceAuthBroker fail closed if the object cannot be created or if a
-  // conflicting instance already exists, rather than reporting success merely
-  // because the worker thread was launched.
   LocalHandle first_pipe = CreateBrokerPipe(pipe_name, client_sid, true, error);
   if (!first_pipe) {
     SecureWipe(&device_credential);
+    SecureWipe(&access_code);
     return false;
   }
 
@@ -360,10 +435,12 @@ bool StartServiceAuthBroker(
         expected_client_pid,
         signal_token_endpoint,
         device_id,
-        std::move(device_credential));
+        std::move(device_credential),
+        std::move(access_code));
   } catch (...) {
     CloseHandle(first_pipe_handle);
     SecureWipe(&device_credential);
+    SecureWipe(&access_code);
     SetError(error, L"Unable to start local authentication broker worker");
     return false;
   }
