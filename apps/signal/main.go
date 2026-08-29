@@ -34,9 +34,11 @@ type envelope struct {
 }
 
 type peer struct {
-	id   string
-	conn *websocket.Conn
-	mu   sync.Mutex
+	id            string
+	conn          *websocket.Conn
+	allowedTarget string
+	controller    bool
+	mu            sync.Mutex
 
 	rateMu     sync.Mutex
 	tokens     float64
@@ -50,12 +52,18 @@ type hub struct {
 
 func newHub() *hub { return &hub{peers: make(map[string]*peer)} }
 
-func newPeer(id string, conn *websocket.Conn) *peer {
+func newPeer(id string, conn *websocket.Conn, scopes ...signalRegistrationScope) *peer {
+	var scope signalRegistrationScope
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
 	return &peer{
-		id:         id,
-		conn:       conn,
-		tokens:     signalBurst,
-		lastRefill: time.Now(),
+		id:            id,
+		conn:          conn,
+		allowedTarget: scope.AllowedTarget,
+		controller:    scope.Controller,
+		tokens:         signalBurst,
+		lastRefill:    time.Now(),
 	}
 }
 
@@ -109,6 +117,10 @@ func (p *peer) allowSignal() bool {
 	}
 	p.tokens--
 	return true
+}
+
+func (p *peer) canSignalTarget(target string) bool {
+	return p.allowedTarget == "" || target == p.allowedTarget
 }
 
 func (p *peer) write(v any) error {
@@ -188,6 +200,7 @@ func main() {
 	var metrics signalMetrics
 	registerMetricsHandler(&metrics)
 	http.HandleFunc("/api/v1/signal-token", signalTokenHandler())
+	http.HandleFunc("/api/v1/controller-session", controllerSessionHandler(guard))
 	http.HandleFunc("/api/v1/turn-credentials", turnCredentialHandler())
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -212,7 +225,23 @@ func main() {
 			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
-		revoked, revocationErr := deviceRevoked(id)
+
+		scope, authorized := signalRegistrationScopeForRequest(r, id)
+		if !authorized {
+			guard.authFailed(clientIP, time.Now())
+			metrics.authFailures.Add(1)
+			http.Error(w, "unauthorized device registration", http.StatusUnauthorized)
+			return
+		}
+
+		// Device revocation applies directly to host identities. Controller peers
+		// are ephemeral browser IDs; their authorization is instead bound to the
+		// target device encoded in the controller session token.
+		revocationID := id
+		if scope.Controller {
+			revocationID = scope.AllowedTarget
+		}
+		revoked, revocationErr := deviceRevoked(revocationID)
 		if revocationErr != nil {
 			http.Error(w, "device revocation state unavailable", http.StatusServiceUnavailable)
 			return
@@ -220,12 +249,6 @@ func main() {
 		if revoked {
 			metrics.authFailures.Add(1)
 			http.Error(w, "device revoked", http.StatusForbidden)
-			return
-		}
-		if !signalRegistrationAuthorized(r, id) {
-			guard.authFailed(clientIP, time.Now())
-			metrics.authFailures.Add(1)
-			http.Error(w, "unauthorized device registration", http.StatusUnauthorized)
 			return
 		}
 		guard.authSucceeded(clientIP, time.Now())
@@ -239,7 +262,7 @@ func main() {
 		metrics.totalConnections.Add(1)
 		defer metrics.activeConnections.Add(-1)
 
-		p := newPeer(id, conn)
+		p := newPeer(id, conn, scope)
 		h.put(p)
 		defer func() {
 			h.remove(id, p)
@@ -260,14 +283,18 @@ func main() {
 			for {
 				select {
 				case <-ticker.C:
-					revoked, err := deviceRevoked(id)
+					recheckID := id
+					if p.controller {
+						recheckID = p.allowedTarget
+					}
+					revoked, err := deviceRevoked(recheckID)
 					if err != nil {
-						log.Printf("device revocation check failed for %s: %v", id, err)
+						log.Printf("device revocation check failed for %s: %v", recheckID, err)
 						p.closeWithReason("device authorization unavailable")
 						return
 					}
 					if revoked {
-						log.Printf("disconnecting revoked device %s", id)
+						log.Printf("disconnecting peer %s because target/device %s is revoked", id, recheckID)
 						p.closeWithReason("device revoked")
 						return
 					}
@@ -309,6 +336,11 @@ func main() {
 			}
 			if msg.Target == "" || !validDeviceID(msg.Target) {
 				_ = p.write(map[string]any{"type": "error", "message": "valid target is required"})
+				continue
+			}
+			if !p.canSignalTarget(msg.Target) {
+				metrics.authFailures.Add(1)
+				_ = p.write(map[string]any{"type": "error", "message": "target is outside controller authorization scope"})
 				continue
 			}
 
