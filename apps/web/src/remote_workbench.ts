@@ -18,6 +18,8 @@ let viewMode: ViewMode = "fit";
 let networkExpanded = false;
 let hideTimer: number | null = null;
 let boundStage: HTMLElement | null = null;
+let boundVideo: HTMLVideoElement | null = null;
+let stageResizeObserver: ResizeObserver | null = null;
 let fullscreenButton: HTMLButtonElement | null = null;
 let displayButton: HTMLButtonElement | null = null;
 let networkButton: HTMLButtonElement | null = null;
@@ -68,14 +70,46 @@ function makeButton(label: string, className = "workbench-button") {
   return button;
 }
 
+function updateVideoScale(stage: HTMLElement) {
+  const video = query<HTMLVideoElement>(VIDEO_SELECTOR);
+  if (!video || video.videoWidth <= 0 || video.videoHeight <= 0 || stage.clientWidth <= 0 || stage.clientHeight <= 0) {
+    video?.style.setProperty("--desklink-video-scale", "1");
+    return;
+  }
+
+  const containScale = Math.min(
+    stage.clientWidth / video.videoWidth,
+    stage.clientHeight / video.videoHeight,
+  );
+  if (!Number.isFinite(containScale) || containScale <= 0) return;
+
+  let requestedScale = containScale;
+  if (viewMode === "fill") {
+    requestedScale = Math.max(
+      stage.clientWidth / video.videoWidth,
+      stage.clientHeight / video.videoHeight,
+    );
+  } else if (viewMode === "actual") {
+    // 1 CSS pixel per remote video pixel. The stage keeps overflow clipped, so
+    // a large desktop behaves like a centered 1:1 viewport rather than changing
+    // object-fit and breaking pointer-coordinate math in the React controller.
+    requestedScale = 1;
+  }
+
+  const elementScale = Math.max(0.1, Math.min(8, requestedScale / containScale));
+  video.style.setProperty("--desklink-video-scale", elementScale.toFixed(6));
+}
+
 function applyViewMode(stage: HTMLElement) {
   stage.dataset.viewMode = viewMode;
+  updateVideoScale(stage);
   if (displayButton) displayButton.textContent = `显示 · ${VIEW_LABELS[viewMode]}`;
 }
 
 function syncFullscreenButton() {
   if (!fullscreenButton) return;
   fullscreenButton.textContent = document.fullscreenElement ? "退出全屏" : "全屏";
+  if (boundStage) updateVideoScale(boundStage);
 }
 
 function revealToolbar() {
@@ -92,15 +126,36 @@ function revealToolbar() {
   }, 3500);
 }
 
+function onVideoGeometryChanged() {
+  if (boundStage) updateVideoScale(boundStage);
+}
+
 function bindStage(stage: HTMLElement) {
-  if (boundStage === stage) return;
-  if (boundStage) {
-    boundStage.removeEventListener("pointermove", revealToolbar);
-    boundStage.removeEventListener("pointerdown", revealToolbar);
+  const video = query<HTMLVideoElement>(VIDEO_SELECTOR);
+  if (boundStage !== stage) {
+    if (boundStage) {
+      boundStage.removeEventListener("pointermove", revealToolbar);
+      boundStage.removeEventListener("pointerdown", revealToolbar);
+    }
+    stageResizeObserver?.disconnect();
+    stageResizeObserver = new ResizeObserver(() => updateVideoScale(stage));
+    stageResizeObserver.observe(stage);
+    boundStage = stage;
+    stage.addEventListener("pointermove", revealToolbar, { passive: true });
+    stage.addEventListener("pointerdown", revealToolbar, { passive: true });
   }
-  boundStage = stage;
-  stage.addEventListener("pointermove", revealToolbar, { passive: true });
-  stage.addEventListener("pointerdown", revealToolbar, { passive: true });
+
+  if (boundVideo !== video) {
+    if (boundVideo) {
+      boundVideo.removeEventListener("loadedmetadata", onVideoGeometryChanged);
+      boundVideo.removeEventListener("resize", onVideoGeometryChanged);
+    }
+    boundVideo = video;
+    if (video) {
+      video.addEventListener("loadedmetadata", onVideoGeometryChanged);
+      video.addEventListener("resize", onVideoGeometryChanged);
+    }
+  }
 }
 
 function createWorkbench(stage: HTMLElement) {
@@ -195,6 +250,7 @@ function syncWorkbench() {
     if (hideTimer !== null) window.clearTimeout(hideTimer);
     hideTimer = null;
     bar.classList.remove("is-idle");
+    viewMode = "fit";
   }
 
   if (statusText) {
