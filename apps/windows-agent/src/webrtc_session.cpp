@@ -1048,6 +1048,22 @@ void WebRtcSession::HandleControl(const std::string& text) {
     return;
   }
 
+  if (type == "video-profile") {
+    if (!config_.on_video_profile_requested) return;
+
+    const std::string mode = event.value("mode", "");
+    if (mode == "auto") {
+      config_.on_video_profile_requested(VideoProfile::Auto);
+    } else if (mode == "original") {
+      config_.on_video_profile_requested(VideoProfile::Original);
+    } else if (mode == "high") {
+      config_.on_video_profile_requested(VideoProfile::High);
+    } else if (mode == "clear") {
+      config_.on_video_profile_requested(VideoProfile::Clear);
+    }
+    return;
+  }
+
   if (type == "telemetry") {
     if (config_.on_network_feedback) {
       NetworkFeedback feedback;
