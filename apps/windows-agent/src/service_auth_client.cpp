@@ -28,6 +28,7 @@ struct BrokerLaunchOptions {
 
 BrokerLaunchOptions ServiceBrokerOptions() {
   BrokerLaunchOptions options;
+  bool explicit_capability = false;
   int argc = 0;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv) return options;
@@ -40,15 +41,23 @@ BrokerLaunchOptions ServiceBrokerOptions() {
       options.pipe_name = argument.substr(prefix_length);
     } else if (argument == kSignalTokenBrokerFlag) {
       options.signal_token = true;
+      explicit_capability = true;
     } else if (argument == kAccessCodeBrokerFlag) {
       options.access_code = true;
+      explicit_capability = true;
     }
   }
   LocalFree(argv);
 
   if (options.pipe_name.rfind(kPipePrefix, 0) != 0 || options.pipe_name.size() > 512) {
-    options = {};
+    return {};
   }
+
+  // Existing Service builds launched the signal-token broker with only the Pipe
+  // argument. Preserve that behavior until the Service itself has migrated to
+  // explicit capability flags. As soon as any capability flag is present, only
+  // the explicitly named capabilities are enabled.
+  if (!explicit_capability) options.signal_token = true;
   return options;
 }
 
@@ -132,14 +141,15 @@ bool BrokerRequest(
     return false;
   }
 
+  const DWORD request_size = static_cast<DWORD>(command.size());
   DWORD written = 0;
   if (!WriteFile(
           pipe.get(),
           command.data(),
-          static_cast<DWORD>(command.size()),
+          request_size,
           &written,
           nullptr) ||
-      written != command.size()) {
+      written != request_size) {
     SetError(error, "unable to send local authentication request");
     return false;
   }
