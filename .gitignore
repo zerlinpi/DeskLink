@@ -1,0 +1,9 @@
+# Local production/development secrets. Never commit credential registries.
+infra/secrets/
+
+# Browser-local configuration may contain deployment URLs or controlled-test credentials.
+apps/web/.env.local
+apps/web/.env.*.local
+
+# Local build output.
+build/
