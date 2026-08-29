@@ -28,6 +28,8 @@ class DesktopCapture {
 
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
+  LONG left() const { return left_; }
+  LONG top() const { return top_; }
 
  private:
   bool RecreateDuplication();
@@ -39,6 +41,8 @@ class DesktopCapture {
   uint32_t output_index_{0};
   uint32_t width_{0};
   uint32_t height_{0};
+  LONG left_{0};
+  LONG top_{0};
   bool frame_acquired_{false};
 };
 
