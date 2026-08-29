@@ -15,7 +15,7 @@ DeskLink is a low-latency remote desktop project targeting a Sunlogin / NetEase 
 
 ## Current M1 status
 
-Implemented on the feature branch:
+Implemented on `main`:
 
 - Device registration and WebSocket offer/answer/ICE signaling.
 - Server Ping/Pong keepalive for long-lived device registrations.
