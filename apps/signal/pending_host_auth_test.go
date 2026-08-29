@@ -113,6 +113,20 @@ func TestHostAuthDispatchGuardSuppressesSameConnectionDuplicate(t *testing.T) {
 	}
 }
 
+func TestHostAuthDispatchGuardReleaseAllowsImmediateRetry(t *testing.T) {
+	guard := newHostAuthDispatchGuard()
+	now := time.Unix(1_700_000_000, 0)
+	source := &peer{id: "controller-a"}
+
+	if !guard.claim("host-a", source, "session-a", now) {
+		t.Fatal("first dispatch should be claimed")
+	}
+	guard.release("host-a", source, "session-a")
+	if !guard.claim("host-a", source, "session-a", now.Add(time.Millisecond)) {
+		t.Fatal("failed delivery must be immediately retryable after claim release")
+	}
+}
+
 func TestHostAuthDispatchGuardAllowsReconnectedController(t *testing.T) {
 	guard := newHostAuthDispatchGuard()
 	now := time.Unix(1_700_000_000, 0)
