@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -13,9 +14,12 @@ import (
 )
 
 const (
-	pongWait   = 75 * time.Second
-	pingPeriod = 30 * time.Second
-	writeWait  = 8 * time.Second
+	pongWait        = 75 * time.Second
+	pingPeriod      = 30 * time.Second
+	writeWait       = 8 * time.Second
+	maxMessageBytes = 256 << 10
+	signalRate       = 30.0
+	signalBurst      = 60.0
 )
 
 type envelope struct {
@@ -30,6 +34,10 @@ type peer struct {
 	id   string
 	conn *websocket.Conn
 	mu   sync.Mutex
+
+	rateMu     sync.Mutex
+	tokens     float64
+	lastRefill time.Time
 }
 
 type hub struct {
@@ -38,6 +46,15 @@ type hub struct {
 }
 
 func newHub() *hub { return &hub{peers: make(map[string]*peer)} }
+
+func newPeer(id string, conn *websocket.Conn) *peer {
+	return &peer{
+		id:         id,
+		conn:       conn,
+		tokens:     signalBurst,
+		lastRefill: time.Now(),
+	}
+}
 
 func (h *hub) put(p *peer) {
 	h.mu.Lock()
@@ -60,6 +77,21 @@ func (h *hub) get(id string) *peer {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.peers[id]
+}
+
+func (p *peer) allowSignal() bool {
+	p.rateMu.Lock()
+	defer p.rateMu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(p.lastRefill).Seconds()
+	p.lastRefill = now
+	p.tokens = math.Min(signalBurst, p.tokens+elapsed*signalRate)
+	if p.tokens < 1 {
+		return false
+	}
+	p.tokens--
+	return true
 }
 
 func (p *peer) write(v any) error {
@@ -86,6 +118,19 @@ func validDeviceID(id string) bool {
 		return false
 	}
 	return true
+}
+
+func validSessionID(id string) bool {
+	return id != "" && len(id) <= 128
+}
+
+func allowedSignalType(messageType string) bool {
+	switch messageType {
+	case "offer", "answer", "ice", "session-request", "session-accept":
+		return true
+	default:
+		return false
+	}
 }
 
 func originAllowed(origin string) bool {
@@ -129,14 +174,14 @@ func main() {
 			return
 		}
 
-		p := &peer{id: id, conn: conn}
+		p := newPeer(id, conn)
 		h.put(p)
 		defer func() {
 			h.remove(id, p)
 			_ = conn.Close()
 		}()
 
-		conn.SetReadLimit(1 << 20)
+		conn.SetReadLimit(maxMessageBytes)
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 		conn.SetPongHandler(func(string) error {
 			return conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -169,8 +214,21 @@ func main() {
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 
+			if !p.allowSignal() {
+				log.Printf("signal rate limit exceeded by %s", id)
+				return
+			}
+
 			if msg.Type == "ping" {
 				_ = p.write(map[string]any{"type": "pong", "ts": time.Now().UnixMilli()})
+				continue
+			}
+			if !allowedSignalType(msg.Type) {
+				_ = p.write(map[string]any{"type": "error", "message": "unsupported signal type"})
+				continue
+			}
+			if !validSessionID(msg.Session) {
+				_ = p.write(map[string]any{"type": "error", "message": "valid session is required"})
 				continue
 			}
 			if msg.Target == "" || !validDeviceID(msg.Target) {
@@ -200,6 +258,11 @@ func main() {
 	if addr == "" {
 		addr = ":8080"
 	}
+	server := &http.Server{
+		Addr:              addr,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
 	log.Printf("DeskLink signaling listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Fatal(server.ListenAndServe())
 }
