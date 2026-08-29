@@ -47,22 +47,43 @@ const EMPTY_NETWORK_VIEW: NetworkView = {
 };
 
 const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL ?? "ws://localhost:8080/ws";
+const SIGNAL_DEVICE_ID = import.meta.env.VITE_SIGNAL_DEVICE_ID ?? "";
+const SIGNAL_AUTH_TOKEN = import.meta.env.VITE_SIGNAL_AUTH_TOKEN ?? "";
 const STUN_URL = import.meta.env.VITE_STUN_URL ?? "stun:stun.l.google.com:19302";
 const TURN_URL = import.meta.env.VITE_TURN_URL ?? "turn:localhost:3478";
+const TURN_TLS_URL = import.meta.env.VITE_TURN_TLS_URL ?? "";
 const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME ?? "desklink";
 const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD ?? "CHANGE_ME_NOW";
+const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
+
+const TURN_URLS = TURN_URL.startsWith("turns:")
+  ? [TURN_URL]
+  : [`${TURN_URL}?transport=udp`, `${TURN_URL}?transport=tcp`];
+if (TURN_TLS_URL) TURN_URLS.push(TURN_TLS_URL);
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: STUN_URL },
   {
-    urls: [`${TURN_URL}?transport=udp`, `${TURN_URL}?transport=tcp`],
+    urls: TURN_URLS,
     username: TURN_USERNAME,
     credential: TURN_PASSWORD,
   },
 ];
 
+function buildSignalUrl(deviceId: string) {
+  const url = new URL(SIGNAL_URL, window.location.href);
+  if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol === "https:") url.protocol = "wss:";
+  url.searchParams.set("deviceId", deviceId);
+  if (SIGNAL_AUTH_TOKEN) url.searchParams.set("auth", SIGNAL_AUTH_TOKEN);
+  return url.toString();
+}
+
 function App() {
-  const localId = useMemo(() => `web-${crypto.randomUUID().slice(0, 8)}`, []);
+  const localId = useMemo(
+    () => SIGNAL_DEVICE_ID || `web-${crypto.randomUUID().slice(0, 8)}`,
+    [],
+  );
   const [targetId, setTargetId] = useState("");
   const [accessCode, setAccessCode] = useState("");
   const [status, setStatus] = useState("idle");
@@ -382,6 +403,7 @@ function App() {
     const pc = new RTCPeerConnection({
       iceServers: ICE_SERVERS,
       bundlePolicy: "max-bundle",
+      iceTransportPolicy: FORCE_RELAY ? "relay" : "all",
     });
     pcRef.current = pc;
 
@@ -518,7 +540,7 @@ function App() {
   const openSignalSocket = (initial: boolean) => {
     if (manualDisconnectRef.current) return;
 
-    const ws = new WebSocket(`${SIGNAL_URL}?deviceId=${encodeURIComponent(localId)}`);
+    const ws = new WebSocket(buildSignalUrl(localId));
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
