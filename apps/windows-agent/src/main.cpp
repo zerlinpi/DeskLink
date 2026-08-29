@@ -19,6 +19,7 @@
 #include "desktop_capture.h"
 #include "gpu_color_converter.h"
 #include "h264_encoder.h"
+#include "service_auth_client.h"
 #include "webrtc_session.h"
 
 using Microsoft::WRL::ComPtr;
@@ -167,6 +168,19 @@ int wmain(int argc, wchar_t** argv) {
 
   SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
+  std::string resolved_access_code;
+  if (desklink::ServiceAccessCodeBrokerConfigured()) {
+    std::string access_error;
+    if (!desklink::FetchServiceBrokerAccessCode(&resolved_access_code, &access_error)) {
+      std::cerr << "SECURITY: protected access-code broker failed: " << access_error
+                << "; refusing to start Agent\n";
+      return 1;
+    }
+    std::cout << "Loaded unattended access code from LocalSystem Service broker.\n";
+  } else {
+    resolved_access_code = EnvOr("DESKLINK_ACCESS_CODE", "");
+  }
+
   const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   if (FAILED(com)) {
     std::wcerr << L"CoInitializeEx failed: 0x" << std::hex << com << L"\n";
@@ -298,7 +312,7 @@ int wmain(int argc, wchar_t** argv) {
   desklink::SessionConfig session_config;
   session_config.signal_url = EnvOr("DESKLINK_SIGNAL_URL", session_config.signal_url);
   session_config.device_id = EnvOr("DESKLINK_DEVICE_ID", DefaultDeviceId());
-  session_config.access_code = EnvOr("DESKLINK_ACCESS_CODE", "");
+  session_config.access_code = std::move(resolved_access_code);
   session_config.stun_url = EnvOr("DESKLINK_STUN_URL", session_config.stun_url);
   session_config.turn_host = EnvOr("DESKLINK_TURN_HOST", session_config.turn_host);
   session_config.turn_port = EnvPortOr("DESKLINK_TURN_PORT", session_config.turn_port);
@@ -434,7 +448,7 @@ int wmain(int argc, wchar_t** argv) {
   };
 
   if (session_config.access_code.empty()) {
-    std::wcerr << L"SECURITY: DESKLINK_ACCESS_CODE is not set; incoming remote-control offers will be rejected.\n";
+    std::wcerr << L"SECURITY: no access code is configured; incoming remote-control offers will be rejected.\n";
   }
 
   rtc::InitLogger(rtc::LogLevel::Info);
