@@ -7,14 +7,14 @@
 
 namespace {
 
-class LocalHandle {
+class ScopedKernelHandle {
  public:
-  explicit LocalHandle(HANDLE handle) : handle_(handle) {}
-  ~LocalHandle() {
+  explicit ScopedKernelHandle(HANDLE handle) : handle_(handle) {}
+  ~ScopedKernelHandle() {
     if (handle_ && handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
   }
-  LocalHandle(const LocalHandle&) = delete;
-  LocalHandle& operator=(const LocalHandle&) = delete;
+  ScopedKernelHandle(const ScopedKernelHandle&) = delete;
+  ScopedKernelHandle& operator=(const ScopedKernelHandle&) = delete;
   HANDLE get() const { return handle_; }
   explicit operator bool() const {
     return handle_ && handle_ != INVALID_HANDLE_VALUE;
@@ -45,7 +45,7 @@ int wmain() {
 
   // StartServiceAuthBroker promises that the first pipe instance already exists.
   // Deliberately do not retry here; a race in broker readiness should fail CI.
-  LocalHandle pipe(CreateFileW(
+  ScopedKernelHandle pipe(CreateFileW(
       pipe_name.c_str(),
       GENERIC_READ | GENERIC_WRITE,
       0,
