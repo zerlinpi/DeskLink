@@ -120,6 +120,38 @@ uint32_t RaiseFpsTier(uint32_t current, uint32_t target) {
   return target;
 }
 
+VideoSize ResolutionLimitForTier(
+    uint32_t tier,
+    uint32_t configured_width,
+    uint32_t configured_height) {
+  switch (std::min<uint32_t>(tier, 3)) {
+    case 1:
+      return {std::min<uint32_t>(configured_width, 1600),
+              std::min<uint32_t>(configured_height, 900)};
+    case 2:
+      return {std::min<uint32_t>(configured_width, 1280),
+              std::min<uint32_t>(configured_height, 720)};
+    case 3:
+      return {std::min<uint32_t>(configured_width, 960),
+              std::min<uint32_t>(configured_height, 540)};
+    default:
+      return {configured_width, configured_height};
+  }
+}
+
+uint32_t BitrateCapForResolutionTier(
+    uint32_t target_bitrate,
+    uint32_t min_bitrate,
+    uint32_t tier) {
+  static constexpr uint32_t kPercent[] = {100, 75, 50, 35};
+  const uint32_t percent = kPercent[std::min<uint32_t>(tier, 3)];
+  const uint64_t scaled = static_cast<uint64_t>(target_bitrate) * percent / 100;
+  return std::clamp<uint32_t>(
+      static_cast<uint32_t>(std::min<uint64_t>(scaled, target_bitrate)),
+      min_bitrate,
+      target_bitrate);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -252,12 +284,16 @@ int wmain(int argc, wchar_t** argv) {
 
   std::atomic<uint32_t> requested_bitrate{target_bitrate};
   std::atomic<uint32_t> requested_fps{target_fps};
+  std::atomic<uint32_t> requested_resolution_tier{0};
   std::atomic_bool keyframe_requested{false};
   std::mutex adaptation_mutex;
   auto last_bitrate_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
   auto last_fps_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+  auto last_resolution_change = std::chrono::steady_clock::now() - std::chrono::seconds(20);
   uint32_t severe_feedback_streak = 0;
   uint32_t healthy_feedback_streak = 0;
+  uint32_t resolution_pressure_streak = 0;
+  uint32_t resolution_healthy_streak = 0;
 
   desklink::SessionConfig session_config;
   session_config.signal_url = EnvOr("DESKLINK_SIGNAL_URL", session_config.signal_url);
@@ -356,6 +392,45 @@ int wmain(int argc, wchar_t** argv) {
       }
       healthy_feedback_streak = 0;
     }
+
+    const uint32_t adaptive_fps = requested_fps.load(std::memory_order_relaxed);
+    const uint32_t fps_floor = std::min<uint32_t>(target_fps, 24);
+    const uint32_t bitrate_pressure_floor = std::max<uint32_t>(
+        min_bitrate,
+        static_cast<uint32_t>(static_cast<uint64_t>(target_bitrate) * 45 / 100));
+    const bool resolution_exhausted = adaptive_fps <= fps_floor &&
+                                      next <= bitrate_pressure_floor;
+
+    if (severe && resolution_exhausted) {
+      resolution_pressure_streak = std::min<uint32_t>(resolution_pressure_streak + 1, 60);
+    } else {
+      resolution_pressure_streak = 0;
+    }
+
+    const uint32_t recovery_fps = std::min<uint32_t>(target_fps, 45);
+    const uint32_t recovery_bitrate = std::max<uint32_t>(
+        min_bitrate,
+        static_cast<uint32_t>(static_cast<uint64_t>(target_bitrate) * 60 / 100));
+    if (healthy && adaptive_fps >= recovery_fps && next >= recovery_bitrate) {
+      resolution_healthy_streak = std::min<uint32_t>(resolution_healthy_streak + 1, 120);
+    } else {
+      resolution_healthy_streak = 0;
+    }
+
+    const uint32_t current_tier = requested_resolution_tier.load(std::memory_order_relaxed);
+    if (resolution_pressure_streak >= 4 &&
+        now - last_resolution_change >= std::chrono::seconds(8) &&
+        current_tier < 3) {
+      requested_resolution_tier.store(current_tier + 1, std::memory_order_relaxed);
+      last_resolution_change = now;
+      resolution_pressure_streak = 0;
+    } else if (resolution_healthy_streak >= 12 &&
+               now - last_resolution_change >= std::chrono::seconds(15) &&
+               current_tier > 0) {
+      requested_resolution_tier.store(current_tier - 1, std::memory_order_relaxed);
+      last_resolution_change = now;
+      resolution_healthy_streak = 0;
+    }
   };
 
   if (session_config.access_code.empty()) {
@@ -395,6 +470,7 @@ int wmain(int argc, wchar_t** argv) {
   uint64_t last_cache_update_timestamp100ns = 0;
   uint32_t active_bitrate = target_bitrate;
   uint32_t active_fps = target_fps;
+  uint32_t active_resolution_tier = 0;
   bool was_connected = false;
   auto last_cached_recovery = clock::now() - std::chrono::seconds(1);
 
@@ -419,10 +495,68 @@ int wmain(int argc, wchar_t** argv) {
       return true;
     }
 
-    // The track may still be opening. Preserve a pending keyframe request so
-    // the first decodable frame is retried without waiting for desktop motion.
     keyframe_requested.store(true, std::memory_order_relaxed);
     return false;
+  };
+
+  auto rebuild_video_pipeline = [&](uint32_t tier, const wchar_t* reason, bool force) -> bool {
+    tier = std::min<uint32_t>(tier, 3);
+    const VideoSize limit = ResolutionLimitForTier(tier, max_width, max_height);
+    const VideoSize next_size = FitWithin(
+        source_width,
+        source_height,
+        limit.width,
+        limit.height);
+
+    if (!force && encoder_ready && converter_ready &&
+        next_size.width == encode_size.width && next_size.height == encode_size.height) {
+      active_resolution_tier = tier;
+      return true;
+    }
+
+    const uint32_t bitrate_cap = BitrateCapForResolutionTier(
+        target_bitrate,
+        min_bitrate,
+        tier);
+    const uint32_t restart_bitrate = std::min<uint32_t>(
+        std::clamp(
+            requested_bitrate.load(std::memory_order_relaxed),
+            min_bitrate,
+            target_bitrate),
+        bitrate_cap);
+
+    encoder.Reset();
+    converter.Reset();
+    converter_ready = converter.Initialize(
+        device.Get(),
+        source_width,
+        source_height,
+        next_size.width,
+        next_size.height,
+        target_fps);
+    encoder_ready = converter_ready && encoder.Initialize(
+        device.Get(),
+        next_size.width,
+        next_size.height,
+        target_fps,
+        restart_bitrate);
+
+    if (!encoder_ready) return false;
+
+    encode_size = next_size;
+    active_bitrate = restart_bitrate;
+    active_resolution_tier = tier;
+    last_encoded_timestamp100ns = 0;
+    last_fresh_encode_timestamp100ns = 0;
+    last_cache_update_timestamp100ns = 0;
+    keyframe_requested.store(true, std::memory_order_relaxed);
+
+    std::wcout << L"\n" << reason << L": stream "
+               << encode_size.width << L"x" << encode_size.height
+               << L", resolution-tier=" << active_resolution_tier
+               << L", bitrate-cap="
+               << (bitrate_cap / 1'000'000.0) << L" Mbps\n";
+    return true;
   };
 
   while (g_running) {
@@ -431,6 +565,7 @@ int wmain(int argc, wchar_t** argv) {
       keyframe_requested.store(true, std::memory_order_relaxed);
     } else if (!connected && was_connected) {
       requested_fps.store(target_fps, std::memory_order_relaxed);
+      requested_resolution_tier.store(0, std::memory_order_relaxed);
       if (encoder_ready && active_bitrate != target_bitrate) {
         if (encoder.SetBitrate(target_bitrate)) {
           active_bitrate = target_bitrate;
@@ -449,8 +584,32 @@ int wmain(int argc, wchar_t** argv) {
       std::wcout << L"\nAdaptive frame-rate target: " << active_fps << L" fps\n";
     }
 
+    if (connected) {
+      const uint32_t desired_resolution_tier =
+          requested_resolution_tier.load(std::memory_order_relaxed);
+      if (desired_resolution_tier != active_resolution_tier) {
+        const uint32_t previous_tier = active_resolution_tier;
+        if (!rebuild_video_pipeline(
+                desired_resolution_tier,
+                L"Adaptive resolution changed",
+                false)) {
+          std::wcerr << L"\nAdaptive resolution rebuild failed; restoring previous profile.\n";
+          if (!rebuild_video_pipeline(previous_tier, L"Restored previous profile", true)) {
+            std::wcerr << L"Video pipeline restore failed; remote input remains active.\n";
+          }
+          requested_resolution_tier.store(active_resolution_tier, std::memory_order_relaxed);
+        }
+      }
+    }
+
     if (connected && encoder_ready) {
-      const uint32_t desired_bitrate = requested_bitrate.load(std::memory_order_relaxed);
+      const uint32_t bitrate_cap = BitrateCapForResolutionTier(
+          target_bitrate,
+          min_bitrate,
+          active_resolution_tier);
+      const uint32_t desired_bitrate = std::min<uint32_t>(
+          requested_bitrate.load(std::memory_order_relaxed),
+          bitrate_cap);
       if (desired_bitrate != active_bitrate) {
         if (encoder.SetBitrate(desired_bitrate)) {
           active_bitrate = desired_bitrate;
@@ -491,40 +650,15 @@ int wmain(int argc, wchar_t** argv) {
       if (frame->width != source_width || frame->height != source_height) {
         source_width = frame->width;
         source_height = frame->height;
-        encode_size = FitWithin(source_width, source_height, max_width, max_height);
-
-        encoder.Reset();
-        converter.Reset();
-        converter_ready = converter.Initialize(
-            device.Get(),
-            source_width,
-            source_height,
-            encode_size.width,
-            encode_size.height,
-            target_fps);
-
-        const uint32_t restart_bitrate = std::clamp(
-            requested_bitrate.load(std::memory_order_relaxed),
-            min_bitrate,
-            target_bitrate);
-        encoder_ready = converter_ready && encoder.Initialize(
-            device.Get(),
-            encode_size.width,
-            encode_size.height,
-            target_fps,
-            restart_bitrate);
-        active_bitrate = restart_bitrate;
-        last_encoded_timestamp100ns = 0;
-        last_fresh_encode_timestamp100ns = 0;
-        last_cache_update_timestamp100ns = 0;
-
-        if (encoder_ready) {
-          keyframe_requested.store(true, std::memory_order_relaxed);
-          std::wcout << L"\nDisplay changed; video pipeline rebuilt for "
-                     << source_width << L"x" << source_height << L" -> "
-                     << encode_size.width << L"x" << encode_size.height << L"\n";
-        } else {
-          std::wcerr << L"\nDisplay changed but video pipeline could not be rebuilt; input remains active.\n";
+        const uint32_t previous_tier = active_resolution_tier;
+        if (!rebuild_video_pipeline(previous_tier, L"Display changed", true)) {
+          std::wcerr << L"\nDisplay changed but the current video profile could not be rebuilt.\n";
+          if (previous_tier != 0 &&
+              rebuild_video_pipeline(0, L"Fallback full-resolution profile", true)) {
+            requested_resolution_tier.store(0, std::memory_order_relaxed);
+          } else if (!encoder_ready) {
+            std::wcerr << L"Video disabled after display change; remote input remains active.\n";
+          }
         }
       }
 
@@ -535,9 +669,6 @@ int wmain(int argc, wchar_t** argv) {
                                    frame->timestamp100ns >=
                                        last_fresh_encode_timestamp100ns + min_frame_interval100ns;
 
-      // While idle, refresh the cached GPU frame at no more than 10 fps. While
-      // connected, skip conversion work for frames that would be discarded by
-      // the adaptive frame-rate target. Input still travels independently.
       const uint64_t idle_cache_interval100ns = 1'000'000ULL;
       const bool cache_update_due = connected
           ? (fresh_frame_due || recovery_requested)
@@ -565,9 +696,6 @@ int wmain(int argc, wchar_t** argv) {
       ++timeout_ticks;
     }
 
-    // PLI/FIR, a new connection, or severe packet loss can request recovery at
-    // a moment when DXGI has no new frame. Re-encode the cached GPU texture at
-    // most four times per second until the RTP track accepts a decodable IDR.
     if (connected && encoder_ready && !encoded_fresh_frame &&
         keyframe_requested.load(std::memory_order_relaxed)) {
       const auto now = clock::now();
@@ -596,6 +724,8 @@ int wmain(int argc, wchar_t** argv) {
                  << L", media=" << media_mbps << L" Mbps"
                  << L", target=" << (active_bitrate / 1'000'000.0) << L" Mbps"
                  << L", fps-target=" << active_fps
+                 << L", size=" << encode_size.width << L"x" << encode_size.height
+                 << L", tier=" << active_resolution_tier
                  << L", idle=" << timeout_ticks
                  << (connected ? L", controller=connected" : L", controller=waiting")
                  << L"        \r" << std::flush;
