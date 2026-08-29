@@ -59,7 +59,7 @@ jobs:
           affected '^(apps/signal/|tools/auth/|packages/protocol/|infra/docker-compose\.yml$|\.github/workflows/ci\.yml$)' && signal=true
           affected '^(apps/web/|tools/auth/verify-access-proof-vector\.mjs$|packages/protocol/|\.github/workflows/ci\.yml$)' && web=true
           affected '^(tools/network/|infra/|\.github/workflows/ci\.yml$)' && repo=true
-          affected '^(apps/windows-agent/|tools/auth/verify-access-proof-vector\.mjs$|packages/protocol/|\.github/workflows/ci\.yml$)' && windows=true
+          affected '^(apps/windows-agent/|packaging/windows/|tools/auth/verify-access-proof-vector\.mjs$|packages/protocol/|\.github/workflows/ci\.yml$)' && windows=true
 
           echo "signal=$signal" >> "$GITHUB_OUTPUT"
           echo "web=$web" >> "$GITHUB_OUTPUT"
@@ -175,6 +175,26 @@ jobs:
         with:
           path: build/windows-agent
           key: desklink-windows-${{ runner.os }}-${{ hashFiles('apps/windows-agent/CMakeLists.txt') }}
+      - name: Validate packaging PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($script in @(
+            "packaging/windows/install-service.ps1",
+            "packaging/windows/uninstall-service.ps1",
+            "packaging/windows/sign-binaries.ps1"
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $messages = ($errors | ForEach-Object { $_.Message }) -join "; "
+              throw "$script has PowerShell syntax errors: $messages"
+            }
+          }
       - name: Configure
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
       - name: Validate static OpenSSL selection
@@ -200,6 +220,7 @@ jobs:
 
           $forbidden = '(?im)^\s*(VCRUNTIME[^\s]*\.dll|MSVCP[^\s]*\.dll|libcrypto[^\s]*\.dll|libssl[^\s]*\.dll|datachannel[^\s]*\.dll)\s*$'
           $binaries = @(
+            "build/windows-agent/Release/DeskLink.exe",
             "build/windows-agent/Release/desklink-agent.exe",
             "build/windows-agent/Release/desklink-service.exe"
           )
@@ -253,5 +274,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
+            build/windows-agent/Release/DeskLink.exe
             build/windows-agent/Release/desklink-agent.exe
             build/windows-agent/Release/desklink-service.exe
