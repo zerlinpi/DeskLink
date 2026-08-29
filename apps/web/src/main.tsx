@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";
 import "./styles.css";
 
 type SignalMessage = {
@@ -54,7 +55,9 @@ const EMPTY_NETWORK_VIEW: NetworkView = {
 
 const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL ?? "ws://localhost:8080/ws";
 const SIGNAL_DEVICE_ID = import.meta.env.VITE_SIGNAL_DEVICE_ID ?? "";
-const SIGNAL_AUTH_TOKEN = import.meta.env.VITE_SIGNAL_AUTH_TOKEN ?? "";
+const STATIC_SIGNAL_AUTH_TOKEN = import.meta.env.VITE_SIGNAL_AUTH_TOKEN ?? "";
+const CONTROLLER_SESSION_URL = import.meta.env.VITE_CONTROLLER_SESSION_URL ?? "";
+const CONTROLLER_AUTH_REQUIRED = import.meta.env.VITE_CONTROLLER_AUTH_REQUIRED === "1";
 const STUN_URL = import.meta.env.VITE_STUN_URL ?? "stun:stun.l.google.com:19302";
 const TURN_URL = import.meta.env.VITE_TURN_URL ?? "turn:localhost:3478";
 const TURN_TLS_URL = import.meta.env.VITE_TURN_TLS_URL ?? "";
@@ -63,6 +66,7 @@ const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD ?? "CHANGE_ME_NOW";
 const TURN_CREDENTIALS_URL = import.meta.env.VITE_TURN_CREDENTIALS_URL ?? "";
 const TURN_RUNTIME_REQUIRED = import.meta.env.VITE_TURN_RUNTIME_REQUIRED === "1";
 const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
+const CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS = 90;
 
 const TURN_URLS = TURN_URL.startsWith("turns:")
   ? [TURN_URL]
@@ -82,12 +86,12 @@ function staticIceServers(username = TURN_USERNAME, password = TURN_PASSWORD): R
   return servers;
 }
 
-async function resolveIceServers(deviceId: string): Promise<RTCIceServer[]> {
+async function resolveIceServers(deviceId: string, signalAuthToken: string): Promise<RTCIceServer[]> {
   if (!TURN_CREDENTIALS_URL) return staticIceServers();
 
-  if (!SIGNAL_AUTH_TOKEN) {
+  if (!signalAuthToken) {
     if (TURN_RUNTIME_REQUIRED) {
-      throw new Error("runtime TURN credentials require VITE_SIGNAL_AUTH_TOKEN");
+      throw new Error("runtime TURN credentials require a signal auth token");
     }
     console.warn("DeskLink runtime TURN credentials unavailable: signal auth token is missing");
     return staticIceServers();
@@ -99,10 +103,11 @@ async function resolveIceServers(deviceId: string): Promise<RTCIceServer[]> {
     const response = await fetch(url, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${SIGNAL_AUTH_TOKEN}`,
+        Authorization: `Bearer ${signalAuthToken}`,
         Accept: "application/json",
       },
       cache: "no-store",
+      credentials: "omit",
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -118,12 +123,12 @@ async function resolveIceServers(deviceId: string): Promise<RTCIceServer[]> {
   }
 }
 
-function buildSignalUrl(deviceId: string) {
+function buildSignalUrl(deviceId: string, signalAuthToken: string) {
   const url = new URL(SIGNAL_URL, window.location.href);
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   url.searchParams.set("deviceId", deviceId);
-  if (SIGNAL_AUTH_TOKEN) url.searchParams.set("auth", SIGNAL_AUTH_TOKEN);
+  if (signalAuthToken) url.searchParams.set("auth", signalAuthToken);
   return url.toString();
 }
 
@@ -132,6 +137,8 @@ function App() {
     () => SIGNAL_DEVICE_ID || `web-${crypto.randomUUID().slice(0, 8)}`,
     [],
   );
+  const [controllerAccount, setControllerAccount] = useState("");
+  const [controllerKey, setControllerKey] = useState("");
   const [targetId, setTargetId] = useState("");
   const [accessCode, setAccessCode] = useState("");
   const [status, setStatus] = useState("idle");
@@ -156,11 +163,70 @@ function App() {
   const signalReconnectTimerRef = useRef<number | null>(null);
   const signalReconnectAttemptRef = useRef(0);
   const manualDisconnectRef = useRef(false);
+  const controllerTokenRef = useRef(STATIC_SIGNAL_AUTH_TOKEN);
+  const controllerTokenExpiryRef = useRef(STATIC_SIGNAL_AUTH_TOKEN ? Number.MAX_SAFE_INTEGER : 0);
+  const controllerTokenTargetRef = useRef("");
+  const controllerTokenRequestRef = useRef<Promise<string> | null>(null);
+
+  const runtimeControllerAuthEnabled = Boolean(CONTROLLER_SESSION_URL);
+
+  const clearRuntimeControllerSession = () => {
+    if (runtimeControllerAuthEnabled) {
+      controllerTokenRef.current = "";
+      controllerTokenExpiryRef.current = 0;
+      controllerTokenTargetRef.current = "";
+    }
+    controllerTokenRequestRef.current = null;
+  };
+
+  const ensureSignalAuthToken = async (forceRefresh = false): Promise<string> => {
+    if (!runtimeControllerAuthEnabled) {
+      if (CONTROLLER_AUTH_REQUIRED && !STATIC_SIGNAL_AUTH_TOKEN) {
+        throw new Error("runtime controller authentication is required but not configured");
+      }
+      return STATIC_SIGNAL_AUTH_TOKEN;
+    }
+
+    const normalizedTarget = targetId.trim();
+    if (!normalizedTarget || !controllerAccount.trim() || !controllerKey) {
+      throw new Error("controller account, controller key and target device are required");
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (!forceRefresh &&
+        controllerTokenRef.current &&
+        controllerTokenTargetRef.current === normalizedTarget &&
+        controllerTokenExpiryRef.current > nowSeconds + CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS) {
+      return controllerTokenRef.current;
+    }
+
+    if (controllerTokenRequestRef.current) return controllerTokenRequestRef.current;
+
+    const request = (async () => {
+      const endpoint = resolveControllerSessionUrl(SIGNAL_URL, CONTROLLER_SESSION_URL);
+      const session = await requestControllerSession(endpoint, {
+        accountId: controllerAccount.trim(),
+        controllerId: localId,
+        targetDeviceId: normalizedTarget,
+        accessKey: controllerKey,
+      });
+      controllerTokenRef.current = session.token;
+      controllerTokenExpiryRef.current = session.expiresAt;
+      controllerTokenTargetRef.current = normalizedTarget;
+      return session.token;
+    })();
+    controllerTokenRequestRef.current = request;
+    try {
+      return await request;
+    } finally {
+      if (controllerTokenRequestRef.current === request) controllerTokenRequestRef.current = null;
+    }
+  };
 
   const sendSignal = (type: string, payload: any = {}) => {
     const ws = wsRef.current;
     if (ws?.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify({ type, target: targetId, session: sessionRef.current, payload }));
+    ws.send(JSON.stringify({ type, target: targetId.trim(), session: sessionRef.current, payload }));
     return true;
   };
 
@@ -203,6 +269,7 @@ function App() {
       clearIceRestartTimer();
       clearIceRestartWatchdog();
       clearSignalReconnectTimer();
+      clearRuntimeControllerSession();
     };
   }, []);
 
@@ -419,7 +486,8 @@ function App() {
 
     try {
       if (TURN_CREDENTIALS_URL) {
-        const iceServers = await resolveIceServers(localId);
+        const authToken = await ensureSignalAuthToken(false);
+        const iceServers = await resolveIceServers(localId, authToken);
         if (pcRef.current !== pc || manualDisconnectRef.current) return;
         pc.setConfiguration({
           ...pc.getConfiguration(),
@@ -578,6 +646,8 @@ function App() {
     } else if (msg.type === "auth-rejected") {
       const reason = msg.payload?.reason;
       disconnect(reason === "host-unconfigured" ? "host access code not configured" : "access code rejected");
+    } else if (msg.type === "error" && msg.message?.includes?.("authorization scope")) {
+      disconnect("controller authorization rejected");
     }
   };
 
@@ -590,14 +660,25 @@ function App() {
     const delay = Math.min(10000, 500 * (2 ** Math.min(attempt, 5)));
     signalReconnectTimerRef.current = window.setTimeout(() => {
       signalReconnectTimerRef.current = null;
-      if (!manualDisconnectRef.current) openSignalSocket(false);
+      if (!manualDisconnectRef.current) void openSignalSocket(false);
     }, delay);
   };
 
-  const openSignalSocket = (initial: boolean) => {
+  const openSignalSocket = async (initial: boolean) => {
     if (manualDisconnectRef.current) return;
 
-    const ws = new WebSocket(buildSignalUrl(localId));
+    let authToken = "";
+    try {
+      authToken = await ensureSignalAuthToken(false);
+    } catch (error) {
+      console.debug("DeskLink controller authorization failed", error);
+      setStatus(error instanceof Error ? error.message : "controller authorization failed");
+      manualDisconnectRef.current = true;
+      return;
+    }
+    if (manualDisconnectRef.current) return;
+
+    const ws = new WebSocket(buildSignalUrl(localId, authToken));
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
@@ -611,7 +692,7 @@ function App() {
 
       if (initial) {
         try {
-          const iceServers = await resolveIceServers(localId);
+          const iceServers = await resolveIceServers(localId, authToken);
           if (wsRef.current !== ws || manualDisconnectRef.current) return;
 
           const pc = createPeer(iceServers);
@@ -692,19 +773,23 @@ function App() {
     if (videoRef.current) videoRef.current.srcObject = null;
     sessionRef.current = crypto.randomUUID();
     setNetworkView(EMPTY_NETWORK_VIEW);
+    clearRuntimeControllerSession();
     setStatus(nextStatus);
   };
 
   const connect = async () => {
     if (!targetId.trim() || !accessCode || status !== "idle") return;
+    if (runtimeControllerAuthEnabled && (!controllerAccount.trim() || !controllerKey)) return;
     manualDisconnectRef.current = false;
     signalReconnectAttemptRef.current = 0;
     setNetworkView(EMPTY_NETWORK_VIEW);
-    setStatus("signaling");
-    openSignalSocket(true);
+    setStatus(runtimeControllerAuthEnabled ? "authorizing controller" : "signaling");
+    await openSignalSocket(true);
   };
 
-  const canConnect = status === "idle" && Boolean(targetId.trim()) && Boolean(accessCode);
+  const controllerFieldsReady = !runtimeControllerAuthEnabled ||
+    (Boolean(controllerAccount.trim()) && Boolean(controllerKey));
+  const canConnect = status === "idle" && Boolean(targetId.trim()) && Boolean(accessCode) && controllerFieldsReady;
   const routeLabel = networkView.route === "relay"
     ? "TURN relay"
     : networkView.route === "direct" ? "Direct P2P" : "Route pending";
@@ -723,9 +808,31 @@ function App() {
       </header>
 
       <section className="connect-card">
+        {runtimeControllerAuthEnabled && (
+          <>
+            <input
+              value={controllerAccount}
+              onChange={(e) => setControllerAccount(e.target.value)}
+              placeholder="Controller account"
+              autoComplete="username"
+              disabled={status !== "idle"}
+            />
+            <input
+              type="password"
+              value={controllerKey}
+              onChange={(e) => setControllerKey(e.target.value)}
+              placeholder="Controller key"
+              autoComplete="current-password"
+              disabled={status !== "idle"}
+            />
+          </>
+        )}
         <input
           value={targetId}
-          onChange={(e) => setTargetId(e.target.value)}
+          onChange={(e) => {
+            setTargetId(e.target.value);
+            if (status === "idle") clearRuntimeControllerSession();
+          }}
           placeholder="Remote device ID"
           autoComplete="off"
           disabled={status !== "idle"}
@@ -794,7 +901,13 @@ function App() {
           </div>
         )}
 
-        {status === "idle" && <div className="empty">Enter the device ID and access code to start a low-latency session.</div>}
+        {status === "idle" && (
+          <div className="empty">
+            {runtimeControllerAuthEnabled
+              ? "Enter controller credentials, device ID and access code to start a scoped session."
+              : "Enter the device ID and access code to start a low-latency session."}
+          </div>
+        )}
       </section>
     </main>
   );
