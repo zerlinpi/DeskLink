@@ -1,0 +1,84 @@
+services:
+  signal:
+    image: ${DESKLINK_SIGNAL_IMAGE:-ghcr.io/zerlinpi/desklink-signal:latest}
+    restart: unless-stopped
+    environment:
+      DESKLINK_SIGNAL_ADDR: :8080
+      DESKLINK_ALLOW_ANY_ORIGIN: "0"
+      DESKLINK_ALLOWED_ORIGINS: https://${DESKLINK_DOMAIN}
+      DESKLINK_DEVICE_CREDENTIALS_FILE: /run/desklink-secrets/devices.json
+      DESKLINK_CONTROLLER_CREDENTIALS_FILE: /run/desklink-secrets/controllers.json
+      DESKLINK_SIGNAL_AUTH_SECRET: ${DESKLINK_SIGNAL_AUTH_SECRET}
+      DESKLINK_CONTROLLER_SESSION_TTL: ${DESKLINK_CONTROLLER_SESSION_TTL:-15m}
+      DESKLINK_SIGNAL_TOKEN_TTL: ${DESKLINK_SIGNAL_TOKEN_TTL:-15m}
+      DESKLINK_TURN_AUTH_SECRET: ${DESKLINK_TURN_AUTH_SECRET}
+      DESKLINK_TURN_CREDENTIAL_TTL_SECONDS: ${DESKLINK_TURN_CREDENTIAL_TTL_SECONDS:-43200}
+      DESKLINK_REVOKED_DEVICE_IDS_FILE: /run/desklink-secrets/revoked-devices.txt
+    volumes:
+      - ./secrets:/run/desklink-secrets:ro
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ../../apps/web
+      args:
+        VITE_SIGNAL_URL: /ws
+        VITE_CONTROLLER_SESSION_URL: /api/v1/controller-session
+        VITE_CONTROLLER_AUTH_REQUIRED: "1"
+        VITE_STUN_URL: stun:${DESKLINK_TURN_HOST:-${DESKLINK_DOMAIN}}:3478
+        VITE_TURN_URL: turn:${DESKLINK_TURN_HOST:-${DESKLINK_DOMAIN}}:3478
+        VITE_TURN_TLS_URL: ${DESKLINK_TURN_TLS_URL:-}
+        VITE_TURN_CREDENTIALS_URL: /api/v1/turn-credentials
+        VITE_TURN_RUNTIME_REQUIRED: "1"
+        VITE_ICE_TRANSPORT_POLICY: ${DESKLINK_ICE_TRANSPORT_POLICY:-all}
+    restart: unless-stopped
+    depends_on:
+      signal:
+        condition: service_healthy
+    expose:
+      - "80"
+
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      DESKLINK_DOMAIN: ${DESKLINK_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  turn:
+    image: coturn/coturn:4.6.3
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --listening-port=3478
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${DESKLINK_TURN_AUTH_SECRET}
+      - --realm=${DESKLINK_DOMAIN}
+      - --external-ip=${DESKLINK_PUBLIC_IP}
+      - --min-port=49160
+      - --max-port=49200
+      - --stale-nonce=600
+      - --no-multicast-peers
+      - --no-cli
+
+volumes:
+  caddy-data:
+  caddy-config:
