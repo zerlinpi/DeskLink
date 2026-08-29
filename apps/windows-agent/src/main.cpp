@@ -41,7 +41,15 @@ BOOL WINAPI ConsoleHandler(DWORD signal) {
 }
 
 std::string EnvOr(const char* name, std::string fallback) {
-  if (const char* value = std::getenv(name); value && *value) return value;
+  char* value = nullptr;
+  size_t length = 0;
+  if (_dupenv_s(&value, &length, name) == 0 && value != nullptr) {
+    std::string result(value);
+    std::free(value);
+    if (!result.empty()) return result;
+    return fallback;
+  }
+  if (value) std::free(value);
   return fallback;
 }
 
@@ -188,23 +196,22 @@ int wmain(int argc, wchar_t** argv) {
       target_bitrate);
   const uint32_t max_width = EnvUIntOr("DESKLINK_MAX_WIDTH", 1920, 640, 3840);
   const uint32_t max_height = EnvUIntOr("DESKLINK_MAX_HEIGHT", 1080, 360, 2160);
-  const VideoSize encode_size = FitWithin(
-      capture.width(),
-      capture.height(),
-      max_width,
-      max_height);
+
+  uint32_t source_width = capture.width();
+  uint32_t source_height = capture.height();
+  VideoSize encode_size = FitWithin(source_width, source_height, max_width, max_height);
 
   desklink::GpuColorConverter converter;
-  const bool converter_ready = converter.Initialize(
+  bool converter_ready = converter.Initialize(
       device.Get(),
-      capture.width(),
-      capture.height(),
+      source_width,
+      source_height,
       encode_size.width,
       encode_size.height,
       target_fps);
 
   desklink::H264Encoder encoder;
-  const bool encoder_ready = converter_ready && encoder.Initialize(
+  bool encoder_ready = converter_ready && encoder.Initialize(
       device.Get(),
       encode_size.width,
       encode_size.height,
@@ -286,7 +293,7 @@ int wmain(int argc, wchar_t** argv) {
   std::wcout << L"DeskLink Windows Agent\n"
              << L"GPU: " << adapter_desc.Description << L"\n"
              << L"Desktop: output " << output_index << L" ("
-             << capture.width() << L"x" << capture.height() << L")\n"
+             << source_width << L"x" << source_height << L")\n"
              << L"Stream target: " << encode_size.width << L"x" << encode_size.height
              << L" @ " << target_fps << L" fps, "
              << std::fixed << std::setprecision(1)
@@ -333,6 +340,43 @@ int wmain(int argc, wchar_t** argv) {
     auto frame = capture.Acquire(16);
     if (frame) {
       ++captured_frames;
+
+      if (frame->width != source_width || frame->height != source_height) {
+        source_width = frame->width;
+        source_height = frame->height;
+        encode_size = FitWithin(source_width, source_height, max_width, max_height);
+
+        encoder.Reset();
+        converter.Reset();
+        converter_ready = converter.Initialize(
+            device.Get(),
+            source_width,
+            source_height,
+            encode_size.width,
+            encode_size.height,
+            target_fps);
+
+        const uint32_t restart_bitrate = std::clamp(
+            requested_bitrate.load(std::memory_order_relaxed),
+            min_bitrate,
+            target_bitrate);
+        encoder_ready = converter_ready && encoder.Initialize(
+            device.Get(),
+            encode_size.width,
+            encode_size.height,
+            target_fps,
+            restart_bitrate);
+        active_bitrate = restart_bitrate;
+
+        if (encoder_ready) {
+          encoder.RequestKeyframe();
+          std::wcout << L"\nDisplay changed; video pipeline rebuilt for "
+                     << source_width << L"x" << source_height << L" -> "
+                     << encode_size.width << L"x" << encode_size.height << L"\n";
+        } else {
+          std::wcerr << L"\nDisplay changed but video pipeline could not be rebuilt; input remains active.\n";
+        }
+      }
 
       // Do not consume encoder/GPU time while no controller is connected.
       if (connected && encoder_ready) {
