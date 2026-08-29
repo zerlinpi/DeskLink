@@ -69,11 +69,17 @@ func newPeer(id string, conn *websocket.Conn, scopes ...signalRegistrationScope)
 
 func (h *hub) put(p *peer) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if old := h.peers[p.id]; old != nil {
+	old := h.peers[p.id]
+	h.peers[p.id] = p
+	h.mu.Unlock()
+
+	// Do not close a replaced socket while holding the hub lock. The old
+	// connection's teardown path may concurrently call remove(), and keeping I/O
+	// outside the registry critical section prevents reconnect churn from
+	// stalling unrelated peer lookups/registrations.
+	if old != nil && old != p && old.conn != nil {
 		_ = old.conn.Close()
 	}
-	h.peers[p.id] = p
 }
 
 func (h *hub) remove(id string, p *peer) {
@@ -374,6 +380,12 @@ func main() {
 					}
 				}
 				_ = p.write(map[string]any{"type": "peer-offline", "target": msg.Target})
+				continue
+			}
+
+			if msg.Type == "auth-request" &&
+				!hostAuthDispatches.claim(msg.Target, p, msg.Session, time.Now()) {
+				metrics.hostAuthDuplicatesSuppressed.Add(1)
 				continue
 			}
 
