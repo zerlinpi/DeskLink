@@ -152,15 +152,16 @@ void WebRtcSession::CreatePeer(const std::string& controller, const std::string&
   }
 
   auto peer = std::make_shared<rtc::PeerConnection>(rtc_config);
-
+  std::shared_ptr<rtc::PeerConnection> previous;
   {
     std::scoped_lock lock(mutex_);
-    if (peer_) peer_->close();
+    previous = std::move(peer_);
     peer_ = peer;
     control_.reset();
     controller_id_ = controller;
     session_id_ = session;
   }
+  if (previous) previous->close();
 
   peer->onStateChange([](rtc::PeerConnection::State state) {
     std::cout << "WebRTC state: " << state << "\n";
@@ -179,23 +180,24 @@ void WebRtcSession::CreatePeer(const std::string& controller, const std::string&
         json{{"candidate", std::string(candidate)}, {"sdpMid", candidate.mid()}});
   });
   peer->onDataChannel([this](std::shared_ptr<rtc::DataChannel> channel) {
-    if (channel->label() == "control") {
+    if (channel->label() == "control" || channel->label() == "pointer") {
       AttachControlChannel(channel);
     }
   });
 }
 
 void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>& channel) {
-  {
+  if (channel->label() == "control") {
     std::scoped_lock lock(mutex_);
     control_ = channel;
   }
 
-  channel->onOpen([]() {
-    std::cout << "Control DataChannel open\n";
+  const std::string label = channel->label();
+  channel->onOpen([label]() {
+    std::cout << label << " DataChannel open\n";
   });
-  channel->onClosed([]() {
-    std::cout << "Control DataChannel closed\n";
+  channel->onClosed([label]() {
+    std::cout << label << " DataChannel closed\n";
   });
   channel->onMessage([this](rtc::message_variant data) {
     if (const auto* text = std::get_if<std::string>(&data)) {
