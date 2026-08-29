@@ -27,6 +27,13 @@ struct NetworkFeedback {
   double available_incoming_bitrate_bps{0.0};
 };
 
+enum class VideoProfile : uint8_t {
+  Auto = 0,
+  Original = 1,
+  High = 2,
+  Clear = 3,
+};
+
 struct SessionConfig {
   std::string signal_url{"ws://localhost:8080/ws"};
   std::string device_id{"windows-host"};
@@ -40,6 +47,7 @@ struct SessionConfig {
   uint32_t media_pacing_bitrate_bps{0};
   uint32_t media_pacing_interval_ms{5};
   std::function<void(const NetworkFeedback&)> on_network_feedback;
+  std::function<void(VideoProfile)> on_video_profile_requested;
   std::function<void()> on_keyframe_requested;
 };
 
