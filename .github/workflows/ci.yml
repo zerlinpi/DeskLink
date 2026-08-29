@@ -68,14 +68,18 @@ jobs:
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64
       - name: Build
         run: cmake --build build/windows-agent --config Release --parallel
-      - name: Validate DPAPI credential store
+      - name: Validate DPAPI protected secrets
         shell: pwsh
         run: |
           $service = Resolve-Path "build/windows-agent/Release/desklink-service.exe"
           "dc1.CI_DPAPI_SMOKE_TEST_0123456789" | & $service --store-device-credential
-          if ($LASTEXITCODE -ne 0) { throw "DPAPI credential store failed with exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI device credential store failed with exit code $LASTEXITCODE" }
+          "CI-Access-Code-Smoke-0123456789!" | & $service --store-access-code
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI access-code store failed with exit code $LASTEXITCODE" }
+          & $service --clear-access-code
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI access-code cleanup failed with exit code $LASTEXITCODE" }
           & $service --clear-device-credential
-          if ($LASTEXITCODE -ne 0) { throw "DPAPI credential cleanup failed with exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI device credential cleanup failed with exit code $LASTEXITCODE" }
       - name: Validate Service auth broker
         shell: pwsh
         run: |
