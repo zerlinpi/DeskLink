@@ -22,4 +22,17 @@ ProtectedCredentialStatus LoadProtectedDeviceCredential(
 
 bool DeleteProtectedDeviceCredential(std::wstring* error);
 
+// Stores the unattended remote-control access code separately from the device
+// bootstrap credential. It uses its own DPAPI entropy and protected file so the
+// two secrets can be rotated/removed independently.
+bool StoreProtectedAccessCode(
+    const std::wstring& access_code,
+    std::wstring* error);
+
+ProtectedCredentialStatus LoadProtectedAccessCode(
+    std::wstring* access_code,
+    std::wstring* error);
+
+bool DeleteProtectedAccessCode(std::wstring* error);
+
 }  // namespace desklink
