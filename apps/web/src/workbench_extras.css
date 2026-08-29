@@ -1,0 +1,53 @@
+.recent-devices {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 2px 1px 0;
+  scrollbar-width: none;
+}
+
+.recent-devices::-webkit-scrollbar { display: none; }
+
+.recent-devices-label {
+  flex: 0 0 auto;
+  color: #738097;
+  font-size: 11px;
+  font-weight: 650;
+  margin-right: 2px;
+}
+
+.recent-device-chip,
+.recent-devices-clear {
+  flex: 0 0 auto;
+  min-height: 29px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .055);
+  color: #c9d2e2;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.recent-device-chip:hover {
+  background: rgba(103, 119, 255, .17);
+  color: #fff;
+  filter: none;
+}
+
+.recent-devices-clear {
+  color: #76839a;
+  background: transparent;
+}
+
+.recent-devices-clear:hover {
+  background: rgba(255, 255, 255, .045);
+  color: #b9c3d4;
+  filter: none;
+}
+
+@media (max-width: 760px) {
+  .recent-devices { padding-top: 4px; }
+}
