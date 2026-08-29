@@ -68,6 +68,8 @@ const TURN_CREDENTIALS_URL = import.meta.env.VITE_TURN_CREDENTIALS_URL ?? "";
 const TURN_RUNTIME_REQUIRED = import.meta.env.VITE_TURN_RUNTIME_REQUIRED === "1";
 const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
 const CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS = 90;
+const SIGNAL_PROTOCOL = "desklink-v1";
+const CONTROLLER_AUTH_PROTOCOL_PREFIX = "desklink-auth.";
 
 const TURN_URLS = TURN_URL.startsWith("turns:")
   ? [TURN_URL]
@@ -124,13 +126,21 @@ async function resolveIceServers(deviceId: string, signalAuthToken: string): Pro
   }
 }
 
-function buildSignalUrl(deviceId: string, signalAuthToken: string) {
+function buildSignalUrl(deviceId: string, legacySignalAuthToken = "") {
   const url = new URL(SIGNAL_URL, window.location.href);
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   url.searchParams.set("deviceId", deviceId);
-  if (signalAuthToken) url.searchParams.set("auth", signalAuthToken);
+  if (legacySignalAuthToken) url.searchParams.set("auth", legacySignalAuthToken);
   return url.toString();
+}
+
+function buildSignalProtocols(runtimeControllerAuth: boolean, signalAuthToken: string) {
+  const protocols = [SIGNAL_PROTOCOL];
+  if (runtimeControllerAuth && signalAuthToken) {
+    protocols.push(`${CONTROLLER_AUTH_PROTOCOL_PREFIX}${signalAuthToken}`);
+  }
+  return protocols;
 }
 
 function App() {
@@ -679,7 +689,11 @@ function App() {
     }
     if (manualDisconnectRef.current) return;
 
-    const ws = new WebSocket(buildSignalUrl(localId, authToken));
+    const legacyAuthToken = runtimeControllerAuthEnabled ? "" : authToken;
+    const ws = new WebSocket(
+      buildSignalUrl(localId, legacyAuthToken),
+      buildSignalProtocols(runtimeControllerAuthEnabled, authToken),
+    );
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
