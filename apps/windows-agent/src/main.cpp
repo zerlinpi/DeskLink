@@ -40,6 +40,12 @@ BOOL WINAPI ConsoleHandler(DWORD signal) {
   return FALSE;
 }
 
+uint64_t Now100ns() {
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count() / 100);
+}
+
 std::string EnvOr(const char* name, std::string fallback) {
   char* value = nullptr;
   size_t length = 0;
@@ -225,7 +231,7 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   std::atomic<uint32_t> requested_bitrate{target_bitrate};
-  std::atomic_bool feedback_keyframe{false};
+  std::atomic_bool keyframe_requested{false};
   std::mutex adaptation_mutex;
   auto last_bitrate_change = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
@@ -238,6 +244,9 @@ int wmain(int argc, wchar_t** argv) {
   session_config.turn_port = EnvPortOr("DESKLINK_TURN_PORT", session_config.turn_port);
   session_config.turn_username = EnvOr("DESKLINK_TURN_USERNAME", session_config.turn_username);
   session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);
+  session_config.on_keyframe_requested = [&]() {
+    keyframe_requested.store(true, std::memory_order_relaxed);
+  };
   session_config.on_network_feedback = [&](const desklink::NetworkFeedback& feedback) {
     std::scoped_lock lock(adaptation_mutex);
     const auto now = std::chrono::steady_clock::now();
@@ -277,7 +286,7 @@ int wmain(int argc, wchar_t** argv) {
       requested_bitrate.store(next, std::memory_order_relaxed);
       last_bitrate_change = now;
       if (next < current && feedback.loss_ratio >= 0.15) {
-        feedback_keyframe.store(true, std::memory_order_relaxed);
+        keyframe_requested.store(true, std::memory_order_relaxed);
       }
     }
   };
@@ -308,13 +317,42 @@ int wmain(int argc, wchar_t** argv) {
   uint64_t sent_frames = 0;
   uint64_t encoded_bytes = 0;
   uint64_t timeout_ticks = 0;
+  uint64_t last_encoded_timestamp100ns = 0;
   uint32_t active_bitrate = target_bitrate;
   bool was_connected = false;
+  auto last_cached_recovery = clock::now() - std::chrono::seconds(1);
+
+  auto encode_and_send = [&](ID3D11Texture2D* nv12, uint64_t timestamp100ns) -> bool {
+    if (!nv12 || !encoder_ready) return false;
+
+    if (timestamp100ns <= last_encoded_timestamp100ns) {
+      timestamp100ns = last_encoded_timestamp100ns + 1;
+    }
+
+    desklink::EncodedH264Frame encoded;
+    if (!encoder.Encode(nv12, timestamp100ns, &encoded)) return false;
+
+    last_encoded_timestamp100ns = timestamp100ns;
+    ++encoded_frames;
+    encoded_bytes += encoded.bytes.size();
+    if (session.SendH264AccessUnit(
+            encoded.bytes.data(),
+            encoded.bytes.size(),
+            encoded.timestamp100ns)) {
+      ++sent_frames;
+      return true;
+    }
+
+    // The track may still be opening. Preserve a pending keyframe request so
+    // the first decodable frame is retried without waiting for desktop motion.
+    keyframe_requested.store(true, std::memory_order_relaxed);
+    return false;
+  };
 
   while (g_running) {
     const bool connected = session.connected();
     if (connected && !was_connected && encoder_ready) {
-      encoder.RequestKeyframe();
+      keyframe_requested.store(true, std::memory_order_relaxed);
     } else if (!connected && was_connected && encoder_ready && active_bitrate != target_bitrate) {
       if (encoder.SetBitrate(target_bitrate)) {
         active_bitrate = target_bitrate;
@@ -332,11 +370,9 @@ int wmain(int argc, wchar_t** argv) {
           requested_bitrate.store(active_bitrate, std::memory_order_relaxed);
         }
       }
-      if (feedback_keyframe.exchange(false, std::memory_order_relaxed)) {
-        encoder.RequestKeyframe();
-      }
     }
 
+    bool encoded_fresh_frame = false;
     auto frame = capture.Acquire(16);
     if (frame) {
       ++captured_frames;
@@ -367,9 +403,10 @@ int wmain(int argc, wchar_t** argv) {
             target_fps,
             restart_bitrate);
         active_bitrate = restart_bitrate;
+        last_encoded_timestamp100ns = 0;
 
         if (encoder_ready) {
-          encoder.RequestKeyframe();
+          keyframe_requested.store(true, std::memory_order_relaxed);
           std::wcout << L"\nDisplay changed; video pipeline rebuilt for "
                      << source_width << L"x" << source_height << L" -> "
                      << encode_size.width << L"x" << encode_size.height << L"\n";
@@ -378,29 +415,37 @@ int wmain(int argc, wchar_t** argv) {
         }
       }
 
-      // Do not consume encoder/GPU time while no controller is connected.
-      if (connected && encoder_ready) {
-        auto nv12 = converter.Convert(frame->texture.Get());
-        if (nv12) {
-          desklink::EncodedH264Frame encoded;
-          if (encoder.Encode(nv12.Get(), frame->timestamp100ns, &encoded)) {
-            ++encoded_frames;
-            encoded_bytes += encoded.bytes.size();
-            if (session.SendH264AccessUnit(
-                    encoded.bytes.data(),
-                    encoded.bytes.size(),
-                    encoded.timestamp100ns)) {
-              ++sent_frames;
-            } else {
-              // If the RTP track is not open yet, make the next successfully
-              // delivered frame an IDR so the browser never starts from a P-frame.
-              encoder.RequestKeyframe();
-            }
-          }
+      // Keep one recent NV12 frame warm even while nobody is connected. DXGI
+      // only emits frames on desktop/pointer changes, so this cache lets a new
+      // controller receive an immediate IDR even if the desktop is now static.
+      auto nv12 = converter_ready ? converter.Convert(frame->texture.Get()) : nullptr;
+      if (connected && encoder_ready && nv12) {
+        if (keyframe_requested.exchange(false, std::memory_order_relaxed)) {
+          encoder.RequestKeyframe();
         }
+        encoded_fresh_frame = encode_and_send(nv12.Get(), frame->timestamp100ns);
       }
     } else {
       ++timeout_ticks;
+    }
+
+    // PLI/FIR, a new connection, or severe packet loss can request recovery at
+    // a moment when DXGI has no new frame. Re-encode the cached GPU texture at
+    // most four times per second until the RTP track accepts a decodable IDR.
+    if (connected && encoder_ready && !encoded_fresh_frame &&
+        keyframe_requested.load(std::memory_order_relaxed)) {
+      const auto now = clock::now();
+      if (now - last_cached_recovery >= std::chrono::milliseconds(250)) {
+        auto cached = converter.LatestFrame();
+        if (cached) {
+          keyframe_requested.store(false, std::memory_order_relaxed);
+          encoder.RequestKeyframe();
+          last_cached_recovery = now;
+          if (!encode_and_send(cached.Get(), Now100ns())) {
+            keyframe_requested.store(true, std::memory_order_relaxed);
+          }
+        }
+      }
     }
 
     const auto now = clock::now();
