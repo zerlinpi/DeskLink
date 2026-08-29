@@ -20,7 +20,8 @@ After a user has signed in to Windows, the Service:
 7. gracefully asks the Agent to release remote input and exit before user-session switches or service shutdown;
 8. force-terminates the Agent only if it has not exited within the five-second graceful-shutdown window;
 9. stores the long-lived device bootstrap credential with machine-scope DPAPI;
-10. owns the long-lived credential at runtime and gives the user-session Agent only short-lived signaling tokens through a local authentication broker.
+10. owns the long-lived credential at runtime and gives the user-session Agent only short-lived signaling tokens through a local authentication broker;
+11. in DPAPI/broker mode, creates the Agent suspended and resumes it only after Job Object containment and broker readiness have succeeded.
 
 This removes the need to manually launch a console Agent after each Windows login, avoids restart storms, and keeps the durable device credential out of the ordinary user-session Agent process when DPAPI provisioning is used.
 
@@ -84,18 +85,22 @@ If the DPAPI file exists but cannot be decrypted or validated, the Service fails
 
 When a DPAPI credential is present, the long-lived `dc1...` credential remains inside the LocalSystem Service. It is no longer inserted into the Agent environment.
 
-For each Agent launch, the Service creates a unique local Named Pipe and passes only the pipe name to the Agent as a launch argument. The pipe name is an endpoint locator, not a secret credential.
+For each protected Agent launch, the Service generates a unique local Named Pipe name and passes only that endpoint name to the Agent as a launch argument. The Pipe name is an endpoint locator, not a secret credential.
 
 The authentication flow is:
 
 1. the Service decrypts the DPAPI-protected device credential;
 2. it creates the target user's normal environment block and removes any inherited `DESKLINK_DEVICE_CREDENTIAL` entry;
-3. it starts the Agent without the long-lived credential;
-4. the Service starts a local authentication broker bound to that Agent process;
-5. the Agent asks the local broker for a signaling token;
-6. the Service uses the long-lived credential to call the configured HTTPS `/api/v1/signal-token` endpoint;
-7. only the returned short-lived Signal Token and expiry are sent through the Named Pipe to the Agent;
-8. the Agent uses the short-lived token for WebSocket registration and to request temporary TURN credentials.
+3. it creates the Agent process with `CREATE_SUSPENDED`, so Agent user-mode code cannot run yet;
+4. it places the suspended Agent in the kill-on-close Job Object when available;
+5. it synchronously creates and validates the first local authentication Pipe instance and starts the broker bound to the Agent PID and user SID;
+6. only after broker startup succeeds does the Service call `ResumeThread` on the Agent;
+7. the Agent asks the local broker for a signaling token;
+8. the Service uses the long-lived credential to call the configured HTTPS `/api/v1/signal-token` endpoint;
+9. only the returned short-lived Signal Token and expiry are sent through the Named Pipe to the Agent;
+10. the Agent uses the short-lived token for WebSocket registration and to request temporary TURN credentials.
+
+If broker startup or `ResumeThread` fails, the suspended Agent is terminated before it is accepted as the active DeskLink Agent. This removes the earlier startup race where an Agent could begin initialization while waiting for its broker endpoint to appear.
 
 The Service caches a short-lived Signal Token only while it still has more than 90 seconds of lifetime remaining. This reduces unnecessary backend calls and lets brief backend/network interruptions avoid breaking an otherwise valid reconnect. Cached short tokens and in-memory long credential copies are wiped when the broker stops.
 
@@ -116,7 +121,9 @@ The SID check prevents other Windows users on the same machine from opening the 
 The Windows CI contains a runtime broker smoke test that verifies:
 
 - the Pipe is already available when broker startup returns;
-- an authorized client process can communicate with it;
+- an authorized Agent-side client can communicate with it;
+- the broker performs a real loopback HTTP short-token exchange and returns the resulting token through the same client code compiled into `desklink-agent.exe`;
+- the mock token endpoint sees the expected device ID and long-lived device credential from the Service-side exchange;
 - unsupported commands are rejected with a structured error;
 - a second process running as the same Windows user but with the wrong PID is rejected;
 - the broker stops cleanly.
