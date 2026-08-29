@@ -57,12 +57,21 @@ function App() {
   const statsTimerRef = useRef<number | null>(null);
   const statsBaselineRef = useRef<StatsBaseline | null>(null);
   const offerSentRef = useRef(false);
+  const negotiationPendingRef = useRef(false);
   const pendingLocalIceRef = useRef<RTCIceCandidateInit[]>([]);
   const pendingRemoteIceRef = useRef<RTCIceCandidateInit[]>([]);
+  const iceRestartTimerRef = useRef<number | null>(null);
+  const iceRestartWatchdogRef = useRef<number | null>(null);
+  const iceRestartInFlightRef = useRef(false);
+  const signalReconnectTimerRef = useRef<number | null>(null);
+  const signalReconnectAttemptRef = useRef(0);
+  const manualDisconnectRef = useRef(false);
 
   const sendSignal = (type: string, payload: any = {}) => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type, target: targetId, session: sessionRef.current, payload }));
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type, target: targetId, session: sessionRef.current, payload }));
+    return true;
   };
 
   const sendReliable = (payload: object) => {
@@ -73,6 +82,21 @@ function App() {
   const sendPointerFast = (payload: object) => {
     const channel = pointerRef.current;
     if (channel?.readyState === "open") channel.send(JSON.stringify(payload));
+  };
+
+  const clearIceRestartTimer = () => {
+    if (iceRestartTimerRef.current !== null) window.clearTimeout(iceRestartTimerRef.current);
+    iceRestartTimerRef.current = null;
+  };
+
+  const clearIceRestartWatchdog = () => {
+    if (iceRestartWatchdogRef.current !== null) window.clearTimeout(iceRestartWatchdogRef.current);
+    iceRestartWatchdogRef.current = null;
+  };
+
+  const clearSignalReconnectTimer = () => {
+    if (signalReconnectTimerRef.current !== null) window.clearTimeout(signalReconnectTimerRef.current);
+    signalReconnectTimerRef.current = null;
   };
 
   useEffect(() => {
@@ -86,6 +110,9 @@ function App() {
     return () => {
       window.removeEventListener("blur", releaseAll);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      clearIceRestartTimer();
+      clearIceRestartWatchdog();
+      clearSignalReconnectTimer();
     };
   }, []);
 
@@ -180,9 +207,6 @@ function App() {
     let contentWidth = r.width;
     let contentHeight = r.height;
 
-    // object-fit: contain can introduce letterboxing. Map input to the actual
-    // rendered video pixels rather than the full HTML element, otherwise clicks
-    // are offset whenever the controller and remote aspect ratios differ.
     if (video.videoWidth > 0 && video.videoHeight > 0 && r.width > 0 && r.height > 0) {
       const scale = Math.min(r.width / video.videoWidth, r.height / video.videoHeight);
       contentWidth = video.videoWidth * scale;
@@ -212,8 +236,95 @@ function App() {
     });
   };
 
+  const sendOffer = async (pc: RTCPeerConnection, iceRestart = false) => {
+    if (pcRef.current !== pc) return false;
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+
+    offerSentRef.current = false;
+    negotiationPendingRef.current = true;
+    pendingLocalIceRef.current = [];
+    if (iceRestart) pendingRemoteIceRef.current = [];
+
+    const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
+    if (pcRef.current !== pc) return false;
+    await pc.setLocalDescription(offer);
+    if (pcRef.current !== pc || wsRef.current?.readyState !== WebSocket.OPEN) {
+      negotiationPendingRef.current = false;
+      return false;
+    }
+
+    if (!sendSignal("offer", {
+      type: offer.type,
+      sdp: offer.sdp,
+      accessCode,
+      iceRestart,
+    })) {
+      negotiationPendingRef.current = false;
+      return false;
+    }
+
+    offerSentRef.current = true;
+    for (const candidate of pendingLocalIceRef.current) {
+      sendSignal("ice", candidate);
+    }
+    pendingLocalIceRef.current = [];
+    return true;
+  };
+
+  const scheduleIceRestart = (pc: RTCPeerConnection, immediate = false) => {
+    if (manualDisconnectRef.current || pcRef.current !== pc) return;
+    if (iceRestartInFlightRef.current || iceRestartTimerRef.current !== null) return;
+    if (pc.connectionState === "connected" || pc.connectionState === "closed") return;
+
+    iceRestartTimerRef.current = window.setTimeout(() => {
+      iceRestartTimerRef.current = null;
+      if (manualDisconnectRef.current || pcRef.current !== pc) return;
+      if (pc.connectionState === "connected" || pc.connectionState === "closed") return;
+      void restartIce(pc);
+    }, immediate ? 0 : 2000);
+  };
+
+  const restartIce = async (pc: RTCPeerConnection) => {
+    if (manualDisconnectRef.current || pcRef.current !== pc) return;
+    if (iceRestartInFlightRef.current || pc.connectionState === "closed") return;
+
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      scheduleSignalReconnect();
+      return;
+    }
+
+    iceRestartInFlightRef.current = true;
+    clearIceRestartTimer();
+    setStatus("reconnecting network");
+
+    try {
+      const sent = await sendOffer(pc, true);
+      if (!sent) {
+        iceRestartInFlightRef.current = false;
+        scheduleSignalReconnect();
+        return;
+      }
+
+      clearIceRestartWatchdog();
+      iceRestartWatchdogRef.current = window.setTimeout(() => {
+        iceRestartWatchdogRef.current = null;
+        if (pcRef.current !== pc || pc.connectionState === "connected") {
+          iceRestartInFlightRef.current = false;
+          return;
+        }
+        iceRestartInFlightRef.current = false;
+        scheduleIceRestart(pc, false);
+      }, 8000);
+    } catch (error) {
+      console.debug("DeskLink ICE restart failed", error);
+      iceRestartInFlightRef.current = false;
+      scheduleIceRestart(pc, false);
+    }
+  };
+
   const createPeer = () => {
     offerSentRef.current = false;
+    negotiationPendingRef.current = false;
     pendingLocalIceRef.current = [];
     pendingRemoteIceRef.current = [];
 
@@ -238,20 +349,42 @@ function App() {
       }
     };
     pc.onconnectionstatechange = () => {
-      setStatus(pc.connectionState);
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") stopTelemetry();
+      const state = pc.connectionState;
+      if (state === "connected") {
+        clearIceRestartTimer();
+        clearIceRestartWatchdog();
+        iceRestartInFlightRef.current = false;
+        setStatus(wsRef.current?.readyState === WebSocket.OPEN
+          ? "control ready"
+          : "control ready · signaling reconnecting");
+        if (controlRef.current?.readyState === "open") startTelemetry(pc);
+      } else if (state === "disconnected") {
+        setStatus("reconnecting network");
+        scheduleIceRestart(pc, false);
+      } else if (state === "failed") {
+        stopTelemetry();
+        setStatus("reconnecting network");
+        scheduleIceRestart(pc, true);
+      } else if (state === "closed") {
+        stopTelemetry();
+        clearIceRestartTimer();
+        clearIceRestartWatchdog();
+        iceRestartInFlightRef.current = false;
+      } else {
+        setStatus(state);
+      }
     };
 
     const control = pc.createDataChannel("control", { ordered: true });
     controlRef.current = control;
     control.onopen = () => {
-      setStatus("control ready");
+      setStatus(wsRef.current?.readyState === WebSocket.OPEN
+        ? "control ready"
+        : "control ready · signaling reconnecting");
       startTelemetry(pc);
     };
     control.onclose = stopTelemetry;
 
-    // Mouse movement can discard stale packets. This prevents head-of-line blocking
-    // from making the remote cursor feel sticky when a packet is lost.
     const pointer = pc.createDataChannel("pointer", {
       ordered: false,
       maxRetransmits: 0,
@@ -261,9 +394,154 @@ function App() {
     return pc;
   };
 
+  const handleSignalMessage = async (event: MessageEvent) => {
+    let msg: SignalMessage;
+    try {
+      msg = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+
+    const pc = pcRef.current;
+    if (!pc) return;
+
+    if (msg.type === "answer" && msg.payload) {
+      try {
+        await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);
+        negotiationPendingRef.current = false;
+        iceRestartInFlightRef.current = false;
+        clearIceRestartWatchdog();
+
+        const pending = pendingRemoteIceRef.current;
+        pendingRemoteIceRef.current = [];
+        for (const candidate of pending) {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (error) {
+            console.debug("DeskLink queued remote ICE rejected", error);
+          }
+        }
+      } catch (error) {
+        console.debug("DeskLink remote answer rejected", error);
+        negotiationPendingRef.current = false;
+        iceRestartInFlightRef.current = false;
+        scheduleIceRestart(pc, false);
+      }
+    } else if (msg.type === "ice" && msg.payload) {
+      const candidate = msg.payload as RTCIceCandidateInit;
+      if (pc.remoteDescription && !negotiationPendingRef.current) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch (error) {
+          console.debug("DeskLink remote ICE rejected", error);
+        }
+      } else {
+        pendingRemoteIceRef.current.push(candidate);
+      }
+    } else if (msg.type === "peer-offline") {
+      if (pc.connectionState === "connected") {
+        setStatus("control ready · host signaling offline");
+      } else {
+        setStatus("host offline · retrying");
+        scheduleIceRestart(pc, false);
+      }
+    } else if (msg.type === "auth-rejected") {
+      const reason = msg.payload?.reason;
+      disconnect(reason === "host-unconfigured" ? "host access code not configured" : "access code rejected");
+    }
+  };
+
+  const scheduleSignalReconnect = () => {
+    if (manualDisconnectRef.current || signalReconnectTimerRef.current !== null) return;
+    const current = wsRef.current;
+    if (current?.readyState === WebSocket.OPEN || current?.readyState === WebSocket.CONNECTING) return;
+
+    const attempt = signalReconnectAttemptRef.current++;
+    const delay = Math.min(10000, 500 * (2 ** Math.min(attempt, 5)));
+    signalReconnectTimerRef.current = window.setTimeout(() => {
+      signalReconnectTimerRef.current = null;
+      if (!manualDisconnectRef.current) openSignalSocket(false);
+    }, delay);
+  };
+
+  const openSignalSocket = (initial: boolean) => {
+    if (manualDisconnectRef.current) return;
+
+    const ws = new WebSocket(`${SIGNAL_URL}?deviceId=${encodeURIComponent(localId)}`);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      void handleSignalMessage(event);
+    };
+
+    ws.onopen = async () => {
+      if (wsRef.current !== ws || manualDisconnectRef.current) return;
+      signalReconnectAttemptRef.current = 0;
+      clearSignalReconnectTimer();
+
+      if (initial) {
+        const pc = createPeer();
+        const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+        const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
+        const h264Codecs = videoCapabilities?.codecs.filter(
+          (codec) => codec.mimeType.toLowerCase() === "video/h264",
+        );
+        if (h264Codecs?.length) transceiver.setCodecPreferences(h264Codecs);
+
+        try {
+          if (!await sendOffer(pc, false)) {
+            setStatus("signal error");
+          }
+        } catch (error) {
+          console.debug("DeskLink initial offer failed", error);
+          setStatus("signal error");
+        }
+        return;
+      }
+
+      const pc = pcRef.current;
+      if (!pc) return;
+      if (pc.connectionState === "connected") {
+        setStatus("control ready");
+      } else if (pc.connectionState !== "closed") {
+        setStatus("reconnecting network");
+        scheduleIceRestart(pc, true);
+      }
+    };
+
+    ws.onerror = () => {
+      if (wsRef.current !== ws) return;
+      if (pcRef.current?.connectionState !== "connected") setStatus("signal error");
+    };
+
+    ws.onclose = () => {
+      if (wsRef.current !== ws) return;
+      wsRef.current = null;
+      if (manualDisconnectRef.current) return;
+
+      const pc = pcRef.current;
+      if (pc && pc.connectionState !== "closed") {
+        setStatus(pc.connectionState === "connected"
+          ? "control ready · signaling reconnecting"
+          : "reconnecting signaling");
+        scheduleSignalReconnect();
+      } else {
+        setStatus("disconnected");
+      }
+    };
+  };
+
   const disconnect = (nextStatus = "idle") => {
+    manualDisconnectRef.current = true;
     sendReliable({ t: "release-all" });
     stopTelemetry();
+    clearIceRestartTimer();
+    clearIceRestartWatchdog();
+    clearSignalReconnectTimer();
+    iceRestartInFlightRef.current = false;
+    negotiationPendingRef.current = false;
+    signalReconnectAttemptRef.current = 0;
+
     if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
     pointerRafRef.current = null;
     pendingMoveRef.current = null;
@@ -285,89 +563,10 @@ function App() {
 
   const connect = async () => {
     if (!targetId.trim() || !accessCode || status !== "idle") return;
+    manualDisconnectRef.current = false;
+    signalReconnectAttemptRef.current = 0;
     setStatus("signaling");
-
-    const ws = new WebSocket(`${SIGNAL_URL}?deviceId=${encodeURIComponent(localId)}`);
-    wsRef.current = ws;
-
-    ws.onopen = async () => {
-      const pc = createPeer();
-      const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
-
-      // Keep M0/M1 deterministic: the native Windows host sends hardware H.264.
-      // Payload type numbers are still negotiated dynamically from the generated SDP.
-      const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
-      const h264Codecs = videoCapabilities?.codecs.filter(
-        (codec) => codec.mimeType.toLowerCase() === "video/h264",
-      );
-      if (h264Codecs?.length) {
-        transceiver.setCodecPreferences(h264Codecs);
-      }
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      // The host intentionally ignores ICE for sessions that have not passed the
-      // access-code gate yet. Send the offer first, then flush candidates over the
-      // same ordered WebSocket so no LAN candidate can race ahead and be dropped.
-      sendSignal("offer", {
-        type: offer.type,
-        sdp: offer.sdp,
-        accessCode,
-      });
-      offerSentRef.current = true;
-      for (const candidate of pendingLocalIceRef.current) {
-        sendSignal("ice", candidate);
-      }
-      pendingLocalIceRef.current = [];
-    };
-
-    ws.onmessage = async (event) => {
-      const msg: SignalMessage = JSON.parse(event.data);
-      const pc = pcRef.current;
-      if (!pc) return;
-
-      if (msg.type === "answer" && msg.payload) {
-        await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);
-        const pending = pendingRemoteIceRef.current;
-        pendingRemoteIceRef.current = [];
-        for (const candidate of pending) {
-          try {
-            await pc.addIceCandidate(candidate);
-          } catch (error) {
-            console.debug("DeskLink queued remote ICE rejected", error);
-          }
-        }
-      } else if (msg.type === "ice" && msg.payload) {
-        const candidate = msg.payload as RTCIceCandidateInit;
-        if (pc.remoteDescription) {
-          try {
-            await pc.addIceCandidate(candidate);
-          } catch (error) {
-            console.debug("DeskLink remote ICE rejected", error);
-          }
-        } else {
-          pendingRemoteIceRef.current.push(candidate);
-        }
-      } else if (msg.type === "peer-offline") {
-        disconnect("peer offline");
-      } else if (msg.type === "auth-rejected") {
-        const reason = msg.payload?.reason;
-        disconnect(reason === "host-unconfigured" ? "host access code not configured" : "access code rejected");
-      }
-    };
-
-    ws.onerror = () => {
-      if (pcRef.current?.connectionState !== "connected") setStatus("signal error");
-    };
-    ws.onclose = () => {
-      const pc = pcRef.current;
-      if (pc?.connectionState === "connected") {
-        setStatus("control ready · signaling offline");
-      } else {
-        setStatus((current) => (current === "idle" ? current : "disconnected"));
-      }
-    };
+    openSignalSocket(true);
   };
 
   const canConnect = status === "idle" && Boolean(targetId.trim()) && Boolean(accessCode);
