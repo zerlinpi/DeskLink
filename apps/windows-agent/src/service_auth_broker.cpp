@@ -3,9 +3,7 @@
 #include <windows.h>
 #include <sddl.h>
 
-#include <atomic>
 #include <chrono>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -54,7 +52,20 @@ class LocalHandle {
   LocalHandle(LocalHandle&& other) noexcept : handle_(other.handle_) {
     other.handle_ = nullptr;
   }
+  LocalHandle& operator=(LocalHandle&& other) noexcept {
+    if (this == &other) return *this;
+    if (handle_ && handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+    handle_ = other.handle_;
+    other.handle_ = nullptr;
+    return *this;
+  }
+
   HANDLE get() const { return handle_; }
+  HANDLE release() {
+    HANDLE handle = handle_;
+    handle_ = nullptr;
+    return handle;
+  }
   explicit operator bool() const {
     return handle_ && handle_ != INVALID_HANDLE_VALUE;
   }
@@ -62,6 +73,48 @@ class LocalHandle {
  private:
   HANDLE handle_{nullptr};
 };
+
+LocalHandle CreateBrokerPipe(
+    const std::wstring& pipe_name,
+    bool first_instance,
+    std::wstring* error = nullptr) {
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          kPipeDacl,
+          SDDL_REVISION_1,
+          &descriptor,
+          nullptr)) {
+    SetError(error, L"Unable to create local authentication pipe security descriptor", GetLastError());
+    return {};
+  }
+
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.lpSecurityDescriptor = descriptor;
+  attributes.bInheritHandle = FALSE;
+
+  DWORD open_mode = PIPE_ACCESS_DUPLEX;
+  if (first_instance) open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+
+  SetLastError(ERROR_SUCCESS);
+  HANDLE pipe = CreateNamedPipeW(
+      pipe_name.c_str(),
+      open_mode,
+      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+      1,
+      kPipeBufferBytes,
+      kPipeBufferBytes,
+      5000,
+      &attributes);
+  const DWORD create_error = GetLastError();
+  LocalFree(descriptor);
+
+  if (pipe == INVALID_HANDLE_VALUE) {
+    SetError(error, L"Unable to create local authentication pipe", create_error);
+    return {};
+  }
+  return LocalHandle(pipe);
+}
 
 bool WriteJsonResponse(HANDLE pipe, const nlohmann::json& response) {
   const std::string payload = response.dump();
@@ -92,36 +145,21 @@ void WakeBroker(const std::wstring& pipe_name) {
 void BrokerLoop(
     std::stop_token stop_token,
     std::wstring pipe_name,
+    HANDLE initial_pipe,
     uint32_t expected_client_pid,
     std::string endpoint,
     std::string device_id,
     std::string device_credential) {
-  PSECURITY_DESCRIPTOR descriptor = nullptr;
-  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          kPipeDacl,
-          SDDL_REVISION_1,
-          &descriptor,
-          nullptr)) {
-    SecureWipe(&device_credential);
-    return;
-  }
-
-  SECURITY_ATTRIBUTES attributes{};
-  attributes.nLength = sizeof(attributes);
-  attributes.lpSecurityDescriptor = descriptor;
-  attributes.bInheritHandle = FALSE;
+  LocalHandle ready_pipe(initial_pipe);
 
   while (!stop_token.stop_requested()) {
-    LocalHandle pipe(CreateNamedPipeW(
-        pipe_name.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        1,
-        kPipeBufferBytes,
-        kPipeBufferBytes,
-        5000,
-        &attributes));
-    if (!pipe) break;
+    LocalHandle pipe;
+    if (ready_pipe) {
+      pipe = std::move(ready_pipe);
+    } else {
+      pipe = CreateBrokerPipe(pipe_name, false);
+      if (!pipe) break;
+    }
 
     const BOOL connected = ConnectNamedPipe(pipe.get(), nullptr)
         ? TRUE
@@ -132,7 +170,9 @@ void BrokerLoop(
     ULONG client_pid = 0;
     if (!GetNamedPipeClientProcessId(pipe.get(), &client_pid) ||
         client_pid != expected_client_pid) {
-      WriteJsonResponse(pipe.get(), nlohmann::json{{"ok", false}, {"error", "unauthorized local client"}});
+      WriteJsonResponse(
+          pipe.get(),
+          nlohmann::json{{"ok", false}, {"error", "unauthorized local client"}});
       DisconnectNamedPipe(pipe.get());
       continue;
     }
@@ -146,7 +186,9 @@ void BrokerLoop(
 
     const std::string command(request, read);
     if (command != "signal-token") {
-      WriteJsonResponse(pipe.get(), nlohmann::json{{"ok", false}, {"error", "unsupported request"}});
+      WriteJsonResponse(
+          pipe.get(),
+          nlohmann::json{{"ok", false}, {"error", "unsupported request"}});
       DisconnectNamedPipe(pipe.get());
       continue;
     }
@@ -177,7 +219,6 @@ void BrokerLoop(
     DisconnectNamedPipe(pipe.get());
   }
 
-  LocalFree(descriptor);
   SecureWipe(&device_credential);
 }
 
@@ -200,15 +241,34 @@ bool StartServiceAuthBroker(
 
   StopServiceAuthBroker();
 
-  std::scoped_lock lock(g_broker_mutex);
-  g_broker_pipe_name = pipe_name;
-  g_broker_thread = std::jthread(
-      BrokerLoop,
-      pipe_name,
-      expected_client_pid,
-      signal_token_endpoint,
-      device_id,
-      std::move(device_credential));
+  // Reserve and validate the first named-pipe instance synchronously. This makes
+  // StartServiceAuthBroker fail closed if the object cannot be created or if a
+  // conflicting instance already exists, rather than reporting success merely
+  // because the worker thread was launched.
+  LocalHandle first_pipe = CreateBrokerPipe(pipe_name, true, error);
+  if (!first_pipe) {
+    SecureWipe(&device_credential);
+    return false;
+  }
+
+  HANDLE first_pipe_handle = first_pipe.release();
+  try {
+    std::scoped_lock lock(g_broker_mutex);
+    g_broker_pipe_name = pipe_name;
+    g_broker_thread = std::jthread(
+        BrokerLoop,
+        pipe_name,
+        first_pipe_handle,
+        expected_client_pid,
+        signal_token_endpoint,
+        device_id,
+        std::move(device_credential));
+  } catch (...) {
+    CloseHandle(first_pipe_handle);
+    SecureWipe(&device_credential);
+    SetError(error, L"Unable to start local authentication broker worker");
+    return false;
+  }
   return true;
 }
 
