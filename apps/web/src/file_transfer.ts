@@ -632,7 +632,9 @@ function pumpDownloadReads(job: DownloadJob) {
 
 async function writeDownloadChunk(job: DownloadJob, offset: number, payload: Uint8Array) {
   if (job.sink.kind === "filesystem") {
-    await job.sink.writable.write({ type: "write", position: offset, data: payload });
+    const copy = new ArrayBuffer(payload.byteLength);
+    new Uint8Array(copy).set(payload);
+    await job.sink.writable.write({ type: "write", position: offset, data: copy });
   } else {
     job.sink.chunks.push(payload.slice());
   }
