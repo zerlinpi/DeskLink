@@ -8,12 +8,13 @@ For an unattended Windows host, the intended production flow is:
 
 1. The server keeps `DESKLINK_DEVICE_AUTH_SECRET`, `DESKLINK_SIGNAL_AUTH_SECRET` and `DESKLINK_TURN_AUTH_SECRET` private.
 2. An administrator provisions one long-lived device credential for an exact `deviceId`.
-3. The Windows host stores only that device credential plus the public HTTPS endpoint URLs.
-4. Before connecting to signaling, the Agent sends the device credential only to `GET /api/v1/signal-token?deviceId=...` over HTTPS.
-5. The server returns a short-lived signaling registration token. Default lifetime is 15 minutes and the server refuses configured lifetimes above one hour.
-6. The Agent uses that short-lived token in the WebSocket registration request.
-7. Before creating a new PeerConnection, the Agent refreshes the short-lived signaling token again and uses it to request temporary TURN REST credentials.
-8. The coturn shared secret never leaves the server/relay configuration.
+3. The Windows Service stores that credential with machine-scope Windows DPAPI under `%ProgramData%\DeskLink`.
+4. The Service decrypts it only when launching the user-session Agent and injects it into that child process environment.
+5. Before connecting to signaling, the Agent sends the device credential only to `GET /api/v1/signal-token?deviceId=...` over HTTPS.
+6. The server returns a short-lived signaling registration token. Default lifetime is 15 minutes and the server refuses configured lifetimes above one hour.
+7. The Agent uses that short-lived token in the WebSocket registration request.
+8. Before creating a new PeerConnection, the Agent refreshes the short-lived signaling token again and uses it to request temporary TURN REST credentials.
+9. The coturn shared secret never leaves the server/relay configuration.
 
 The long-lived device credential is never placed in a WebSocket URL, SDP, ICE candidate, DataChannel message or TURN password.
 
@@ -42,11 +43,10 @@ go run .\tools\auth\mint-device-credential.go win-office-01
 
 Copy only the printed `dc1....` value to that Windows host. Do not copy `DESKLINK_DEVICE_AUTH_SECRET` to the host.
 
-Configure the host as machine-level settings for the current Service-based deployment:
+Configure non-secret host settings as machine-level values:
 
 ```powershell
 setx /M DESKLINK_DEVICE_ID "win-office-01"
-setx /M DESKLINK_DEVICE_CREDENTIAL "dc1.REPLACE_ME"
 setx /M DESKLINK_SIGNAL_TOKEN_URL "https://control.example.com/api/v1/signal-token"
 setx /M DESKLINK_SIGNAL_TOKEN_REQUIRED "1"
 setx /M DESKLINK_SIGNAL_URL "wss://control.example.com/ws"
@@ -54,11 +54,56 @@ setx /M DESKLINK_TURN_CREDENTIALS_URL "https://control.example.com/api/v1/turn-c
 setx /M DESKLINK_TURN_RUNTIME_REQUIRED "1"
 ```
 
-Restart the DeskLink Service after changing machine environment variables.
+Then, from an elevated terminal in the DeskLink installation directory, store the long-lived credential using the Service-owned DPAPI store:
+
+```powershell
+.\desklink-service.exe --store-device-credential
+```
+
+Paste the `dc1....` value when prompted. Console echo is disabled while the credential is entered.
+
+The encrypted blob is stored at:
+
+```text
+%ProgramData%\DeskLink\device-credential.dpapi
+```
+
+The file and directory ACL are restricted to LocalSystem and local Administrators. The Service uses machine-scope DPAPI and never prints the credential.
+
+Restart the DeskLink Service after provisioning:
+
+```powershell
+Restart-Service DeskLink
+```
+
+To remove the protected credential:
+
+```powershell
+.\desklink-service.exe --clear-device-credential
+```
+
+### Migration from the old environment-variable method
+
+For backward compatibility, if no protected DPAPI credential exists, the Service still launches the Agent with its normal environment. This keeps existing development/test installations working.
+
+When a DPAPI credential exists, it takes precedence: the Service removes any inherited `DESKLINK_DEVICE_CREDENTIAL` entry from the child environment and inserts the decrypted protected value instead.
+
+After verifying the DPAPI migration, remove the old plaintext machine variable:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "DESKLINK_DEVICE_CREDENTIAL",
+  $null,
+  [EnvironmentVariableTarget]::Machine
+)
+Restart-Service DeskLink
+```
+
+If the DPAPI file exists but is corrupt, unreadable or cannot be decrypted, Agent launch fails closed and enters the Service retry backoff. DeskLink does not silently fall back to a stale plaintext credential in that case.
 
 ## Revoke one device
 
-DeskLink can now revoke one `deviceId` without rotating the master device secret.
+DeskLink can revoke one `deviceId` without rotating the master device secret.
 
 For a small emergency list, set a comma/space/newline-separated value:
 
@@ -92,11 +137,13 @@ With `DESKLINK_TURN_RUNTIME_REQUIRED=1`, a failed TURN credential exchange disab
 
 ## Current security boundary and limitation
 
-The `dc1` credential is currently derived from a server master secret and the exact `deviceId` using HMAC-SHA256. The new revocation list allows an individual device to be disabled without invalidating every other host.
+The `dc1` credential is currently derived from a server master secret and the exact `deviceId` using HMAC-SHA256. The revocation list allows an individual device to be disabled without invalidating every other host.
 
 However, `dc1` remains deterministic for a given master secret and `deviceId`. If that credential is leaked, removing the device from the revocation list would make the leaked credential valid again. A truly independent per-device credential rotation still requires a device registry that stores separate per-device credential hashes/keys and supports rotation, ownership transfer and audit history.
 
-Machine environment variables are also a deployment bridge, not the final Windows secret store. A hardened installer should move the long-lived device credential into Windows-protected storage (for example a service-owned DPAPI-protected secret) and pass only short-lived material to the user-session Agent.
+DPAPI now protects the long-lived device credential **at rest** on Windows. This is not yet the final runtime boundary: the user-session Agent still receives the credential in its process environment because the Agent currently performs the HTTPS short-token exchange itself. The next hardening step is a Service-owned local authentication broker so the long-lived credential never enters the user-session Agent and the Agent receives only short-lived signal/TURN material.
+
+Local administrators and LocalSystem remain inside the machine trust boundary for machine-scope DPAPI.
 
 ## Browser controllers
 
