@@ -1,6 +1,7 @@
 #include "h264_annexb.h"
 
 #include <algorithm>
+#include <iterator>
 
 namespace desklink {
 namespace {
@@ -120,30 +121,44 @@ bool NormalizeH264SequenceHeader(
     const uint8_t* data,
     size_t size,
     std::vector<uint8_t>* annexb,
-    uint8_t* nal_length_size) {
-  if (!data || size == 0 || !annexb || !nal_length_size) return false;
+    uint8_t* nal_length_size,
+    bool* access_units_length_prefixed) {
+  if (!data || size == 0 || !annexb || !nal_length_size || !access_units_length_prefixed) {
+    return false;
+  }
 
   if (H264LooksAnnexB(data, size)) {
     annexb->assign(data, data + size);
+    *access_units_length_prefixed = false;
     return true;
   }
 
-  return ParseAvcDecoderConfigurationRecord(data, size, annexb, nal_length_size);
+  if (!ParseAvcDecoderConfigurationRecord(data, size, annexb, nal_length_size)) return false;
+  *access_units_length_prefixed = true;
+  return true;
 }
 
 bool NormalizeH264AccessUnit(
     const uint8_t* data,
     size_t size,
     uint8_t nal_length_size,
+    bool access_units_length_prefixed,
     std::vector<uint8_t>* annexb) {
   if (!data || size == 0 || !annexb) return false;
 
-  if (H264LooksAnnexB(data, size)) {
-    annexb->assign(data, data + size);
-    return true;
+  if (access_units_length_prefixed) {
+    if (ConvertLengthPrefixed(data, size, nal_length_size, annexb)) return true;
+    if (H264LooksAnnexB(data, size)) {
+      annexb->assign(data, data + size);
+      return true;
+    }
+  } else {
+    if (H264LooksAnnexB(data, size)) {
+      annexb->assign(data, data + size);
+      return true;
+    }
+    if (ConvertLengthPrefixed(data, size, nal_length_size, annexb)) return true;
   }
-
-  if (ConvertLengthPrefixed(data, size, nal_length_size, annexb)) return true;
 
   // Some MFTs omit/lose sequence-header metadata but still emit the common
   // four-byte length-prefixed format. Try that as a conservative fallback.
