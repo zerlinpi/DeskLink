@@ -19,6 +19,13 @@ type PointerPayload = {
   buttons: number;
 };
 
+type StatsBaseline = {
+  atMs: number;
+  packetsReceived: number;
+  packetsLost: number;
+  framesDecoded: number;
+};
+
 const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL ?? "ws://localhost:8080/ws";
 const STUN_URL = import.meta.env.VITE_STUN_URL ?? "stun:stun.l.google.com:19302";
 const TURN_URL = import.meta.env.VITE_TURN_URL ?? "turn:localhost:3478";
@@ -47,6 +54,8 @@ function App() {
   const sessionRef = useRef(crypto.randomUUID());
   const pendingMoveRef = useRef<PointerPayload | null>(null);
   const pointerRafRef = useRef<number | null>(null);
+  const statsTimerRef = useRef<number | null>(null);
+  const statsBaselineRef = useRef<StatsBaseline | null>(null);
 
   const sendSignal = (type: string, payload: any = {}) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) return;
@@ -61,6 +70,85 @@ function App() {
   const sendPointerFast = (payload: object) => {
     const channel = pointerRef.current;
     if (channel?.readyState === "open") channel.send(JSON.stringify(payload));
+  };
+
+  const stopTelemetry = () => {
+    if (statsTimerRef.current !== null) window.clearInterval(statsTimerRef.current);
+    statsTimerRef.current = null;
+    statsBaselineRef.current = null;
+  };
+
+  const collectTelemetry = async (pc: RTCPeerConnection) => {
+    if (pc.connectionState !== "connected" || controlRef.current?.readyState !== "open") return;
+
+    try {
+      const report = await pc.getStats();
+      let inboundVideo: any = null;
+      let selectedPair: any = null;
+      let selectedPairId = "";
+
+      report.forEach((raw) => {
+        const stat = raw as any;
+        if (stat.type === "transport" && stat.selectedCandidatePairId) {
+          selectedPairId = stat.selectedCandidatePairId;
+        }
+        if (stat.type === "inbound-rtp" && stat.kind === "video" && !stat.isRemote) {
+          inboundVideo = stat;
+        }
+      });
+
+      report.forEach((raw) => {
+        const stat = raw as any;
+        if (stat.type !== "candidate-pair" || stat.state !== "succeeded") return;
+        if (selectedPairId ? stat.id === selectedPairId : stat.nominated) selectedPair = stat;
+      });
+
+      if (!inboundVideo) return;
+
+      const nowMs = performance.now();
+      const current: StatsBaseline = {
+        atMs: nowMs,
+        packetsReceived: Number(inboundVideo.packetsReceived ?? 0),
+        packetsLost: Number(inboundVideo.packetsLost ?? 0),
+        framesDecoded: Number(inboundVideo.framesDecoded ?? 0),
+      };
+      const previous = statsBaselineRef.current;
+      statsBaselineRef.current = current;
+      if (!previous) return;
+
+      const elapsedSeconds = Math.max(0.25, (current.atMs - previous.atMs) / 1000);
+      const receivedDelta = Math.max(0, current.packetsReceived - previous.packetsReceived);
+      const lostDelta = Math.max(0, current.packetsLost - previous.packetsLost);
+      const packetDelta = receivedDelta + lostDelta;
+      const lossPct = packetDelta > 0 ? (lostDelta / packetDelta) * 100 : 0;
+      const decodeFps = Math.max(0, current.framesDecoded - previous.framesDecoded) / elapsedSeconds;
+      const rttMs = selectedPair?.currentRoundTripTime != null
+        ? Number(selectedPair.currentRoundTripTime) * 1000
+        : null;
+      const jitterMs = inboundVideo.jitter != null ? Number(inboundVideo.jitter) * 1000 : null;
+      const availableIncomingBitrate = selectedPair?.availableIncomingBitrate != null
+        ? Number(selectedPair.availableIncomingBitrate)
+        : null;
+
+      sendReliable({
+        t: "telemetry",
+        rttMs,
+        lossPct,
+        decodeFps,
+        jitterMs,
+        framesDropped: Number(inboundVideo.framesDropped ?? 0),
+        availableIncomingBitrate,
+      });
+    } catch (error) {
+      console.debug("DeskLink telemetry collection failed", error);
+    }
+  };
+
+  const startTelemetry = (pc: RTCPeerConnection) => {
+    stopTelemetry();
+    statsTimerRef.current = window.setInterval(() => {
+      void collectTelemetry(pc);
+    }, 1000);
   };
 
   const pointFromEvent = (
@@ -104,11 +192,18 @@ function App() {
     pc.onicecandidate = (event) => {
       if (event.candidate) sendSignal("ice", event.candidate.toJSON());
     };
-    pc.onconnectionstatechange = () => setStatus(pc.connectionState);
+    pc.onconnectionstatechange = () => {
+      setStatus(pc.connectionState);
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") stopTelemetry();
+    };
 
     const control = pc.createDataChannel("control", { ordered: true });
     controlRef.current = control;
-    control.onopen = () => setStatus("control ready");
+    control.onopen = () => {
+      setStatus("control ready");
+      startTelemetry(pc);
+    };
+    control.onclose = stopTelemetry;
 
     // Mouse movement can discard stale packets. This prevents head-of-line blocking
     // from making the remote cursor feel sticky when a packet is lost.
@@ -122,6 +217,7 @@ function App() {
   };
 
   const disconnect = (nextStatus = "idle") => {
+    stopTelemetry();
     if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
     pointerRafRef.current = null;
     pendingMoveRef.current = null;
