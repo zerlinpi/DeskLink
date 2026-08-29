@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	pendingHostAuthTTL          = 30 * time.Second
-	hostAuthDispatchDedupeTTL   = 3 * time.Second
-	maxPendingHostAuthGlobal    = 512
-	maxPendingHostAuthPerTarget = 32
+	pendingHostAuthTTL            = 30 * time.Second
+	hostAuthDispatchDedupeTTL     = 3 * time.Second
+	maxPendingHostAuthGlobal      = 512
+	maxPendingHostAuthPerTarget   = 32
+	maxHostAuthDispatchEntries    = 4096
 )
 
 type pendingHostAuthSignal struct {
@@ -35,6 +36,10 @@ func newPendingHostAuthQueue() *pendingHostAuthQueue {
 
 func pendingHostAuthKey(from, session string) string {
 	return from + "\x00" + session
+}
+
+func shouldQueuePendingHostAuth(source *peer, messageType string) bool {
+	return source != nil && source.controller && messageType == "auth-request"
 }
 
 func (q *pendingHostAuthQueue) pruneExpiredLocked(now time.Time) {
@@ -123,8 +128,8 @@ type hostAuthDispatchKey struct {
 }
 
 type hostAuthDispatchGuard struct {
-	mu      sync.Mutex
-	recent  map[hostAuthDispatchKey]time.Time
+	mu     sync.Mutex
+	recent map[hostAuthDispatchKey]time.Time
 }
 
 func newHostAuthDispatchGuard() *hostAuthDispatchGuard {
@@ -153,6 +158,16 @@ func (g *hostAuthDispatchGuard) claim(
 	if expiresAt, exists := g.recent[key]; exists && expiresAt.After(now) {
 		return false
 	}
+	if len(g.recent) >= maxHostAuthDispatchEntries {
+		// The map normally contains only a few seconds of traffic. Keep a hard
+		// ceiling anyway so authenticated request floods cannot grow it without
+		// bound. Evicting one dedupe entry is preferable to refusing a legitimate
+		// reconnect or retaining unbounded connection pointers.
+		for oldestCandidate := range g.recent {
+			delete(g.recent, oldestCandidate)
+			break
+		}
+	}
 	g.recent[key] = now.Add(hostAuthDispatchDedupeTTL)
 	return true
 }
@@ -166,7 +181,7 @@ func flushPendingHostAuthRequests(h *hub, target *peer, metrics *signalMetrics) 
 	requests := pendingHostAuthRequests.take(target.id, time.Now())
 	for index, request := range requests {
 		source := h.get(request.from)
-		if source == nil || !source.canSignalTarget(target.id) {
+		if source == nil || !source.controller || !source.canSignalTarget(target.id) {
 			metrics.pendingHostAuthDropped.Add(1)
 			continue
 		}
