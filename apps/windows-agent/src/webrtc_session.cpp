@@ -1,12 +1,17 @@
 #include "webrtc_session.h"
 
+#include <windows.h>
+#include <bcrypt.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <regex>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 #include <rtc/h264rtppacketizer.hpp>
@@ -26,6 +31,9 @@ namespace {
 constexpr rtc::SSRC kVideoSsrc = 42;
 constexpr char kVideoCname[] = "desklink-video";
 constexpr char kVideoMsid[] = "desklink-stream";
+constexpr auto kAccessChallengeLifetime = 15s;
+constexpr size_t kMaxPendingAccessChallenges = 64;
+constexpr char kAccessProofAlgorithm[] = "hmac-sha256-v1";
 
 double JsonNumber(const json& object, const char* key, double fallback = 0.0) {
   const auto it = object.find(key);
@@ -126,6 +134,135 @@ uint32_t EffectivePacingBitrate(const SessionConfig& config) {
       default_pacing,
       500'000,
       60'000'000);
+}
+
+std::string HexEncode(const UCHAR* bytes, size_t size) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string result(size * 2, '0');
+  for (size_t i = 0; i < size; ++i) {
+    result[i * 2] = kHex[(bytes[i] >> 4) & 0x0f];
+    result[i * 2 + 1] = kHex[bytes[i] & 0x0f];
+  }
+  return result;
+}
+
+bool RandomNonceHex(std::string* nonce) {
+  if (!nonce) return false;
+  std::vector<UCHAR> bytes(32);
+  const NTSTATUS status = BCryptGenRandom(
+      nullptr,
+      bytes.data(),
+      static_cast<ULONG>(bytes.size()),
+      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+  if (!BCRYPT_SUCCESS(status)) return false;
+  *nonce = HexEncode(bytes.data(), bytes.size());
+  SecureZeroMemory(bytes.data(), bytes.size());
+  return true;
+}
+
+bool HmacSha256Hex(
+    const std::string& key,
+    const std::string& message,
+    std::string* digest_hex) {
+  if (!digest_hex || key.empty() ||
+      key.size() > std::numeric_limits<ULONG>::max() ||
+      message.size() > std::numeric_limits<ULONG>::max()) {
+    return false;
+  }
+
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  DWORD object_length = 0;
+  DWORD hash_length = 0;
+  DWORD bytes_written = 0;
+  std::vector<UCHAR> hash_object;
+  std::vector<UCHAR> digest;
+
+  NTSTATUS status = BCryptOpenAlgorithmProvider(
+      &algorithm,
+      BCRYPT_SHA256_ALGORITHM,
+      nullptr,
+      BCRYPT_ALG_HANDLE_HMAC_FLAG);
+  if (!BCRYPT_SUCCESS(status)) return false;
+
+  auto cleanup = [&]() {
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (!hash_object.empty()) SecureZeroMemory(hash_object.data(), hash_object.size());
+    if (!digest.empty()) SecureZeroMemory(digest.data(), digest.size());
+  };
+
+  status = BCryptGetProperty(
+      algorithm,
+      BCRYPT_OBJECT_LENGTH,
+      reinterpret_cast<PUCHAR>(&object_length),
+      sizeof(object_length),
+      &bytes_written,
+      0);
+  if (!BCRYPT_SUCCESS(status) || object_length == 0) {
+    cleanup();
+    return false;
+  }
+  status = BCryptGetProperty(
+      algorithm,
+      BCRYPT_HASH_LENGTH,
+      reinterpret_cast<PUCHAR>(&hash_length),
+      sizeof(hash_length),
+      &bytes_written,
+      0);
+  if (!BCRYPT_SUCCESS(status) || hash_length == 0) {
+    cleanup();
+    return false;
+  }
+
+  hash_object.resize(object_length);
+  digest.resize(hash_length);
+  status = BCryptCreateHash(
+      algorithm,
+      &hash,
+      hash_object.data(),
+      static_cast<ULONG>(hash_object.size()),
+      const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(key.data())),
+      static_cast<ULONG>(key.size()),
+      0);
+  if (!BCRYPT_SUCCESS(status)) {
+    cleanup();
+    return false;
+  }
+  status = BCryptHashData(
+      hash,
+      const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(message.data())),
+      static_cast<ULONG>(message.size()),
+      0);
+  if (!BCRYPT_SUCCESS(status)) {
+    cleanup();
+    return false;
+  }
+  status = BCryptFinishHash(
+      hash,
+      digest.data(),
+      static_cast<ULONG>(digest.size()),
+      0);
+  if (!BCRYPT_SUCCESS(status)) {
+    cleanup();
+    return false;
+  }
+
+  *digest_hex = HexEncode(digest.data(), digest.size());
+  cleanup();
+  return true;
+}
+
+std::string AccessSessionKey(const std::string& controller, const std::string& session) {
+  return controller + "\n" + session;
+}
+
+std::string AccessProofMessage(
+    const std::string& controller,
+    const std::string& host,
+    const std::string& session,
+    const std::string& nonce) {
+  return "DeskLink access proof v1\n" + controller + "\n" + host + "\n" + session + "\n" + nonce;
 }
 }  // namespace
 
@@ -304,6 +441,8 @@ void WebRtcSession::Stop() {
     ws = std::move(websocket_);
     controller_id_.clear();
     session_id_.clear();
+    pending_access_challenges_.clear();
+    authorized_offer_sessions_.clear();
   }
   if (peer) peer->close();
   if (ws) ws->close();
@@ -374,17 +513,25 @@ void WebRtcSession::HandleSignal(const std::string& text) {
     return;
   }
 
+  const std::string from = message.value("from", "");
+  const std::string session = message.value("session", "");
+  if (type == "auth-request") {
+    if (from.empty() || session.empty()) return;
+    HandleAuthRequest(from, session);
+    return;
+  }
+  if (type == "auth-proof") {
+    if (from.empty() || session.empty() || !message.contains("payload")) return;
+    HandleAuthProof(from, session, message["payload"]);
+    return;
+  }
   if (type == "offer") {
-    const std::string from = message.value("from", "");
-    const std::string session = message.value("session", "");
     if (from.empty() || session.empty() || !message.contains("payload")) return;
     HandleOffer(from, session, message["payload"]);
     return;
   }
 
   if (type == "ice" && message.contains("payload")) {
-    const std::string from = message.value("from", "");
-    const std::string session = message.value("session", "");
     bool authorized_session = false;
     {
       std::scoped_lock lock(mutex_);
@@ -425,14 +572,11 @@ uint8_t WebRtcSession::FindH264PayloadType(const std::string& sdp) {
   return 0;
 }
 
-void WebRtcSession::HandleOffer(
+void WebRtcSession::HandleAuthRequest(
     const std::string& from,
-    const std::string& session,
-    const json& payload) {
-  if (!payload.is_object()) return;
-
+    const std::string& session) {
   if (config_.access_code.empty()) {
-    std::cerr << "Rejected remote session: DESKLINK_ACCESS_CODE is not configured\n";
+    std::cerr << "Rejected remote session: access code is not configured\n";
     SendSignalTo(
         from,
         session,
@@ -441,20 +585,156 @@ void WebRtcSession::HandleOffer(
     return;
   }
 
-  const std::string supplied_access_code = payload.value("accessCode", "");
-  if (!ConstantTimeEquals(supplied_access_code, config_.access_code)) {
-    std::cerr << "Rejected remote session from " << from << ": invalid access code\n";
-    SendSignalTo(
-        from,
-        session,
-        "auth-rejected",
-        json{{"reason", "invalid-access-code"}});
+  std::string nonce;
+  if (!RandomNonceHex(&nonce)) {
+    std::cerr << "Unable to generate access-code challenge\n";
+    SendSignalTo(from, session, "auth-rejected", json{{"reason", "auth-unavailable"}});
     return;
   }
+
+  const auto now = std::chrono::steady_clock::now();
+  const std::string key = AccessSessionKey(from, session);
+  bool capacity_available = true;
+  {
+    std::scoped_lock lock(mutex_);
+    for (auto it = pending_access_challenges_.begin(); it != pending_access_challenges_.end();) {
+      if (it->second.expires <= now) {
+        it = pending_access_challenges_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = authorized_offer_sessions_.begin(); it != authorized_offer_sessions_.end();) {
+      if (it->second <= now) {
+        it = authorized_offer_sessions_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    if (!pending_access_challenges_.contains(key) &&
+        pending_access_challenges_.size() >= kMaxPendingAccessChallenges) {
+      capacity_available = false;
+    } else {
+      authorized_offer_sessions_.erase(key);
+      pending_access_challenges_[key] = PendingAccessChallenge{
+          nonce,
+          now + kAccessChallengeLifetime,
+      };
+    }
+  }
+
+  if (!capacity_available) {
+    SendSignalTo(from, session, "auth-rejected", json{{"reason", "auth-busy"}});
+    return;
+  }
+
+  SendSignalTo(
+      from,
+      session,
+      "auth-challenge",
+      json{{"algorithm", kAccessProofAlgorithm}, {"nonce", nonce}, {"expiresInMs", 15000}});
+}
+
+void WebRtcSession::HandleAuthProof(
+    const std::string& from,
+    const std::string& session,
+    const json& payload) {
+  if (!payload.is_object()) return;
+  const std::string proof = payload.value("proof", "");
+  if (proof.size() != 64) {
+    SendSignalTo(from, session, "auth-rejected", json{{"reason", "invalid-access-proof"}});
+    return;
+  }
+
+  const std::string key = AccessSessionKey(from, session);
+  const auto now = std::chrono::steady_clock::now();
+  std::string nonce;
+  bool challenge_valid = false;
+  {
+    std::scoped_lock lock(mutex_);
+    const auto it = pending_access_challenges_.find(key);
+    if (it != pending_access_challenges_.end()) {
+      nonce = it->second.nonce;
+      challenge_valid = it->second.expires > now;
+      pending_access_challenges_.erase(it);
+    }
+  }
+
+  if (!challenge_valid) {
+    SendSignalTo(from, session, "auth-rejected", json{{"reason", "challenge-expired"}});
+    return;
+  }
+
+  std::string expected_proof;
+  const std::string proof_message = AccessProofMessage(
+      from,
+      config_.device_id,
+      session,
+      nonce);
+  if (!HmacSha256Hex(config_.access_code, proof_message, &expected_proof)) {
+    SendSignalTo(from, session, "auth-rejected", json{{"reason", "auth-unavailable"}});
+    return;
+  }
+
+  if (!ConstantTimeEquals(proof, expected_proof)) {
+    std::cerr << "Rejected remote session from " << from << ": invalid access proof\n";
+    SendSignalTo(from, session, "auth-rejected", json{{"reason", "invalid-access-code"}});
+    return;
+  }
+
+  {
+    std::scoped_lock lock(mutex_);
+    for (auto it = authorized_offer_sessions_.begin(); it != authorized_offer_sessions_.end();) {
+      if (it->second <= now) {
+        it = authorized_offer_sessions_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (authorized_offer_sessions_.size() >= kMaxPendingAccessChallenges) {
+      authorized_offer_sessions_.clear();
+    }
+    authorized_offer_sessions_[key] = now + kAccessChallengeLifetime;
+  }
+
+  std::cout << "Verified one-time access proof from " << from << "\n";
+  SendSignalTo(from, session, "auth-accepted", json{{"version", 1}});
+}
+
+void WebRtcSession::HandleOffer(
+    const std::string& from,
+    const std::string& session,
+    const json& payload) {
+  if (!payload.is_object()) return;
 
   const std::string sdp = payload.value("sdp", "");
   const std::string description_type = payload.value("type", "offer");
   if (sdp.empty()) return;
+
+  std::shared_ptr<rtc::PeerConnection> existing_peer;
+  bool newly_authorized = false;
+  const auto now = std::chrono::steady_clock::now();
+  const std::string authorization_key = AccessSessionKey(from, session);
+  {
+    std::scoped_lock lock(mutex_);
+    if (peer_ && from == controller_id_ && session == session_id_ &&
+        peer_->state() != rtc::PeerConnection::State::Closed) {
+      existing_peer = peer_;
+    } else {
+      const auto authorized = authorized_offer_sessions_.find(authorization_key);
+      if (authorized != authorized_offer_sessions_.end()) {
+        newly_authorized = authorized->second > now;
+        authorized_offer_sessions_.erase(authorized);
+      }
+    }
+  }
+
+  if (!existing_peer && !newly_authorized) {
+    std::cerr << "Rejected unauthenticated offer from " << from << "\n";
+    SendSignalTo(from, session, "auth-rejected", json{{"reason", "auth-required"}});
+    return;
+  }
 
   const uint8_t h264_payload_type = FindH264PayloadType(sdp);
   if (h264_payload_type == 0) {
@@ -463,19 +743,9 @@ void WebRtcSession::HandleOffer(
     std::cout << "Negotiated H264 RTP payload type " << static_cast<int>(h264_payload_type) << "\n";
   }
 
-  std::shared_ptr<rtc::PeerConnection> existing_peer;
-  {
-    std::scoped_lock lock(mutex_);
-    if (peer_ && from == controller_id_ && session == session_id_ &&
-        peer_->state() != rtc::PeerConnection::State::Closed) {
-      existing_peer = peer_;
-    }
-  }
-
   if (existing_peer) {
-    // ICE restarts and network-path changes must renegotiate the already-authorized
-    // session in place. Replacing PeerConnection here would unnecessarily tear down
-    // the current DataChannels and can invalidate a browser-side ICE restart.
+    // ICE restarts and network-path changes renegotiate the already-authorized
+    // active session in place. A closed/replaced session must authenticate again.
     std::cout << "Renegotiating authorized session from " << from << "\n";
     existing_peer->setRemoteDescription(rtc::Description(sdp, description_type));
     return;
