@@ -15,6 +15,8 @@
 #include <rtc/rtcpsrreporter.hpp>
 #include <rtc/rtcpnackresponder.hpp>
 
+#include "turn_credential_client.h"
+
 namespace desklink {
 using nlohmann::json;
 using namespace std::chrono_literals;
@@ -478,18 +480,48 @@ void WebRtcSession::CreatePeer(
   if (!config_.stun_url.empty()) {
     rtc_config.iceServers.emplace_back(config_.stun_url);
   }
-  if (!config_.turn_host.empty() && !config_.turn_username.empty()) {
+
+  std::string turn_username = config_.turn_username;
+  std::string turn_password = config_.turn_password;
+  const std::string credential_endpoint = EnvString("DESKLINK_TURN_CREDENTIALS_URL");
+  if (!credential_endpoint.empty()) {
+    RuntimeTurnCredentials credentials;
+    std::string credential_error;
+    const std::string signal_auth_token = EnvString("DESKLINK_SIGNAL_AUTH_TOKEN");
+    if (FetchRuntimeTurnCredentials(
+            credential_endpoint,
+            config_.device_id,
+            signal_auth_token,
+            &credentials,
+            &credential_error)) {
+      turn_username = std::move(credentials.username);
+      turn_password = std::move(credentials.password);
+      std::cout << "Loaded temporary TURN credentials for this session; expires at "
+                << credentials.expires_at << "\n";
+    } else {
+      std::cerr << "Temporary TURN credential fetch failed: " << credential_error << "\n";
+      if (EnvString("DESKLINK_TURN_RUNTIME_REQUIRED") == "1") {
+        turn_username.clear();
+        turn_password.clear();
+        std::cerr << "TURN disabled because runtime credentials are required\n";
+      } else {
+        std::cerr << "Falling back to configured static TURN credentials\n";
+      }
+    }
+  }
+
+  if (!config_.turn_host.empty() && !turn_username.empty() && !turn_password.empty()) {
     rtc_config.iceServers.emplace_back(
         config_.turn_host,
         config_.turn_port,
-        config_.turn_username,
-        config_.turn_password,
+        turn_username,
+        turn_password,
         rtc::IceServer::RelayType::TurnUdp);
     rtc_config.iceServers.emplace_back(
         config_.turn_host,
         config_.turn_port,
-        config_.turn_username,
-        config_.turn_password,
+        turn_username,
+        turn_password,
         rtc::IceServer::RelayType::TurnTcp);
 
     const uint32_t turn_tls_port = EnvUIntOr(
@@ -501,8 +533,8 @@ void WebRtcSession::CreatePeer(
       rtc_config.iceServers.emplace_back(
           config_.turn_host,
           static_cast<uint16_t>(turn_tls_port),
-          config_.turn_username,
-          config_.turn_password,
+          turn_username,
+          turn_password,
           rtc::IceServer::RelayType::TurnTls);
       std::cout << "TURN TLS fallback enabled on port " << turn_tls_port << "\n";
     }
