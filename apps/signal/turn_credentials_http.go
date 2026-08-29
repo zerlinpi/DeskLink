@@ -50,8 +50,8 @@ func setCredentialCORS(w http.ResponseWriter, r *http.Request) bool {
 
 func turnCredentialHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if os.Getenv("DESKLINK_SIGNAL_AUTH_SECRET") == "" ||
-			os.Getenv("DESKLINK_TURN_AUTH_SECRET") == "" {
+		signalSecret := os.Getenv("DESKLINK_SIGNAL_AUTH_SECRET")
+		if signalSecret == "" || os.Getenv("DESKLINK_TURN_AUTH_SECRET") == "" {
 			http.NotFound(w, r)
 			return
 		}
@@ -70,12 +70,32 @@ func turnCredentialHandler() http.HandlerFunc {
 			return
 		}
 
-		deviceID := r.URL.Query().Get("deviceId")
-		if !validDeviceID(deviceID) {
+		peerID := r.URL.Query().Get("deviceId")
+		if !validDeviceID(peerID) {
 			http.Error(w, "valid deviceId is required", http.StatusBadRequest)
 			return
 		}
-		revoked, err := deviceRevoked(deviceID)
+
+		now := time.Now()
+		scope, authorized := registrationScopeForToken(
+			signalSecret,
+			peerID,
+			bearerToken(r),
+			now,
+		)
+		if !authorized {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Host tokens are bound directly to the host peer ID. Controller tokens
+		// are bound to an ephemeral browser peer and a separate target device; in
+		// that case revocation must follow the authorized target, not the web ID.
+		revocationID := peerID
+		if scope.Controller {
+			revocationID = scope.AllowedTarget
+		}
+		revoked, err := deviceRevoked(revocationID)
 		if err != nil {
 			http.Error(w, "device revocation state unavailable", http.StatusServiceUnavailable)
 			return
@@ -85,20 +105,9 @@ func turnCredentialHandler() http.HandlerFunc {
 			return
 		}
 
-		now := time.Now()
-		if !validateSignalAuthToken(
-			os.Getenv("DESKLINK_SIGNAL_AUTH_SECRET"),
-			deviceID,
-			bearerToken(r),
-			now,
-		) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
 		credentials, err := mintTurnCredentials(
 			os.Getenv("DESKLINK_TURN_AUTH_SECRET"),
-			deviceID,
+			peerID,
 			turnCredentialTTL(),
 			now,
 		)
