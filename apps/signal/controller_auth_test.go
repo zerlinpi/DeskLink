@@ -163,3 +163,25 @@ func TestControllerPeerCannotSignalOutsideScope(t *testing.T) {
 		t.Fatal("controller peer was allowed to signal outside its token scope")
 	}
 }
+
+func TestWebSocketRegistrationTokenReadsControllerSubprotocol(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws?deviceId=web-1234abcd", nil)
+	req.Header.Set(
+		"Sec-WebSocket-Protocol",
+		"desklink-v1, "+controllerAuthProtocolPrefix+"ct1.123.office.signature",
+	)
+	if got := websocketRegistrationToken(req); got != "ct1.123.office.signature" {
+		t.Fatalf("unexpected websocket controller token %q", got)
+	}
+}
+
+func TestWebSocketRegistrationTokenKeepsLegacyQueryPriority(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws?deviceId=office-pc&auth=legacy-host-token", nil)
+	req.Header.Set(
+		"Sec-WebSocket-Protocol",
+		"desklink-v1, "+controllerAuthProtocolPrefix+"controller-token",
+	)
+	if got := websocketRegistrationToken(req); got != "legacy-host-token" {
+		t.Fatalf("legacy query token should take priority, got %q", got)
+	}
+}
