@@ -95,11 +95,12 @@ video {
   outline: none;
   touch-action: none;
   background: #000;
+  object-fit: contain;
   object-position: center;
+  transform: scale(var(--desklink-video-scale, 1));
+  transform-origin: center center;
+  will-change: transform;
 }
-.stage[data-view-mode="fit"] video { object-fit: contain; }
-.stage[data-view-mode="fill"] video { object-fit: cover; }
-.stage[data-view-mode="actual"] video { object-fit: none; }
 
 .empty {
   position: absolute;
