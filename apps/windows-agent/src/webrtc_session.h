@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +65,11 @@ class WebRtcSession {
   void RequestSignalingReconnect();
   void SignalingReconnectLoop(std::stop_token stop_token);
   void HandleSignal(const std::string& text);
+  void HandleAuthRequest(const std::string& from, const std::string& session);
+  void HandleAuthProof(
+      const std::string& from,
+      const std::string& session,
+      const nlohmann::json& payload);
   void HandleOffer(const std::string& from, const std::string& session, const nlohmann::json& payload);
   void HandleIce(const nlohmann::json& payload);
   void CreatePeer(const std::string& controller, const std::string& session, uint8_t h264_payload_type);
@@ -90,6 +96,12 @@ class WebRtcSession {
   mutable std::mutex mutex_;
   std::string controller_id_;
   std::string session_id_;
+  std::string pending_auth_controller_;
+  std::string pending_auth_session_;
+  std::string pending_auth_nonce_;
+  std::chrono::steady_clock::time_point pending_auth_expires_{};
+  std::string authorized_offer_controller_;
+  std::string authorized_offer_session_;
 
   std::atomic_bool stopping_{true};
   std::atomic_uint32_t reconnect_attempt_{0};
