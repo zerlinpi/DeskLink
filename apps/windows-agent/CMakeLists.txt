@@ -44,6 +44,7 @@ add_executable(desklink-agent
   src/input_injector.cpp
   src/input_injector.h
   src/performance_tuning.cpp
+  src/service_shutdown_bridge.cpp
   src/signal_token_client.cpp
   src/signal_token_client.h
   src/turn_credential_client.cpp
@@ -71,6 +72,7 @@ target_link_libraries(
     avrt
     winmm
     winhttp
+    shell32
 )
 
 add_executable(desklink-service
