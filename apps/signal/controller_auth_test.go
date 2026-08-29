@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -99,7 +100,7 @@ func TestControllerSessionHandlerIssuesTargetScopedToken(t *testing.T) {
 	t.Setenv("DESKLINK_REVOKED_DEVICE_IDS", "")
 
 	body := `{"accountId":"alice","controllerId":"web-1234abcd","targetDeviceId":"office-pc","accessKey":"ck1.good-key"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/controller-session", stringsNewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/controller-session", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
 	controllerSessionHandler(newIPGuard())(rec, req)
@@ -132,7 +133,7 @@ func TestControllerSessionRejectsUnauthorizedAndRevokedTarget(t *testing.T) {
 
 	request := func(accessKey string) *httptest.ResponseRecorder {
 		body := `{"accountId":"alice","controllerId":"web-1234abcd","targetDeviceId":"office-pc","accessKey":"` + accessKey + `"}`
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/controller-session", stringsNewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/controller-session", strings.NewReader(body))
 		req.RemoteAddr = "127.0.0.1:23456"
 		rec := httptest.NewRecorder()
 		controllerSessionHandler(newIPGuard())(rec, req)
@@ -161,10 +162,4 @@ func TestControllerPeerCannotSignalOutsideScope(t *testing.T) {
 	if p.canSignalTarget("other-pc") {
 		t.Fatal("controller peer was allowed to signal outside its token scope")
 	}
-}
-
-// Kept local so the test file does not need to expose any body helper to the
-// application package.
-func stringsNewReader(value string) *strings.Reader {
-	return strings.NewReader(value)
 }
