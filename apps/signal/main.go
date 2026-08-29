@@ -158,6 +158,7 @@ func main() {
 	guard := newIPGuard()
 	var metrics signalMetrics
 	registerMetricsHandler(&metrics)
+	http.HandleFunc("/api/v1/turn-credentials", turnCredentialHandler())
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
