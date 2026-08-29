@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"math"
 	"net/http"
 	"os"
+	osSignal "os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -79,6 +82,20 @@ func (h *hub) get(id string) *peer {
 	return h.peers[id]
 }
 
+func (h *hub) closeAll(reason string) {
+	h.mu.Lock()
+	peers := make([]*peer, 0, len(h.peers))
+	for _, p := range h.peers {
+		peers = append(peers, p)
+	}
+	h.peers = make(map[string]*peer)
+	h.mu.Unlock()
+
+	for _, p := range peers {
+		p.closeWithReason(reason)
+	}
+}
+
 func (p *peer) allowSignal() bool {
 	p.rateMu.Lock()
 	defer p.rateMu.Unlock()
@@ -105,6 +122,18 @@ func (p *peer) ping() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
+}
+
+func (p *peer) closeWithReason(reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	deadline := time.Now().Add(writeWait)
+	_ = p.conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseGoingAway, reason),
+		deadline,
+	)
+	_ = p.conn.Close()
 }
 
 func validDeviceID(id string) bool {
@@ -288,8 +317,42 @@ func main() {
 	server := &http.Server{
 		Addr:              addr,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
-	log.Printf("DeskLink signaling listening on %s", addr)
-	log.Fatal(server.ListenAndServe())
+
+	shutdownSignal, stopSignals := osSignal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stopSignals()
+
+	serveErrors := make(chan error, 1)
+	go func() {
+		log.Printf("DeskLink signaling listening on %s", addr)
+		serveErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErrors:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("signaling server stopped unexpectedly: %v", err)
+		}
+		return
+	case <-shutdownSignal.Done():
+		log.Printf("DeskLink signaling shutting down")
+	}
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownContext); err != nil {
+		log.Printf("HTTP shutdown: %v", err)
+	}
+
+	// net/http does not own hijacked WebSocket connections after Upgrade, so
+	// explicitly close them after the listener stops accepting new clients.
+	h.closeAll("signaling service restarting")
 }
