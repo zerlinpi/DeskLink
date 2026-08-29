@@ -1,6 +1,7 @@
 #pragma once
 
 #include <codecapi.h>
+#include <icodecapi.h>
 #include <d3d11.h>
 #include <mfidl.h>
 #include <wrl/client.h>
