@@ -180,7 +180,7 @@ However, plain HMAC with a human-memorable low-entropy Access Code is not a PAKE
 
 - Video: host -> controller, H.264.
 - Audio: optional, later milestone.
-- `control` DataChannel: controller -> host; ordered/reliable. Used for clicks and keyboard input that must not be lost.
+- `control` DataChannel: controller -> host; ordered/reliable. Used for clicks and keyboard input that must not be lost, session safety commands, telemetry and video-quality preferences.
 - `pointer` DataChannel: controller -> host; unordered with `maxRetransmits=0`. Used for pointer movement and wheel events where stale input should be discarded rather than retransmitted.
 - Telemetry: controller reports decoder/network observations over the reliable control channel for adaptive bitrate/FPS/resolution decisions.
 
@@ -221,8 +221,18 @@ Reliable `control` channel:
 {"t":"pointer","kind":"up","button":0,"x":0.41,"y":0.63,"buttons":0}
 {"t":"key","kind":"down","code":"KeyA","key":"a"}
 {"t":"key","kind":"up","code":"KeyA","key":"a"}
+{"t":"video-profile","mode":"auto"}
 {"t":"release-all"}
 ```
+
+`video-profile.mode` is one of `auto`, `original`, `high`, or `clear`. Unknown values are ignored by the host. The current Windows implementation treats the four profiles as user-selected ceilings/bounds around the same congestion controller rather than bypassing network protection:
+
+- `auto`: configured maximum (1080p/60/12 Mbps by default) with bitrate -> FPS -> resolution adaptation down through the existing quality tiers.
+- `original`: retains the configured maximum spatial resolution; bitrate and FPS may still be reduced when network conditions require protection.
+- `high`: begins at up to the 1600x900 tier, 45 fps and 8 Mbps, while severe congestion may still reduce it to lower resolution/FPS/bitrate tiers.
+- `clear`: begins at up to the 1280x720 tier, 30 fps and 4 Mbps, while severe congestion may still reduce it to the 960x540 tier and lower transport targets.
+
+The profile is session-local. The browser sends the currently selected profile when the reliable control channel opens, profile changes take effect immediately, and disconnect returns the Windows host to `auto`. Quality changes request a fresh keyframe. These values are product defaults, not a wire-protocol promise; compatible hosts may choose different numerical ceilings while preserving the four profile semantics.
 
 Unreliable `pointer` channel:
 
