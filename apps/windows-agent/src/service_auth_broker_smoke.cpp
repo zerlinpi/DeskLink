@@ -19,6 +19,7 @@ using namespace std::chrono_literals;
 constexpr char kDeviceId[] = "ci-smoke-device";
 constexpr char kDeviceCredential[] = "dc1.ci-smoke-placeholder";
 constexpr char kExpectedSignalToken[] = "ci-short-signal-token";
+constexpr char kExpectedAccessCode[] = "CI-Smoke-Access-Code-94!";
 
 class ScopedKernelHandle {
  public:
@@ -191,8 +192,6 @@ HANDLE ConnectPipeWithRetry(const std::wstring& pipe_name) {
 }
 
 bool ValidateUnsupportedCommandOnReadyPipe(const std::wstring& pipe_name) {
-  // Do not retry this first connection. Broker startup promises that the first
-  // pipe instance is already created before StartServiceAuthBroker returns.
   ScopedKernelHandle pipe(CreateFileW(
       pipe_name.c_str(),
       GENERIC_READ | GENERIC_WRITE,
@@ -235,20 +234,37 @@ int AuthorizedChild(const std::wstring& pipe_name) {
     return 9;
   }
 
-  // This second connection uses the same client helper compiled into
-  // desklink-agent.exe. The --service-auth-pipe argument is parsed internally.
+  if (!desklink::ServiceSignalTokenBrokerConfigured() ||
+      !desklink::ServiceAccessCodeBrokerConfigured()) {
+    std::cerr << "Expected broker capabilities were not enabled\n";
+    return 10;
+  }
+
   desklink::RuntimeSignalToken token;
   std::string error;
   if (!desklink::FetchServiceBrokerSignalToken(&token, &error)) {
     std::cerr << "Unable to fetch broker token: " << error << "\n";
-    return 10;
+    return 11;
   }
 
   const int64_t now = static_cast<int64_t>(std::time(nullptr));
   if (token.token != kExpectedSignalToken || token.expires_at <= now + 300) {
     std::cerr << "Broker returned unexpected signal token\n";
-    return 11;
+    return 12;
   }
+
+  std::string access_code;
+  if (!desklink::FetchServiceBrokerAccessCode(&access_code, &error)) {
+    std::cerr << "Unable to fetch protected access code: " << error << "\n";
+    return 13;
+  }
+  if (access_code != kExpectedAccessCode) {
+    SecureZeroMemory(access_code.data(), access_code.size());
+    std::cerr << "Broker returned unexpected access code\n";
+    return 14;
+  }
+  SecureZeroMemory(access_code.data(), access_code.size());
+  access_code.clear();
   return 0;
 }
 
@@ -259,9 +275,6 @@ int UnauthorizedChild(const std::wstring& pipe_name) {
   DWORD mode = PIPE_READMODE_MESSAGE;
   if (!SetNamedPipeHandleState(pipe.get(), &mode, nullptr, nullptr)) return 21;
 
-  // This child has the same user SID as the authorized Agent child but a
-  // different PID. The SID ACL therefore allows it to open the Pipe, while the
-  // server-side PID identity check must still reject it before reading a command.
   char response[2048]{};
   DWORD read = 0;
   if (!ReadFile(pipe.get(), response, sizeof(response) - 1, &read, nullptr) || read == 0) {
@@ -362,12 +375,10 @@ int wmain(int argc, wchar_t** argv) {
       L"\\\\.\\pipe\\DeskLink.Auth.Smoke." + std::to_wstring(GetCurrentProcessId()) + L"." +
       std::to_wstring(GetTickCount64());
 
-  // Create the authorized child suspended so the parent can bind the broker to
-  // the exact child PID and make the Pipe ready before any Agent-side code runs.
   PROCESS_INFORMATION authorized{};
   if (!RunChildProcess(
           L"--authorized-child \"" + pipe_name + L"\" --service-auth-pipe=\"" +
-              pipe_name + L"\"",
+              pipe_name + L"\" --service-signal-token-broker --service-access-code-broker",
           CREATE_NO_WINDOW | CREATE_SUSPENDED,
           &authorized)) {
     std::wcerr << L"Unable to create authorized broker child\n";
@@ -381,6 +392,7 @@ int wmain(int argc, wchar_t** argv) {
           mock_server.Endpoint(),
           kDeviceId,
           kDeviceCredential,
+          kExpectedAccessCode,
           &broker_error)) {
     TerminateProcess(authorized.hProcess, 3);
     CloseHandle(authorized.hThread);
@@ -397,10 +409,8 @@ int wmain(int argc, wchar_t** argv) {
     return 4;
   }
 
-  // The authorized child first proves synchronous pipe readiness and then uses
-  // the production Agent-side client for Service -> HTTP -> Pipe token exchange.
   if (!WaitForSuccessfulChild(&authorized, 15000)) {
-    std::wcerr << L"Authorized Agent-side broker token exchange failed\n";
+    std::wcerr << L"Authorized Agent-side broker secret exchange failed\n";
     desklink::StopServiceAuthBroker();
     return 5;
   }
@@ -419,6 +429,6 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   desklink::StopServiceAuthBroker();
-  std::cout << "Service auth broker end-to-end smoke test passed\n";
+  std::cout << "Service auth broker Signal Token + access-code smoke test passed\n";
   return 0;
 }
