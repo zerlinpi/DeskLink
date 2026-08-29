@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	pongWait        = 75 * time.Second
-	pingPeriod      = 30 * time.Second
-	writeWait       = 8 * time.Second
-	maxMessageBytes = 256 << 10
-	signalRate       = 30.0
-	signalBurst      = 60.0
+	pongWait              = 75 * time.Second
+	pingPeriod            = 30 * time.Second
+	revocationSweepPeriod = 5 * time.Second
+	writeWait             = 8 * time.Second
+	maxMessageBytes       = 256 << 10
+	signalRate             = 30.0
+	signalBurst            = 60.0
 )
 
 type envelope struct {
@@ -98,6 +99,16 @@ func (h *hub) get(id string) *peer {
 	return h.peers[id]
 }
 
+func (h *hub) snapshot() []*peer {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	peers := make([]*peer, 0, len(h.peers))
+	for _, p := range h.peers {
+		peers = append(peers, p)
+	}
+	return peers
+}
+
 func (h *hub) closeAll(reason string) {
 	h.mu.Lock()
 	peers := make([]*peer, 0, len(h.peers))
@@ -129,6 +140,13 @@ func (p *peer) allowSignal() bool {
 
 func (p *peer) canSignalTarget(target string) bool {
 	return p.allowedTarget == "" || target == p.allowedTarget
+}
+
+func (p *peer) revocationID() string {
+	if p.controller {
+		return p.allowedTarget
+	}
+	return p.id
 }
 
 func (p *peer) write(v any) error {
@@ -211,6 +229,40 @@ func deviceRevokedSignal(target string) map[string]any {
 	return map[string]any{
 		"type":   "device-revoked",
 		"target": target,
+	}
+}
+
+func watchDeviceRevocations(ctx context.Context, h *hub) {
+	ticker := time.NewTicker(revocationSweepPeriod)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			peers := h.snapshot()
+			if len(peers) == 0 {
+				continue
+			}
+
+			revokedDevices, err := loadRevokedDeviceIDs()
+			if err != nil {
+				log.Printf("device revocation sweep failed: %v", err)
+				h.closeAll("device authorization unavailable")
+				continue
+			}
+
+			for _, p := range peers {
+				revocationID := p.revocationID()
+				if _, revoked := revokedDevices[revocationID]; !revoked {
+					continue
+				}
+				log.Printf("disconnecting peer %s because target/device %s is revoked", p.id, revocationID)
+				_ = p.write(deviceRevokedSignal(revocationID))
+				p.closeWithReason("device revoked")
+			}
+		}
 	}
 }
 
@@ -331,22 +383,6 @@ func main() {
 					p.closeWithReason("registration token expired")
 					return
 				case <-ticker.C:
-					recheckID := id
-					if p.controller {
-						recheckID = p.allowedTarget
-					}
-					revoked, err := deviceRevoked(recheckID)
-					if err != nil {
-						log.Printf("device revocation check failed for %s: %v", recheckID, err)
-						p.closeWithReason("device authorization unavailable")
-						return
-					}
-					if revoked {
-						log.Printf("disconnecting peer %s because target/device %s is revoked", id, recheckID)
-						_ = p.write(deviceRevokedSignal(recheckID))
-						p.closeWithReason("device revoked")
-						return
-					}
 					if err := p.ping(); err != nil {
 						_ = conn.Close()
 						return
@@ -492,6 +528,7 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stopSignals()
+	go watchDeviceRevocations(shutdownSignal, h)
 
 	serveErrors := make(chan error, 1)
 	go func() {
