@@ -1,5 +1,6 @@
 #pragma once
 
+#include <codecapi.h>
 #include <d3d11.h>
 #include <mfidl.h>
 #include <wrl/client.h>
@@ -42,6 +43,7 @@ class H264Encoder {
   bool WaitForEvent(MediaEventType wanted);
   bool SubmitInput(ID3D11Texture2D* texture, uint64_t timestamp100ns);
   bool ReadOutput(EncodedH264Frame* output);
+  bool CacheSequenceHeader();
 
   Microsoft::WRL::ComPtr<IMFTransform> transform_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> event_generator_;
@@ -49,11 +51,15 @@ class H264Encoder {
   Microsoft::WRL::ComPtr<ICodecAPI> codec_api_;
   DWORD input_stream_id_{0};
   DWORD output_stream_id_{0};
+  MFT_OUTPUT_STREAM_INFO output_stream_info_{};
+  bool need_input_pending_{false};
+  bool have_output_pending_{false};
   uint32_t width_{0};
   uint32_t height_{0};
   uint32_t fps_{0};
   uint32_t bitrate_bps_{0};
   uint64_t frame_duration100ns_{0};
+  std::vector<uint8_t> sequence_header_;
   std::wstring encoder_name_;
 };
 
