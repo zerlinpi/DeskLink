@@ -15,6 +15,7 @@
 #include <rtc/rtcpsrreporter.hpp>
 #include <rtc/rtcpnackresponder.hpp>
 
+#include "signal_token_client.h"
 #include "turn_credential_client.h"
 
 namespace desklink {
@@ -71,6 +72,41 @@ uint32_t EnvUIntOr(
   return fallback;
 }
 
+bool ResolveSignalAuthToken(
+    const SessionConfig& config,
+    std::string* token,
+    std::string* warning_or_error) {
+  if (!token) return false;
+  *token = EnvString("DESKLINK_SIGNAL_AUTH_TOKEN");
+  if (warning_or_error) warning_or_error->clear();
+
+  const std::string endpoint = EnvString("DESKLINK_SIGNAL_TOKEN_URL");
+  if (endpoint.empty()) return true;
+
+  RuntimeSignalToken runtime_token;
+  std::string fetch_error;
+  if (FetchRuntimeSignalToken(
+          endpoint,
+          config.device_id,
+          EnvString("DESKLINK_DEVICE_CREDENTIAL"),
+          &runtime_token,
+          &fetch_error)) {
+    *token = std::move(runtime_token.token);
+    std::cout << "Loaded short-lived signaling token; expires at "
+              << runtime_token.expires_at << "\n";
+    return true;
+  }
+
+  if (warning_or_error) {
+    *warning_or_error = "runtime signaling token fetch failed: " + fetch_error;
+  }
+  if (EnvString("DESKLINK_SIGNAL_TOKEN_REQUIRED") == "1") {
+    token->clear();
+    return false;
+  }
+  return true;
+}
+
 uint32_t EffectivePacingBitrate(const SessionConfig& config) {
   if (config.media_pacing_bitrate_bps > 0) {
     return std::clamp<uint32_t>(config.media_pacing_bitrate_bps, 500'000, 60'000'000);
@@ -117,6 +153,17 @@ void WebRtcSession::Start() {
 
 void WebRtcSession::ConnectSignaling() {
   if (stopping_.load(std::memory_order_relaxed)) return;
+
+  std::string signal_auth_token;
+  std::string token_error;
+  if (!ResolveSignalAuthToken(config_, &signal_auth_token, &token_error)) {
+    std::cerr << token_error << "; signaling connection deferred\n";
+    RequestSignalingReconnect();
+    return;
+  }
+  if (!token_error.empty()) {
+    std::cerr << token_error << "; using configured signaling token fallback\n";
+  }
 
   rtc::WebSocket::Configuration ws_config;
   ws_config.connectionTimeout = 10s;
@@ -184,7 +231,6 @@ void WebRtcSession::ConnectSignaling() {
 
   const char separator = config_.signal_url.find('?') == std::string::npos ? '?' : '&';
   std::string url = config_.signal_url + separator + "deviceId=" + config_.device_id;
-  const std::string signal_auth_token = EnvString("DESKLINK_SIGNAL_AUTH_TOKEN");
   if (!signal_auth_token.empty()) {
     url += "&auth=" + signal_auth_token;
   }
@@ -481,14 +527,25 @@ void WebRtcSession::CreatePeer(
     rtc_config.iceServers.emplace_back(config_.stun_url);
   }
 
+  std::string signal_auth_token;
+  std::string signal_token_error;
+  const bool signal_token_ready = ResolveSignalAuthToken(
+      config_,
+      &signal_auth_token,
+      &signal_token_error);
+  if (!signal_token_error.empty()) {
+    std::cerr << signal_token_error
+              << (signal_token_ready ? "; using configured signaling token fallback\n"
+                                     : "; runtime token unavailable\n");
+  }
+
   std::string turn_username = config_.turn_username;
   std::string turn_password = config_.turn_password;
   const std::string credential_endpoint = EnvString("DESKLINK_TURN_CREDENTIALS_URL");
   if (!credential_endpoint.empty()) {
     RuntimeTurnCredentials credentials;
     std::string credential_error;
-    const std::string signal_auth_token = EnvString("DESKLINK_SIGNAL_AUTH_TOKEN");
-    if (FetchRuntimeTurnCredentials(
+    if (signal_token_ready && !signal_auth_token.empty() && FetchRuntimeTurnCredentials(
             credential_endpoint,
             config_.device_id,
             signal_auth_token,
@@ -499,6 +556,11 @@ void WebRtcSession::CreatePeer(
       std::cout << "Loaded temporary TURN credentials for this session; expires at "
                 << credentials.expires_at << "\n";
     } else {
+      if (credential_error.empty()) {
+        credential_error = signal_token_ready
+            ? "a signaling token is required for runtime TURN credentials"
+            : "short-lived signaling token could not be refreshed";
+      }
       std::cerr << "Temporary TURN credential fetch failed: " << credential_error << "\n";
       if (EnvString("DESKLINK_TURN_RUNTIME_REQUIRED") == "1") {
         turn_username.clear();
