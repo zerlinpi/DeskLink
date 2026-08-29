@@ -84,6 +84,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Validate Access Code proof vector
+        run: node ../../tools/auth/verify-access-proof-vector.mjs
       - run: npm install
       - run: npm run build
 
@@ -113,6 +115,12 @@ jobs:
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64
       - name: Build
         run: cmake --build build/windows-agent --config Release --parallel
+      - name: Validate Access Code proof vector
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-access-proof-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Access Code proof smoke failed with exit code $LASTEXITCODE" }
       - name: Validate DPAPI protected secrets
         shell: pwsh
         run: |
