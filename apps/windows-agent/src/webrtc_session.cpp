@@ -20,6 +20,7 @@
 #include <rtc/rtcpsrreporter.hpp>
 #include <rtc/rtcpnackresponder.hpp>
 
+#include "clipboard_win32.h"
 #include "signal_token_client.h"
 #include "turn_credential_client.h"
 
@@ -34,11 +35,17 @@ constexpr char kVideoMsid[] = "desklink-stream";
 constexpr auto kAccessChallengeLifetime = 15s;
 constexpr size_t kMaxPendingAccessChallenges = 64;
 constexpr char kAccessProofAlgorithm[] = "hmac-sha256-v1";
+constexpr size_t kMaxControlMessageBytes = 512 * 1024;
+constexpr size_t kMaxControlRequestIdBytes = 128;
 
 double JsonNumber(const json& object, const char* key, double fallback = 0.0) {
   const auto it = object.find(key);
   if (it == object.end() || !it->is_number()) return fallback;
   return it->get<double>();
+}
+
+bool ValidRequestId(const std::string& request_id) {
+  return !request_id.empty() && request_id.size() <= kMaxControlRequestIdBytes;
 }
 
 std::string EnvString(const char* name) {
@@ -498,6 +505,25 @@ void WebRtcSession::SetControlledDesktopRect(
   input_.SetDesktopRect(left, top, width, height);
 }
 
+bool WebRtcSession::SendControlMessage(const std::string& text) {
+  if (text.empty() || text.size() > kMaxControlMessageBytes) return false;
+
+  std::shared_ptr<rtc::DataChannel> control;
+  {
+    std::scoped_lock lock(mutex_);
+    control = control_;
+  }
+  if (!control || !control->isOpen()) return false;
+
+  try {
+    control->send(text);
+    return true;
+  } catch (const std::exception& error) {
+    std::cerr << "Control DataChannel send failed: " << error.what() << "\n";
+    return false;
+  }
+}
+
 bool WebRtcSession::SendH264AccessUnit(
     const uint8_t* data,
     size_t size,
@@ -804,8 +830,6 @@ void WebRtcSession::HandleOffer(
   }
 
   if (existing_peer) {
-    // ICE restarts and network-path changes renegotiate the already-authorized
-    // active session in place. A closed/replaced session must authenticate again.
     std::cout << "Renegotiating authorized session from " << from << "\n";
     existing_peer->setRemoteDescription(rtc::Description(sdp, description_type));
     return;
@@ -1024,11 +1048,20 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
   }
 
   const std::string label = channel->label();
-  channel->onOpen([label]() {
+  std::weak_ptr<rtc::DataChannel> weak_channel = channel;
+  channel->onOpen([this, label]() {
     std::cout << label << " DataChannel open\n";
+    if (label == "control" && config_.on_monitor_state_requested) {
+      config_.on_monitor_state_requested();
+    }
   });
-  channel->onClosed([this, label]() {
-    if (label == "control") input_.ReleaseAll();
+  channel->onClosed([this, label, weak_channel]() {
+    if (label == "control") {
+      input_.ReleaseAll();
+      auto closed = weak_channel.lock();
+      std::scoped_lock lock(mutex_);
+      if (!closed || control_ == closed) control_.reset();
+    }
     std::cout << label << " DataChannel closed\n";
   });
   channel->onMessage([this](rtc::message_variant data) {
@@ -1061,6 +1094,65 @@ void WebRtcSession::HandleControl(const std::string& text) {
     } else if (mode == "clear") {
       config_.on_video_profile_requested(VideoProfile::Clear);
     }
+    return;
+  }
+
+  if (type == "monitor-list-request") {
+    if (config_.on_monitor_state_requested) config_.on_monitor_state_requested();
+    return;
+  }
+
+  if (type == "monitor-switch") {
+    if (!config_.on_monitor_switch_requested) return;
+    const auto index_it = event.find("index");
+    if (index_it == event.end() || !index_it->is_number_integer()) return;
+    const int64_t index = index_it->get<int64_t>();
+    if (index < 0 || index > 63) return;
+    input_.ReleaseAll();
+    config_.on_monitor_switch_requested(static_cast<uint32_t>(index));
+    return;
+  }
+
+  if (type == "clipboard-read-request") {
+    const std::string request_id = event.value("requestId", "");
+    if (!ValidRequestId(request_id)) return;
+
+    std::string clipboard_text;
+    std::string clipboard_error;
+    if (ReadClipboardTextUtf8(&clipboard_text, &clipboard_error)) {
+      SendControlMessage(json{
+          {"t", "clipboard-text"},
+          {"requestId", request_id},
+          {"text", clipboard_text},
+      }.dump());
+    } else {
+      SendControlMessage(json{
+          {"t", "clipboard-result"},
+          {"requestId", request_id},
+          {"direction", "remote-to-local"},
+          {"ok", false},
+          {"error", clipboard_error},
+      }.dump());
+    }
+    return;
+  }
+
+  if (type == "clipboard-write") {
+    const std::string request_id = event.value("requestId", "");
+    const auto text_it = event.find("text");
+    if (!ValidRequestId(request_id) || text_it == event.end() || !text_it->is_string()) return;
+
+    const std::string clipboard_text = text_it->get<std::string>();
+    std::string clipboard_error;
+    const bool ok = WriteClipboardTextUtf8(clipboard_text, &clipboard_error);
+    json response = {
+        {"t", "clipboard-result"},
+        {"requestId", request_id},
+        {"direction", "local-to-remote"},
+        {"ok", ok},
+    };
+    if (!ok) response["error"] = clipboard_error;
+    SendControlMessage(response.dump());
     return;
   }
 
