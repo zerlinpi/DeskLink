@@ -136,6 +136,10 @@ func newHostAuthDispatchGuard() *hostAuthDispatchGuard {
 	return &hostAuthDispatchGuard{recent: make(map[hostAuthDispatchKey]time.Time)}
 }
 
+func (g *hostAuthDispatchGuard) key(target string, source *peer, session string) hostAuthDispatchKey {
+	return hostAuthDispatchKey{target: target, session: session, source: source}
+}
+
 func (g *hostAuthDispatchGuard) claim(
 	target string,
 	source *peer,
@@ -154,7 +158,7 @@ func (g *hostAuthDispatchGuard) claim(
 		}
 	}
 
-	key := hostAuthDispatchKey{target: target, session: session, source: source}
+	key := g.key(target, source, session)
 	if expiresAt, exists := g.recent[key]; exists && expiresAt.After(now) {
 		return false
 	}
@@ -170,6 +174,15 @@ func (g *hostAuthDispatchGuard) claim(
 	}
 	g.recent[key] = now.Add(hostAuthDispatchDedupeTTL)
 	return true
+}
+
+func (g *hostAuthDispatchGuard) release(target string, source *peer, session string) {
+	if target == "" || source == nil || session == "" {
+		return
+	}
+	g.mu.Lock()
+	delete(g.recent, g.key(target, source, session))
+	g.mu.Unlock()
 }
 
 var (
@@ -203,6 +216,7 @@ func flushPendingHostAuthRequests(h *hub, target *peer, metrics *signalMetrics) 
 			"payload": request.payload,
 		}
 		if err := target.write(forward); err != nil {
+			hostAuthDispatches.release(target.id, source, request.session)
 			log.Printf("flush pending auth %s -> %s: %v", request.from, target.id, err)
 			for _, retry := range requests[index:] {
 				if !pendingHostAuthRequests.enqueue(
