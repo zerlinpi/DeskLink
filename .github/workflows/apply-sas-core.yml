@@ -22,6 +22,7 @@ jobs:
         run: |
           @'
           from pathlib import Path
+          import re
 
           def replace_one(path, old, new):
               p = Path(path)
@@ -30,6 +31,14 @@ jobs:
               if count != 1:
                   raise SystemExit(f'{path}: expected 1 match, found {count}: {old[:100]!r}')
               p.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+
+          def replace_regex(path, pattern, replacement):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+              if count != 1:
+                  raise SystemExit(f'{path}: regex expected 1 match, found {count}: {pattern[:100]!r}')
+              p.write_text(updated, encoding='utf-8', newline='\n')
 
           path = 'apps/windows-agent/src/service_main.cpp'
           replace_one(path,
@@ -70,14 +79,10 @@ jobs:
               if (access_code_broker) command += L" --service-access-code-broker";
               if (secure_attention_broker) command += L" --service-sas-broker";
             }''')
-          replace_one(path,
-          '''        std::move(broker_credential),
-                std::move(broker_access_code),
-                &broker_error);''',
-          '''        std::move(broker_credential),
-                std::move(broker_access_code),
-                secure_attention_broker,
-                &broker_error);''')
+          replace_regex(
+              path,
+              r'(std::move\(broker_credential\),\s*\n\s*std::move\(broker_access_code\),)(\s*\n\s*)(&broker_error\);)',
+              r'\1\2secure_attention_broker,\2\3')
           replace_one(path,
           '''  if (signal_broker) security_mode += L" signal-token";
             if (access_code_broker) security_mode += L" access-code";''',
@@ -140,16 +145,12 @@ jobs:
               !desklink::ServiceAccessCodeBrokerConfigured() ||
               !desklink::ServiceSecureAttentionBrokerConfigured()) {''')
           replace_one(path,
-              'pipe_name + L"\\\" --service-signal-token-broker --service-access-code-broker",',
-              'pipe_name + L"\\\" --service-signal-token-broker --service-access-code-broker --service-sas-broker",')
-          replace_one(path,
-          '''          kDeviceCredential,
-                  kExpectedAccessCode,
-                  &broker_error)) {''',
-          '''          kDeviceCredential,
-                  kExpectedAccessCode,
-                  true,
-                  &broker_error)) {''')
+              '--service-signal-token-broker --service-access-code-broker',
+              '--service-signal-token-broker --service-access-code-broker --service-sas-broker')
+          replace_regex(
+              path,
+              r'(kDeviceCredential,\s*\n\s*kExpectedAccessCode,)(\s*\n\s*)(&broker_error\)\))',
+              r'\1\2true,\2\3')
           replace_one(path,
               'Service auth broker Signal Token + access-code smoke test passed',
               'Service auth broker Signal Token + access-code + SAS capability smoke test passed')
