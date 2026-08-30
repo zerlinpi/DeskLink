@@ -1,0 +1,404 @@
+name: Finalize Secure Attention Broker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-secure-attention-final.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-commit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Complete SAS integration
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_one(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected 1 match, found {count}: {old[:120]!r}')
+              p.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+
+          # Service: always provide a narrowly-scoped SAS broker to the exact Agent
+          # process. Protected-secret environment filtering remains conditional.
+          path = 'apps/windows-agent/src/service_main.cpp'
+          replace_one(path,
+          '''  const bool signal_broker = credential_status == desklink::ProtectedCredentialStatus::Loaded;
+            const bool access_code_broker = access_code_status == desklink::ProtectedCredentialStatus::Loaded;
+            const bool broker_mode = signal_broker || access_code_broker;
+            if (broker_mode && !has_environment) {''',
+          '''  const bool signal_broker = credential_status == desklink::ProtectedCredentialStatus::Loaded;
+            const bool access_code_broker = access_code_status == desklink::ProtectedCredentialStatus::Loaded;
+            const bool secure_attention_broker = true;
+            const bool protected_secret_broker = signal_broker || access_code_broker;
+            const bool broker_mode = protected_secret_broker || secure_attention_broker;
+            if (protected_secret_broker && !has_environment) {''')
+          replace_one(path,
+          '''  if (broker_mode) {
+              protected_environment = BuildEnvironmentWithoutProtectedSecrets(
+                  environment,
+                  signal_broker,
+                  access_code_broker);
+              child_environment = protected_environment.data();
+              auth_pipe_name = NewServiceAuthPipeName(session_id);
+            }''',
+          '''  if (broker_mode) {
+              auth_pipe_name = NewServiceAuthPipeName(session_id);
+            }
+            if (protected_secret_broker) {
+              protected_environment = BuildEnvironmentWithoutProtectedSecrets(
+                  environment,
+                  signal_broker,
+                  access_code_broker);
+              child_environment = protected_environment.data();
+            }''')
+          replace_one(path,
+          '''    if (signal_broker) command += L" --service-signal-token-broker";
+              if (access_code_broker) command += L" --service-access-code-broker";
+            }''',
+          '''    if (signal_broker) command += L" --service-signal-token-broker";
+              if (access_code_broker) command += L" --service-access-code-broker";
+              if (secure_attention_broker) command += L" --service-sas-broker";
+            }''')
+          replace_one(path,
+          '''        std::move(broker_credential),
+                std::move(broker_access_code),
+                &broker_error);''',
+          '''        std::move(broker_credential),
+                std::move(broker_access_code),
+                secure_attention_broker,
+                &broker_error);''')
+          replace_one(path,
+          '''  if (signal_broker) security_mode += L" signal-token";
+            if (access_code_broker) security_mode += L" access-code";''',
+          '''  if (signal_broker) security_mode += L" signal-token";
+            if (access_code_broker) security_mode += L" access-code";
+            if (secure_attention_broker) security_mode += L" secure-attention";''')
+
+          # Authenticated WebRTC control protocol: expose exactly one system operation.
+          path = 'apps/windows-agent/src/webrtc_session.cpp'
+          replace_one(path,
+              '#include "file_transfer_receiver.h"\n#include "signal_token_client.h"',
+              '#include "file_transfer_receiver.h"\n#include "service_auth_client.h"\n#include "signal_token_client.h"')
+          replace_one(path,
+          '''  if (type == "release-all") {
+              input_.ReleaseAll();
+              return;
+            }
+
+            if (type == "video-profile") {''',
+          '''  if (type == "release-all") {
+              input_.ReleaseAll();
+              return;
+            }
+
+            if (type == "system-operation") {
+              const std::string request_id = event.value("requestId", "");
+              const std::string operation = event.value("operation", "");
+              if (!ValidRequestId(request_id)) return;
+
+              json response = {
+                  {"t", "system-operation-result"},
+                  {"requestId", request_id},
+                  {"operation", operation},
+                  {"ok", false},
+              };
+              if (operation == "secure-attention-sequence") {
+                input_.ReleaseAll();
+                std::string sas_error;
+                const bool ok = ServiceSecureAttentionBrokerConfigured() &&
+                    RequestServiceSecureAttentionSequence(&sas_error);
+                response["ok"] = ok;
+                if (!ok) {
+                  response["error"] = sas_error.empty()
+                      ? "Secure Attention Sequence is unavailable on this host"
+                      : sas_error;
+                }
+              } else {
+                response["error"] = "unsupported system operation";
+              }
+              SendControlMessage(response.dump());
+              return;
+            }
+
+            if (type == "video-profile") {''')
+
+          # Broker smoke: validate explicit SAS capability parsing and exact-PID isolation.
+          path = 'apps/windows-agent/src/service_auth_broker_smoke.cpp'
+          replace_one(path,
+          '''  if (!desklink::ServiceSignalTokenBrokerConfigured() ||
+              !desklink::ServiceAccessCodeBrokerConfigured()) {''',
+          '''  if (!desklink::ServiceSignalTokenBrokerConfigured() ||
+              !desklink::ServiceAccessCodeBrokerConfigured() ||
+              !desklink::ServiceSecureAttentionBrokerConfigured()) {''')
+          replace_one(path,
+              'pipe_name + L"\\\" --service-signal-token-broker --service-access-code-broker",',
+              'pipe_name + L"\\\" --service-signal-token-broker --service-access-code-broker --service-sas-broker",')
+          replace_one(path,
+          '''          kDeviceCredential,
+                  kExpectedAccessCode,
+                  &broker_error)) {''',
+          '''          kDeviceCredential,
+                  kExpectedAccessCode,
+                  true,
+                  &broker_error)) {''')
+          replace_one(path,
+              'Service auth broker Signal Token + access-code smoke test passed',
+              'Service auth broker Signal Token + access-code + SAS capability smoke test passed')
+
+          # CMake: Service and broker smoke link the SAS helper; standalone smoke only
+          # resolves the supported Windows API and rejects invalid pipe handles.
+          path = 'apps/windows-agent/CMakeLists.txt'
+          replace_one(path,
+          '''  src/service_auth_client.cpp
+            src/service_auth_client.h
+            src/signal_token_client.cpp
+            src/signal_token_client.h
+            "${CMAKE_CURRENT_BINARY_DIR}/desklink-service-version.rc"''',
+          '''  src/service_auth_client.cpp
+            src/service_auth_client.h
+            src/secure_attention.cpp
+            src/secure_attention.h
+            src/signal_token_client.cpp
+            src/signal_token_client.h
+            "${CMAKE_CURRENT_BINARY_DIR}/desklink-service-version.rc"''')
+          replace_one(path,
+          '''  src/service_auth_client.cpp
+            src/service_auth_client.h
+            src/signal_token_client.cpp
+            src/signal_token_client.h
+          )
+          target_compile_definitions(desklink-service-auth-smoke''',
+          '''  src/service_auth_client.cpp
+            src/service_auth_client.h
+            src/secure_attention.cpp
+            src/secure_attention.h
+            src/signal_token_client.cpp
+            src/signal_token_client.h
+          )
+          target_compile_definitions(desklink-service-auth-smoke''')
+          p = Path(path)
+          text = p.read_text(encoding='utf-8')
+          marker = 'target_link_libraries(desklink-device-identity-smoke PRIVATE advapi32 bcrypt)'
+          if text.count(marker) != 1:
+              raise SystemExit('device identity smoke marker mismatch')
+          addition = '''
+
+          add_executable(desklink-secure-attention-smoke
+            src/secure_attention_smoke.cpp
+            src/secure_attention.cpp
+            src/secure_attention.h
+          )
+          target_compile_definitions(desklink-secure-attention-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+          target_compile_options(desklink-secure-attention-smoke PRIVATE /W4 /permissive-)
+          target_link_libraries(desklink-secure-attention-smoke PRIVATE advapi32)'''
+          p.write_text(text.replace(marker, marker + addition), encoding='utf-8', newline='\n')
+
+          # Web workbench button and request/result lifecycle.
+          path = 'apps/web/src/remote_workbench.ts'
+          replace_one(path,
+          '''let statusText: HTMLSpanElement | null = null;
+          let toolbar: HTMLDivElement | null = null;''',
+          '''let statusText: HTMLSpanElement | null = null;
+          let toolbar: HTMLDivElement | null = null;
+          let controlChannel: RTCDataChannel | null = null;
+          let secureAttentionButton: HTMLButtonElement | null = null;
+          let secureAttentionRequestId = "";
+          let secureAttentionTimer: number | null = null;''')
+          replace_one(path,
+          '''function setText(element: HTMLElement | null, value: string) {
+            if (element && element.textContent !== value) element.textContent = value;
+          }
+
+          function makeButton''',
+          '''function setText(element: HTMLElement | null, value: string) {
+            if (element && element.textContent !== value) element.textContent = value;
+          }
+
+          function updateSecureAttentionButton(label = "Ctrl+Alt+Del") {
+            if (!secureAttentionButton) return;
+            setText(secureAttentionButton, label);
+            secureAttentionButton.disabled = !sessionActive() ||
+              controlChannel?.readyState !== "open" || Boolean(secureAttentionRequestId);
+          }
+
+          function finishSecureAttention(label: string) {
+            secureAttentionRequestId = "";
+            if (secureAttentionTimer !== null) window.clearTimeout(secureAttentionTimer);
+            secureAttentionTimer = null;
+            updateSecureAttentionButton(label);
+            window.setTimeout(() => updateSecureAttentionButton(), 2200);
+          }
+
+          function requestSecureAttention() {
+            if (!controlChannel || controlChannel.readyState !== "open" || secureAttentionRequestId) return;
+            secureAttentionRequestId = `sas-${crypto.randomUUID()}`;
+            updateSecureAttentionButton("发送中…");
+            try {
+              controlChannel.send(JSON.stringify({
+                t: "system-operation",
+                operation: "secure-attention-sequence",
+                requestId: secureAttentionRequestId,
+              }));
+            } catch (error) {
+              console.debug("DeskLink Secure Attention request failed", error);
+              finishSecureAttention("发送失败");
+              return;
+            }
+            secureAttentionTimer = window.setTimeout(() => {
+              if (secureAttentionRequestId) finishSecureAttention("无响应");
+            }, 6000);
+          }
+
+          function makeButton''')
+          replace_one(path,
+          '''    fullscreenButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='fullscreen']");
+              return existing;''',
+          '''    fullscreenButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='fullscreen']");
+              secureAttentionButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='secure-attention']");
+              updateSecureAttentionButton();
+              return existing;''')
+          replace_one(path,
+          '''  fullscreenButton = makeButton("全屏");
+            fullscreenButton.dataset.workbenchAction = "fullscreen";''',
+          '''  secureAttentionButton = makeButton("Ctrl+Alt+Del");
+            secureAttentionButton.dataset.workbenchAction = "secure-attention";
+            secureAttentionButton.title = "请求 Windows Service 发送安全注意序列；需要 Windows 本地策略允许 Services";
+            secureAttentionButton.addEventListener("click", () => {
+              requestSecureAttention();
+              revealToolbar();
+            });
+            updateSecureAttentionButton();
+
+            fullscreenButton = makeButton("全屏");
+            fullscreenButton.dataset.workbenchAction = "fullscreen";''')
+          replace_one(path,
+              '  actions.append(displayButton, networkButton, focusButton, fullscreenButton, disconnectButton);',
+              '  actions.append(displayButton, networkButton, focusButton, secureAttentionButton, fullscreenButton, disconnectButton);')
+          replace_one(path,
+          '''  setText(networkButton, compactNetworkLabel());
+            applyViewMode(stage);''',
+          '''  setText(networkButton, compactNetworkLabel());
+            updateSecureAttentionButton();
+            applyViewMode(stage);''')
+          replace_one(path,
+          '''  document.addEventListener("fullscreenchange", syncFullscreenButton);
+            window.addEventListener("keydown", (event) => {''',
+          '''  document.addEventListener("fullscreenchange", syncFullscreenButton);
+            window.addEventListener("desklink:control-channel", (event) => {
+              const detail = (event as CustomEvent<{ channel: RTCDataChannel }>).detail;
+              controlChannel = detail?.channel ?? null;
+              controlChannel?.addEventListener("open", () => updateSecureAttentionButton());
+              updateSecureAttentionButton();
+            });
+            window.addEventListener("desklink:control-channel-closed", (event) => {
+              const detail = (event as CustomEvent<{ channel: RTCDataChannel }>).detail;
+              if (!detail?.channel || detail.channel === controlChannel) controlChannel = null;
+              if (secureAttentionRequestId) finishSecureAttention("连接已断开");
+              updateSecureAttentionButton();
+            });
+            window.addEventListener("desklink:control-message", (event) => {
+              const detail = (event as CustomEvent<{ message: Record<string, unknown> }>).detail;
+              const message = detail?.message;
+              if (!message || message.t !== "system-operation-result" ||
+                  message.operation !== "secure-attention-sequence" ||
+                  message.requestId !== secureAttentionRequestId) return;
+              finishSecureAttention(message.ok === true ? "已发送" : "当前不可用");
+            });
+            window.addEventListener("keydown", (event) => {''')
+
+          # Make the completed stable-ID work and SAS API smoke permanent CI gates.
+          path = '.github/workflows/ci.yml'
+          replace_one(path,
+          '''      - name: Validate Access Code proof vector
+                shell: pwsh
+                run: |
+                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-access-proof-smoke.exe"''',
+          '''      - name: Validate stable Windows Device ID
+                shell: pwsh
+                run: |
+                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-device-identity-smoke.exe"
+                  & $smoke
+                  if ($LASTEXITCODE -ne 0) { throw "Device identity smoke failed with exit code $LASTEXITCODE" }
+                  $service = Resolve-Path "build/windows-agent/Release/desklink-service.exe"
+                  $first = (& $service --print-default-device-id | Select-Object -Last 1).Trim()
+                  $second = (& $service --print-default-device-id | Select-Object -Last 1).Trim()
+                  if ($first -notmatch '^win-[0-9a-f]{32}$' -or $first -ne $second) {
+                    throw "Service default Device ID was not stable: '$first' / '$second'"
+                  }
+              - name: Validate Secure Attention API
+                shell: pwsh
+                run: |
+                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-secure-attention-smoke.exe"
+                  & $smoke
+                  if ($LASTEXITCODE -ne 0) { throw "Secure Attention smoke failed with exit code $LASTEXITCODE" }
+              - name: Validate Access Code proof vector
+                shell: pwsh
+                run: |
+                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-access-proof-smoke.exe"''')
+
+          path = '.github/workflows/release.yml'
+          replace_one(path,
+          '''            "build/windows-agent/Release/desklink-active-session-smoke.exe",
+                "build/windows-agent/Release/desklink-access-proof-smoke.exe",''',
+          '''            "build/windows-agent/Release/desklink-active-session-smoke.exe",
+                "build/windows-agent/Release/desklink-device-identity-smoke.exe",
+                "build/windows-agent/Release/desklink-secure-attention-smoke.exe",
+                "build/windows-agent/Release/desklink-access-proof-smoke.exe",''')
+          '@ | python -
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+
+      - name: Build Windows host
+        run: cmake --build build/windows-agent --config Release --parallel
+
+      - name: Run native security and regression smokes
+        shell: pwsh
+        run: |
+          foreach ($smokePath in @(
+            "build/windows-agent/Release/desklink-secure-attention-smoke.exe",
+            "build/windows-agent/Release/desklink-device-identity-smoke.exe",
+            "build/windows-agent/Release/desklink-service-auth-smoke.exe",
+            "build/windows-agent/Release/desklink-active-session-smoke.exe",
+            "build/windows-agent/Release/desklink-video-policy-smoke.exe",
+            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe"
+          )) {
+            & (Resolve-Path $smokePath)
+            if ($LASTEXITCODE -ne 0) { throw "$smokePath failed with exit code $LASTEXITCODE" }
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build browser controller
+        shell: pwsh
+        run: |
+          Push-Location apps/web
+          npm install
+          npm run build
+          Pop-Location
+
+      - name: Commit validated integration
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-secure-attention-final.yml
+          git add apps/windows-agent/CMakeLists.txt apps/windows-agent/src/service_main.cpp apps/windows-agent/src/webrtc_session.cpp apps/windows-agent/src/service_auth_broker_smoke.cpp apps/web/src/remote_workbench.ts .github/workflows/ci.yml .github/workflows/release.yml
+          git commit -m "feat(windows): route Ctrl+Alt+Del through Service SAS broker"
+          git pull --rebase origin main
+          git push origin HEAD:main
