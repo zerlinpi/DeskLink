@@ -69,4 +69,6 @@ jobs:
           git diff --cached --check
           git diff --cached --quiet && exit 0
           git commit -m "test(signal): assert peer-offline session over websocket"
+          git fetch origin main
+          git rebase origin/main
           git push origin HEAD:main
