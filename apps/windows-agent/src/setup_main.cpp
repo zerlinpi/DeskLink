@@ -83,6 +83,12 @@ std::filesystem::path InstallDirectory() {
   return std::filesystem::path(ProgramFilesPath()) / L"DeskLink";
 }
 
+std::filesystem::path MediaProbePath() {
+  const auto installed = InstallDirectory() / L"desklink-media-probe.exe";
+  if (GetFileAttributesW(installed.c_str()) != INVALID_FILE_ATTRIBUTES) return installed;
+  return CurrentExecutablePath().parent_path() / L"desklink-media-probe.exe";
+}
+
 std::wstring GetControlText(HWND parent, int id) {
   HWND control = GetDlgItem(parent, id);
   if (!control) return {};
@@ -398,6 +404,7 @@ bool PrepareInstallDirectory(std::filesystem::path* service_path, std::wstring* 
   const std::vector<std::pair<std::wstring, std::wstring>> files = {
       {L"desklink-agent.exe", L"desklink-agent.exe"},
       {L"desklink-service.exe", L"desklink-service.exe"},
+      {L"desklink-media-probe.exe", L"desklink-media-probe.exe"},
       {CurrentExecutablePath().filename().wstring(), L"DeskLink.exe"},
   };
   for (const auto& [source_name, destination_name] : files) {
@@ -411,7 +418,8 @@ bool RunProcessAndWait(
     const std::filesystem::path& executable,
     const std::wstring& arguments,
     DWORD* exit_code,
-    std::wstring* error) {
+    std::wstring* error,
+    DWORD timeout_ms = 30000) {
   std::wstring command = L"\"" + executable.wstring() + L"\"";
   if (!arguments.empty()) command += L" " + arguments;
   std::vector<wchar_t> command_line(command.begin(), command.end());
@@ -431,16 +439,16 @@ bool RunProcessAndWait(
           executable.parent_path().c_str(),
           &startup,
           &process)) {
-    if (error) *error = L"启动服务安装程序失败：" + LastErrorMessage(GetLastError());
+    if (error) *error = L"启动程序失败：" + LastErrorMessage(GetLastError());
     return false;
   }
 
   CloseHandle(process.hThread);
-  const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+  const DWORD wait = WaitForSingleObject(process.hProcess, timeout_ms);
   if (wait != WAIT_OBJECT_0) {
     TerminateProcess(process.hProcess, 1);
     CloseHandle(process.hProcess);
-    if (error) *error = L"服务安装超时。";
+    if (error) *error = L"程序执行超时。";
     return false;
   }
 
@@ -449,6 +457,35 @@ bool RunProcessAndWait(
   CloseHandle(process.hProcess);
   if (exit_code) *exit_code = code;
   return true;
+}
+
+std::wstring MediaProbeFailureText(DWORD code) {
+  switch (code) {
+    case 2:
+      return L"媒体探针参数错误";
+    case 10:
+      return L"COM 初始化失败";
+    case 11:
+      return L"Media Foundation 初始化失败";
+    case 20:
+      return L"无法创建 D3D11 硬件设备；请更新显卡驱动并确认当前会话可使用 GPU";
+    case 30:
+      return L"DXGI Desktop Duplication 初始化失败；请确认当前为交互式桌面会话并更新显示驱动";
+    case 31:
+      return L"显示器返回了无效分辨率";
+    case 40:
+      return L"GPU 不支持当前 BGRA→NV12 视频处理路径";
+    case 41:
+      return L"桌面帧与 GPU 测试纹理均无法创建";
+    case 42:
+      return L"GPU BGRA→NV12 转换失败";
+    case 50:
+      return L"未找到兼容的 Media Foundation 硬件 H.264 编码器";
+    case 51:
+      return L"硬件 H.264 编码器已初始化，但未能输出视频帧";
+    default:
+      return L"媒体管线探针失败，退出代码 " + std::to_wstring(code);
+  }
 }
 
 std::unordered_map<std::wstring, std::wstring> ReadServiceEnvironment() {
@@ -648,7 +685,7 @@ bool HasProtectedDeviceCredential() {
 
 void RunDiagnostics(HWND window) {
   EnableWindow(GetDlgItem(window, kDiagnoseButton), FALSE);
-  SetControlText(window, kDiagnosticText, L"正在检查 Signal、Service 和 TURN…");
+  SetControlText(window, kDiagnosticText, L"正在检查 Signal、Service、TURN 和 GPU 媒体管线…");
   UpdateWindow(window);
 
   int failures = 0;
@@ -694,6 +731,23 @@ void RunDiagnostics(HWND window) {
     pass(L"无人值守访问码已使用 DPAPI 保存");
   } else {
     warn(L"没有检测到已保存的访问码；首次安装前需要设置");
+  }
+
+  const auto media_probe = MediaProbePath();
+  if (GetFileAttributesW(media_probe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    warn(L"当前安装包没有媒体探针，无法自动检查显卡采集与 H.264 编码能力；请更新 DeskLink");
+  } else {
+    DWORD media_exit = 1;
+    std::wstring media_error;
+    if (RunProcessAndWait(media_probe, L"0", &media_exit, &media_error, 8000)) {
+      if (media_exit == 0) {
+        pass(L"本机媒体管线可用：D3D11 / DXGI 抓屏 / GPU NV12 / 硬件 H.264 已通过实测");
+      } else {
+        fail(MediaProbeFailureText(media_exit));
+      }
+    } else {
+      fail(L"媒体管线探针无法完成：" + media_error + L" 建议更新显卡驱动后重试");
+    }
   }
 
   if (StartsWith(signal_url, L"ws://") || StartsWith(signal_url, L"wss://")) {
@@ -746,7 +800,7 @@ void RunDiagnostics(HWND window) {
 
   report += L"----------------------------------------\r\n";
   if (failures == 0 && warnings == 0) {
-    report += L"结论：配置完整，基础连接检查全部通过。\r\n";
+    report += L"结论：配置完整，网络与本机媒体管线基础检查全部通过。\r\n";
   } else if (failures == 0) {
     report += L"结论：没有阻断项，但有 " + std::to_wstring(warnings) + L" 项建议优化。\r\n";
   } else {
@@ -876,7 +930,6 @@ void InstallOrUpdate(HWND window) {
       return;
     }
   }
-
   if (!RestartService(&error)) {
     EnableWindow(GetDlgItem(window, kInstallButton), TRUE);
     cleanup();
@@ -892,7 +945,7 @@ void InstallOrUpdate(HWND window) {
       window,
       L"DeskLink Windows 主机已安装并启动。\n\n"
       L"设备 ID 已配置；访问码已使用 Windows DPAPI 加密保存。\n"
-      L"下方连接诊断会检查 Signal / TURN / Service 状态。",
+      L"下方连接诊断会检查 Signal / TURN / Service，并实测本机 GPU 抓屏与 H.264 编码能力。",
       L"DeskLink 设置完成",
       MB_OK | MB_ICONINFORMATION);
 }
@@ -996,7 +1049,7 @@ void CreateControls(HWND window) {
   HWND subtitle = CreateWindowExW(
       0,
       L"STATIC",
-      L"配置被控端并一键检查 Signal、TURN 与 Windows Service。配置更新后无需重启 Windows。",
+      L"配置被控端并一键检查 Signal、TURN、Windows Service 与本机 GPU 媒体管线。配置更新后无需重启 Windows。",
       WS_CHILD | WS_VISIBLE,
       30,
       60,
@@ -1042,7 +1095,7 @@ void CreateControls(HWND window) {
   HWND hint = CreateWindowExW(
       0,
       L"STATIC",
-      L"建议：安装后先点击“连接诊断”。公网环境应配置 WSS + STUN + TURN；正式环境再启用短期凭证接口。",
+      L"建议：安装后先点击“连接诊断”。它会实测抓屏/硬件 H.264，并检查 WSS、STUN、TURN 与服务状态。",
       WS_CHILD | WS_VISIBLE,
       30,
       y + 48,
@@ -1080,7 +1133,7 @@ void CreateControls(HWND window) {
   HWND diagnostic = CreateWindowExW(
       WS_EX_CLIENTEDGE,
       L"EDIT",
-      L"点击“连接诊断”检查当前配置。不会上传访问码或设备凭证。",
+      L"点击“连接诊断”检查当前配置和本机媒体能力。不会上传访问码或设备凭证。",
       WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
       30,
       y + 183,
