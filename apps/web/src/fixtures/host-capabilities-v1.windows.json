@@ -1,0 +1,68 @@
+{
+  "t": "host-capabilities",
+  "version": 1,
+  "capabilities": {
+    "version": 1,
+    "secureAttention": {
+      "available": true,
+      "metadata": {
+        "policy": "allow-services"
+      }
+    },
+    "clipboard": {
+      "available": true
+    },
+    "fileTransfer": {
+      "available": true
+    },
+    "systemAudio": {
+      "available": false,
+      "reason": "not-implemented"
+    },
+    "microphone": {
+      "available": false,
+      "reason": "not-implemented"
+    },
+    "protectedDesktop": {
+      "available": false,
+      "reason": "not-implemented"
+    },
+    "multiMonitor": {
+      "available": true
+    },
+    "highRefresh": {
+      "available": true
+    },
+    "virtualDisplay": {
+      "available": false,
+      "reason": "not-implemented"
+    },
+    "privacyMode": {
+      "available": false,
+      "reason": "not-implemented"
+    },
+    "virtualHid": {
+      "available": false,
+      "reason": "not-implemented"
+    },
+    "gamepad": {
+      "available": false,
+      "reason": "not-implemented"
+    },
+    "codecs": [
+      {
+        "codec": "h264",
+        "maximumFps": 144,
+        "maximumResolution": {
+          "width": 1920,
+          "height": 1080
+        }
+      }
+    ],
+    "maximumFps": 144,
+    "maximumResolution": {
+      "width": 1920,
+      "height": 1080
+    }
+  }
+}
