@@ -24,8 +24,35 @@ jobs:
           node-version: "22.23.2"
       - name: Generate lockfile from pinned manifest
         run: npm install --package-lock-only --ignore-scripts
-      - name: Verify clean install from generated lockfile
-        run: npm ci
+      - name: Remove non-resolution lockfile metadata
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("package-lock.json")
+          lock = json.loads(path.read_text(encoding="utf-8"))
+          keep = {
+              "version", "integrity", "dependencies", "devDependencies",
+              "optionalDependencies", "peerDependencies", "peerDependenciesMeta",
+              "dev", "optional", "link", "hasInstallScript", "os", "cpu", "bin"
+          }
+          for name, package in lock.get("packages", {}).items():
+              if not name or not isinstance(package, dict):
+                  continue
+              lock["packages"][name] = {
+                  key: value for key, value in package.items() if key in keep
+              }
+          path.write_text(
+              json.dumps(lock, separators=(",", ":"), ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Verify clean install from compact lockfile
+        run: |
+          rm -rf node_modules
+          npm ci
+          git diff --exit-code -- package-lock.json
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests
@@ -35,7 +62,7 @@ jobs:
       - name: Upload generated lockfile
         uses: actions/upload-artifact@v4
         with:
-          name: desklink-web-package-lock
+          name: desklink-web-package-lock-compact
           path: apps/web/package-lock.json
           if-no-files-found: error
           retention-days: 1
