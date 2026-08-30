@@ -62,6 +62,37 @@ func TestSessionAndSignalValidation(t *testing.T) {
 	}
 }
 
+func TestPeerOfflineSignalIsTargetScoped(t *testing.T) {
+	t.Parallel()
+
+	const target = "windows-host-1"
+	plain := peerOfflineSignal(target, false)
+	if plain["type"] != "peer-offline" {
+		t.Fatalf("unexpected peer-offline signal type: %#v", plain["type"])
+	}
+	if plain["target"] != target {
+		t.Fatalf("peer-offline signal lost target scope: %#v", plain["target"])
+	}
+	if _, exists := plain["payload"]; exists {
+		t.Fatal("plain peer-offline signal unexpectedly included a payload")
+	}
+
+	queued := peerOfflineSignal(target, true)
+	if queued["target"] != target {
+		t.Fatalf("queued peer-offline signal lost target scope: %#v", queued["target"])
+	}
+	payload, ok := queued["payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("queued peer-offline payload has unexpected type: %T", queued["payload"])
+	}
+	if payload["authQueued"] != true {
+		t.Fatalf("queued peer-offline signal lost authQueued flag: %#v", payload["authQueued"])
+	}
+	if payload["expiresInMs"] != pendingHostAuthTTL.Milliseconds() || pendingHostAuthTTL <= 0 {
+		t.Fatalf("queued peer-offline signal has invalid wait TTL: %#v", payload["expiresInMs"])
+	}
+}
+
 func TestSignalRateLimiter(t *testing.T) {
 	p := newPeer("test-device", nil)
 
