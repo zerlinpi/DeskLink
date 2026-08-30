@@ -31,7 +31,7 @@ export function shouldAcceptSignalMessage(
   }
 
   if (message.type === "peer-offline") {
-    return message.target === scope.hostId;
+    return message.target === scope.hostId && message.session === scope.sessionId;
   }
 
   if (message.type === "device-revoked") {
