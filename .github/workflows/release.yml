@@ -160,6 +160,7 @@ jobs:
             "build/windows-agent/Release/desklink-active-session-smoke.exe",
             "build/windows-agent/Release/desklink-device-identity-smoke.exe",
             "build/windows-agent/Release/desklink-secure-attention-smoke.exe",
+            "build/windows-agent/Release/desklink-host-capabilities-smoke.exe",
             "build/windows-agent/Release/desklink-access-proof-smoke.exe",
             "build/windows-agent/Release/desklink-service-auth-smoke.exe"
           )
@@ -209,14 +210,19 @@ jobs:
             }
           }
 
-      - name: Authenticode sign Windows binaries when certificate is configured
+      - name: Authenticode sign stable Windows binaries
         shell: pwsh
         env:
           DESKLINK_WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
           DESKLINK_WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
           DESKLINK_WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
         run: |
-          ./packaging/windows/sign-binaries.ps1 -BinaryDirectory "build/windows-agent/Release"
+          ./packaging/windows/sign-binaries.ps1 -BinaryDirectory "build/windows-agent/Release" -RequireSignature
+
+      - name: Verify stable Authenticode signatures before packaging
+        shell: pwsh
+        run: |
+          ./packaging/windows/sign-binaries.ps1 -BinaryDirectory "build/windows-agent/Release" -RequireSignature -VerifyOnly
 
       - name: Package Windows host
         shell: pwsh
