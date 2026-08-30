@@ -6,6 +6,10 @@ type Deferred<T> = {
   resolve: (value: T) => void;
 };
 
+type SignalCapture = {
+  value?: AbortSignal;
+};
+
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => {
@@ -43,10 +47,10 @@ describe("ControllerTokenCoordinator", () => {
     const coordinator = new ControllerTokenCoordinator();
     const pending = deferred<{ token: string; expiresAt: number }>();
     let requests = 0;
-    let firstSignal: AbortSignal | null = null;
+    const firstSignal: SignalCapture = {};
     const request = (signal: AbortSignal) => {
       requests += 1;
-      firstSignal = signal;
+      firstSignal.value = signal;
       return pending.promise;
     };
 
@@ -62,7 +66,7 @@ describe("ControllerTokenCoordinator", () => {
     });
 
     expect(requests).toBe(1);
-    expect(firstSignal?.aborted).toBe(false);
+    expect(firstSignal.value?.aborted).toBe(false);
     pending.resolve({ token: "token-a", expiresAt: nowSeconds + 600 });
     await expect(first).resolves.toBe("token-a");
     await expect(second).resolves.toBe("token-a");
@@ -72,15 +76,15 @@ describe("ControllerTokenCoordinator", () => {
     const coordinator = new ControllerTokenCoordinator();
     const oldTarget = deferred<{ token: string; expiresAt: number }>();
     const newTarget = deferred<{ token: string; expiresAt: number }>();
-    let oldSignal: AbortSignal | null = null;
-    let newSignal: AbortSignal | null = null;
+    const oldSignal: SignalCapture = {};
+    const newSignal: SignalCapture = {};
     let newRequests = 0;
 
     const oldPromise = coordinator.getToken("host-a", {
       nowSeconds,
       refreshMarginSeconds,
       request: (signal) => {
-        oldSignal = signal;
+        oldSignal.value = signal;
         return oldTarget.promise;
       },
     });
@@ -88,14 +92,14 @@ describe("ControllerTokenCoordinator", () => {
       nowSeconds,
       refreshMarginSeconds,
       request: (signal) => {
-        newSignal = signal;
+        newSignal.value = signal;
         newRequests += 1;
         return newTarget.promise;
       },
     });
 
-    expect(oldSignal?.aborted).toBe(true);
-    expect(newSignal?.aborted).toBe(false);
+    expect(oldSignal.value?.aborted).toBe(true);
+    expect(newSignal.value?.aborted).toBe(false);
     expect(newRequests).toBe(1);
 
     newTarget.resolve({ token: "token-b", expiresAt: nowSeconds + 600 });
@@ -117,18 +121,18 @@ describe("ControllerTokenCoordinator", () => {
   it("cancels and invalidates a request when the controller session is cleared", async () => {
     const coordinator = new ControllerTokenCoordinator();
     const stale = deferred<{ token: string; expiresAt: number }>();
-    let staleSignal: AbortSignal | null = null;
+    const staleSignal: SignalCapture = {};
 
     const stalePromise = coordinator.getToken("host-a", {
       nowSeconds,
       refreshMarginSeconds,
       request: (signal) => {
-        staleSignal = signal;
+        staleSignal.value = signal;
         return stale.promise;
       },
     });
     coordinator.clear();
-    expect(staleSignal?.aborted).toBe(true);
+    expect(staleSignal.value?.aborted).toBe(true);
 
     stale.resolve({ token: "stale-token", expiresAt: nowSeconds + 600 });
     await expect(stalePromise).resolves.toBe("stale-token");
