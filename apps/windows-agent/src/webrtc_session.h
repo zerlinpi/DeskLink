@@ -17,6 +17,7 @@
 #include <rtc/rtc.hpp>
 
 #include "host_capabilities.h"
+#include "input_channel_authority.h"
 #include "input_injector.h"
 
 namespace desklink {
@@ -114,6 +115,7 @@ class WebRtcSession {
   std::shared_ptr<rtc::WebSocket> websocket_;
   std::shared_ptr<rtc::PeerConnection> peer_;
   std::shared_ptr<rtc::DataChannel> control_;
+  InputChannelAuthority input_channel_authority_;
   std::shared_ptr<FileTransferReceiver> file_transfer_receiver_;
   std::shared_ptr<rtc::Track> video_track_;
   uint64_t video_timestamp_base100ns_{0};
