@@ -48,7 +48,15 @@ chmod 600 "$ENV_FILE"
 run_go_tool() {
   tool="$1"
   shift
+  # Write registry files as the invoking host user rather than container root.
+  # This keeps later chmod/rotation operations usable on a normal non-root
+  # deployment account. Go's HOME/GOPATH/GOCACHE live in container /tmp so the
+  # unprivileged UID never needs write access to the image filesystem.
   docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    -e HOME=/tmp \
+    -e GOPATH=/tmp/go \
+    -e GOCACHE=/tmp/go-cache \
     -v "$REPO_ROOT:/repo" \
     -w /repo \
     golang:1.23-alpine \
