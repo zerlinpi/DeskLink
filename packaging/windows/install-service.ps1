@@ -9,7 +9,9 @@ param(
   [int]$TurnPort = 3478,
   [int]$TurnTlsPort = 5349,
   [string]$TurnCredentialsUrl = "",
-  [int]$OutputIndex = 0
+  [int]$OutputIndex = 0,
+  [ValidateRange(15, 144)][int]$Fps = 60,
+  [int]$BitrateBps = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,11 +45,15 @@ if ($DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {
 if ($TurnPort -lt 1 -or $TurnPort -gt 65535) { throw "TurnPort must be 1-65535." }
 if ($TurnTlsPort -lt 1 -or $TurnTlsPort -gt 65535) { throw "TurnTlsPort must be 1-65535." }
 if ($OutputIndex -lt 0 -or $OutputIndex -gt 64) { throw "OutputIndex must be 0-64." }
+if ($BitrateBps -ne 0 -and ($BitrateBps -lt 1000000 -or $BitrateBps -gt 60000000)) {
+  throw "BitrateBps must be 0 (automatic) or 1000000-60000000."
+}
 
 $packageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $agentSource = Join-Path $packageDir "desklink-agent.exe"
 $serviceSource = Join-Path $packageDir "desklink-service.exe"
 $managerSource = Join-Path $packageDir "DeskLink.exe"
+$mediaProbeSource = Join-Path $packageDir "desklink-media-probe.exe"
 if (-not (Test-Path $agentSource)) { throw "desklink-agent.exe was not found beside this installer script." }
 if (-not (Test-Path $serviceSource)) { throw "desklink-service.exe was not found beside this installer script." }
 
@@ -62,6 +68,9 @@ Copy-Item $agentSource (Join-Path $InstallDir "desklink-agent.exe") -Force
 Copy-Item $serviceSource (Join-Path $InstallDir "desklink-service.exe") -Force
 if (Test-Path $managerSource) {
   Copy-Item $managerSource (Join-Path $InstallDir "DeskLink.exe") -Force
+}
+if (Test-Path $mediaProbeSource) {
+  Copy-Item $mediaProbeSource (Join-Path $InstallDir "desklink-media-probe.exe") -Force
 }
 Copy-Item $MyInvocation.MyCommand.Path (Join-Path $InstallDir "install-service.ps1") -Force
 $uninstaller = Join-Path $packageDir "uninstall-service.ps1"
@@ -89,6 +98,10 @@ Add-ServiceEnvironment $entries "DESKLINK_TURN_PORT" ([string]$TurnPort)
 Add-ServiceEnvironment $entries "DESKLINK_TURN_TLS_PORT" ([string]$TurnTlsPort)
 Add-ServiceEnvironment $entries "DESKLINK_TURN_CREDENTIALS_URL" $TurnCredentialsUrl
 Add-ServiceEnvironment $entries "DESKLINK_OUTPUT_INDEX" ([string]$OutputIndex)
+Add-ServiceEnvironment $entries "DESKLINK_FPS" ([string]$Fps)
+if ($BitrateBps -gt 0) {
+  Add-ServiceEnvironment $entries "DESKLINK_BITRATE_BPS" ([string]$BitrateBps)
+}
 if (-not [string]::IsNullOrWhiteSpace($SignalTokenUrl)) {
   Add-ServiceEnvironment $entries "DESKLINK_SIGNAL_TOKEN_REQUIRED" "1"
 }
@@ -120,6 +133,8 @@ $legacyMachineSettings = @(
   "DESKLINK_TURN_TLS_PORT",
   "DESKLINK_TURN_CREDENTIALS_URL",
   "DESKLINK_OUTPUT_INDEX",
+  "DESKLINK_FPS",
+  "DESKLINK_BITRATE_BPS",
   "DESKLINK_SIGNAL_TOKEN_REQUIRED",
   "DESKLINK_TURN_RUNTIME_REQUIRED"
 )
@@ -133,6 +148,7 @@ Restart-Service DeskLink -Force
 Write-Host ""
 Write-Host "DeskLink binaries and service-scoped configuration are installed." -ForegroundColor Green
 Write-Host "Configuration now applies on Service restart; a Windows reboot is not required."
+Write-Host "Video target: $Fps fps; bitrate: $(if ($BitrateBps -gt 0) { "$BitrateBps bps" } else { "automatic for target fps" })."
 Write-Host "The installer intentionally did NOT put secrets in command-line arguments or environment variables."
 Write-Host ""
 Write-Host "Next, provision or rotate the durable device credential when SignalTokenUrl is enabled:"
