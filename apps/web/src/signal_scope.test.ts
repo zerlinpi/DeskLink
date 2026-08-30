@@ -49,14 +49,25 @@ describe("shouldAcceptSignalMessage", () => {
     expect(shouldAcceptSignalMessage({ type: "ice", from: scope.hostId }, scope)).toBe(false);
   });
 
-  it("accepts peer-offline only for the active target", () => {
+  it("accepts peer-offline only for the active target and session", () => {
     expect(shouldAcceptSignalMessage({
       type: "peer-offline",
       target: scope.hostId,
+      session: scope.sessionId,
     }, scope)).toBe(true);
     expect(shouldAcceptSignalMessage({
       type: "peer-offline",
       target: "old-target",
+      session: scope.sessionId,
+    }, scope)).toBe(false);
+    expect(shouldAcceptSignalMessage({
+      type: "peer-offline",
+      target: scope.hostId,
+      session: "old-session",
+    }, scope)).toBe(false);
+    expect(shouldAcceptSignalMessage({
+      type: "peer-offline",
+      target: scope.hostId,
     }, scope)).toBe(false);
     expect(shouldAcceptSignalMessage({ type: "peer-offline" }, scope)).toBe(false);
   });
