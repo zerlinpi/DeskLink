@@ -6,6 +6,7 @@ on:
     paths:
       - VERSION
       - docs/releases/**
+      - tools/version/**
       - .github/workflows/release-notes-sync.yml
   workflow_dispatch:
 
@@ -21,27 +22,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - id: version
         name: Resolve release notes
         shell: bash
         run: |
           set -euo pipefail
-          version="$(tr -d '\r\n ' < VERSION)"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "VERSION must be semantic major.minor.patch" >&2
-            exit 1
-          fi
-          notes="docs/releases/v$version.md"
-          if [[ ! -f "$notes" ]]; then
-            echo "Missing release notes: $notes" >&2
-            exit 1
-          fi
+          version="$(python tools/version/check-version.py)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if [[ "$version" == *-* ]]; then
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            echo "Development VERSION $version has no published release notes to sync."
+            exit 0
+          fi
+
+          python tools/version/check-version.py --require-stable --tag "v$version" >/dev/null
+          echo "stable=true" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+          echo "notes=docs/releases/v$version.md" >> "$GITHUB_OUTPUT"
 
       - name: Sync published release notes
+        if: steps.version.outputs.stable == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -55,5 +60,5 @@ jobs:
               --notes-file "$notes"
             echo "Updated release notes for $tag"
           else
-            echo "Release $tag does not exist yet; the main Release workflow will create it."
+            echo "Release $tag does not exist yet; the tag-driven Release workflow will create it."
           fi
