@@ -10,6 +10,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "secure_attention.h"
+
 namespace desklink {
 namespace {
 using namespace std::chrono_literals;
@@ -226,21 +228,33 @@ bool FetchServiceSecureAttentionStatus(
     SetError(error, "secure-attention status output is required");
     return false;
   }
+  if (error) error->clear();
   *status = {};
   status->broker_configured = ServiceSecureAttentionBrokerConfigured();
-  if (!status->broker_configured) {
-    SetError(error, "service secure-attention broker is not enabled");
-    return false;
+
+  std::wstring capability_error;
+  const SecureAttentionCapability capability =
+      QuerySecureAttentionCapability(&capability_error);
+  status->api_available = capability.api_available;
+  status->policy_readable = capability.policy_error == ERROR_SUCCESS;
+  status->policy_allows_services = capability.policy_allows_services;
+  status->policy = SecureAttentionPolicyCode(capability.policy);
+  status->available = status->broker_configured &&
+                      status->api_available &&
+                      status->policy_readable &&
+                      status->policy_allows_services;
+
+  if (error && !status->available) {
+    if (!status->broker_configured) {
+      *error = "service secure-attention broker is not enabled";
+    } else if (!status->api_available) {
+      *error = "Windows Secure Attention Sequence API is unavailable";
+    } else if (!status->policy_readable) {
+      *error = "Windows SoftwareSASGeneration policy could not be read";
+    } else if (!status->policy_allows_services) {
+      *error = "Windows SoftwareSASGeneration policy does not allow Services";
+    }
   }
-
-  nlohmann::json response;
-  if (!BrokerRequest("secure-attention-status", &response, error)) return false;
-
-  status->api_available = response.value("apiAvailable", false);
-  status->policy_allows_services = response.value("policyAllowsServices", false);
-  status->available = response.value("available", false);
-  status->policy = response.value("policy", "unknown");
-  if (status->policy.size() > 64) status->policy = "unknown";
   return true;
 }
 
@@ -248,18 +262,48 @@ bool RequestServiceSecureAttentionSequence(
     std::string* error,
     std::string* error_code) {
   if (error_code) error_code->clear();
-  if (!ServiceSecureAttentionBrokerConfigured()) {
-    SetError(error, "service secure-attention broker is not enabled");
+
+  ServiceSecureAttentionStatus status;
+  std::string status_error;
+  if (!FetchServiceSecureAttentionStatus(&status, &status_error)) {
+    SetError(error, status_error.empty() ? "secure-attention status unavailable" : status_error);
+    if (error_code) *error_code = "capability-unavailable";
+    return false;
+  }
+  if (!status.broker_configured) {
+    SetError(error, status_error);
     if (error_code) *error_code = "service-broker-unavailable";
+    return false;
+  }
+  if (!status.api_available) {
+    SetError(error, status_error);
+    if (error_code) *error_code = "api-unavailable";
+    return false;
+  }
+  if (!status.policy_readable) {
+    SetError(error, status_error);
+    if (error_code) *error_code = "policy-read-error";
+    return false;
+  }
+  if (!status.policy_allows_services) {
+    SetError(error, status_error);
+    if (error_code) *error_code = "policy-not-allowed";
     return false;
   }
 
   nlohmann::json response;
   if (BrokerRequest("secure-attention-sequence", &response, error)) return true;
-  if (error_code && response.is_object()) {
-    *error_code = response.value("errorCode", "dispatch-failed");
+
+  const std::string broker_error = response.value("error", "");
+  if (error_code) {
+    if (broker_error.find("rate limited") != std::string::npos) {
+      *error_code = "rate-limited";
+    } else if (broker_error.find("capability is not enabled") != std::string::npos) {
+      *error_code = "service-broker-unavailable";
+    } else {
+      *error_code = "dispatch-failed";
+    }
   }
-  if (error_code && error_code->empty()) *error_code = "dispatch-failed";
   return false;
 }
 
