@@ -8,6 +8,7 @@ import {
   shouldScheduleIceRestart,
   signalReconnectDelayMs,
 } from "./session_recovery";
+import { shouldAcceptSignalMessage } from "./signal_scope";
 import "./styles.css";
 
 type SignalMessage = {
@@ -77,14 +78,6 @@ const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
 const CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS = 90;
 const SIGNAL_PROTOCOL = "desklink-v1";
 const CONTROLLER_AUTH_PROTOCOL_PREFIX = "desklink-auth.";
-const HOST_SCOPED_SIGNAL_TYPES = new Set([
-  "auth-challenge",
-  "auth-accepted",
-  "auth-rejected",
-  "answer",
-  "ice",
-]);
-
 const TURN_URLS = TURN_URL.startsWith("turns:")
   ? [TURN_URL]
   : [`${TURN_URL}?transport=udp`, `${TURN_URL}?transport=tcp`];
@@ -689,11 +682,12 @@ function App() {
       return;
     }
 
-    if (HOST_SCOPED_SIGNAL_TYPES.has(msg.type)) {
-      if (msg.from !== targetId.trim() || msg.session !== sessionRef.current) {
-        console.debug("DeskLink ignored host-scoped signal from unexpected peer/session", msg.type);
-        return;
-      }
+    if (!shouldAcceptSignalMessage(msg, {
+      hostId: targetId.trim(),
+      sessionId: sessionRef.current,
+    })) {
+      console.debug("DeskLink ignored signal outside the active target/session scope", msg.type);
+      return;
     }
 
     if (msg.type === "auth-challenge") {
@@ -746,11 +740,6 @@ function App() {
     }
 
     if (msg.type === "device-revoked") {
-      const revokedTarget = typeof msg.target === "string" ? msg.target : "";
-      if (revokedTarget && revokedTarget !== targetId.trim()) {
-        console.debug("DeskLink ignored device-revoked for unexpected target", revokedTarget);
-        return;
-      }
       disconnect("device revoked");
       return;
     }
