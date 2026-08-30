@@ -239,12 +239,13 @@ func expectSignalE2EPeerOffline(
 	t *testing.T,
 	controller *websocket.Conn,
 	hostID string,
+	session string,
 	expectQueued bool,
 ) {
 	t.Helper()
 	message := readSignalE2EMessage(t, controller, 2*time.Second)
-	if message.Type != "peer-offline" || message.Target != hostID {
-		t.Fatalf("expected peer-offline for %s, got %+v", hostID, message)
+	if message.Type != "peer-offline" || message.Target != hostID || message.Session != session {
+		t.Fatalf("expected peer-offline for %s session %s, got %+v", hostID, session, message)
 	}
 	if !expectQueued {
 		return
@@ -297,7 +298,7 @@ func TestSignalWebSocketHostWaitEndToEnd(t *testing.T) {
 		controller := dialSignalE2EController(t, server.wsEndpoint, controllerID, controllerToken)
 
 		writeSignalE2EAuthRequest(t, controller, hostID, session)
-		expectSignalE2EPeerOffline(t, controller, hostID, true)
+		expectSignalE2EPeerOffline(t, controller, hostID, session, true)
 
 		hostToken := mintSignalAuthToken(server.signalSecret, hostID, time.Now().Add(5*time.Minute))
 		host := dialSignalE2EHost(t, server.wsEndpoint, hostID, hostToken)
@@ -356,7 +357,7 @@ func TestSignalWebSocketHostWaitEndToEnd(t *testing.T) {
 
 		oldController := dialSignalE2EController(t, server.wsEndpoint, controllerID, controllerToken)
 		writeSignalE2EAuthRequest(t, oldController, hostID, oldSession)
-		expectSignalE2EPeerOffline(t, oldController, hostID, true)
+		expectSignalE2EPeerOffline(t, oldController, hostID, oldSession, true)
 		_ = oldController.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "test reconnect"),
