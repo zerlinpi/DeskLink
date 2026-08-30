@@ -48,15 +48,20 @@ def main() -> None:
             f"does not match VERSION {version!r}"
         )
 
+    # package-lock.json is a dependency-resolution snapshot, not a second project
+    # version source. npm may retain the root package version metadata across a
+    # metadata-only version bump, so validate the dependency graph instead.
     lock = load_json(ROOT / "apps/web/package-lock.json")
-    if lock.get("version") != version:
-        fail(
-            f"apps/web/package-lock.json version {lock.get('version')!r} "
-            f"does not match VERSION {version!r}"
-        )
     root_package = lock.get("packages", {}).get("") if isinstance(lock.get("packages"), dict) else None
-    if not isinstance(root_package, dict) or root_package.get("version") != version:
-        fail("apps/web/package-lock.json root package version does not match VERSION")
+    if not isinstance(root_package, dict):
+        fail("apps/web/package-lock.json is missing the root package snapshot")
+    if root_package.get("name") != package.get("name"):
+        fail("apps/web/package-lock.json root package name does not match package.json")
+    for key in ("dependencies", "devDependencies"):
+        package_dependencies = package.get(key, {})
+        lock_dependencies = root_package.get(key, {})
+        if package_dependencies != lock_dependencies:
+            fail(f"apps/web/package-lock.json {key} do not match package.json")
 
     if not prerelease:
         notes = ROOT / f"docs/releases/v{version}.md"
