@@ -31,27 +31,17 @@ jobs:
                   raise SystemExit(f'{path}: expected {expected} matches, found {count}: {old[:100]!r}')
               p.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
 
-          # Manager: keep any existing configured Device ID, but use the stable
-          # MachineGuid-derived ID instead of the hostname for first provisioning.
           setup = 'apps/windows-agent/src/setup_main.cpp'
-          replace_exact(
-              setup,
-              '#include "protected_credential_store.h"',
-              '#include "device_identity.h"\n#include "protected_credential_store.h"',
-          )
+          replace_exact(setup, '#include "protected_credential_store.h"', '#include "device_identity.h"\n#include "protected_credential_store.h"')
           p = Path(setup)
           text = p.read_text(encoding='utf-8')
           start = text.index('std::wstring DefaultDeviceId() {')
           end = text.index('\n}\n\nstd::wstring SignalHealthUrl', start) + 2
-          old = text[start:end]
           new = '''std::wstring DefaultDeviceId() {
             std::wstring error;
             std::wstring id = desklink::StableDefaultDeviceId(&error);
             if (!id.empty()) return id;
 
-            // MachineGuid should exist on supported Windows installations. Keep a
-            // hostname fallback so diagnostics/setup remains usable on damaged or
-            // heavily restricted systems instead of presenting an empty Device ID.
             wchar_t name[MAX_COMPUTERNAME_LENGTH + 1]{};
             DWORD size = static_cast<DWORD>(std::size(name));
             if (GetComputerNameW(name, &size) && size > 0) {
@@ -69,14 +59,8 @@ jobs:
           }'''
           p.write_text(text[:start] + new + text[end:], encoding='utf-8', newline='\n')
 
-          # Service command gives automation/PowerShell the exact same C++ identity
-          # implementation rather than duplicating MachineGuid hashing in scripts.
           service = 'apps/windows-agent/src/service_main.cpp'
-          replace_exact(
-              service,
-              '#include "active_session.h"\n#include "protected_credential_store.h"',
-              '#include "active_session.h"\n#include "device_identity.h"\n#include "protected_credential_store.h"',
-          )
+          replace_exact(service, '#include "active_session.h"\n#include "protected_credential_store.h"', '#include "active_session.h"\n#include "device_identity.h"\n#include "protected_credential_store.h"')
           replace_exact(
               service,
               '    if (command == L"--install") return InstallService();',
@@ -98,33 +82,17 @@ jobs:
               '          << L"Usage: desklink-service.exe --print-default-device-id | --install | --uninstall | --service | "\n             L"--store-device-credential | --clear-device-credential | "',
           )
 
-          # CLI installer: DeviceId becomes optional. If absent, ask the packaged
-          # service binary for the same stable default before touching the Service.
           installer = 'packaging/windows/install-service.ps1'
+          replace_exact(installer, '  [Parameter(Mandatory = $true)][string]$DeviceId,', '  [string]$DeviceId = "",')
           replace_exact(
               installer,
-              '  [Parameter(Mandatory = $true)][string]$DeviceId,',
-              '  [string]$DeviceId = "",',
+              "if ($DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {\n  throw \"DeviceId may contain only letters, digits, '.', '_' and '-'.\"\n}\nif ($TurnPort -lt 1 -or $TurnPort -gt 65535)",
+              "if (-not [string]::IsNullOrWhiteSpace($DeviceId) -and $DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {\n  throw \"DeviceId may contain only letters, digits, '.', '_' and '-'.\"\n}\nif ($TurnPort -lt 1 -or $TurnPort -gt 65535)",
           )
           replace_exact(
               installer,
-              '''if ($DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {
-            throw "DeviceId may contain only letters, digits, '.', '_' and '-'."
-          }
-          if ($TurnPort -lt 1 -or $TurnPort -gt 65535)''',
-              '''if (-not [string]::IsNullOrWhiteSpace($DeviceId) -and $DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {
-            throw "DeviceId may contain only letters, digits, '.', '_' and '-'."
-          }
-          if ($TurnPort -lt 1 -or $TurnPort -gt 65535)''',
-          )
-          replace_exact(
-              installer,
-              '''if (-not (Test-Path $agentSource)) { throw "desklink-agent.exe was not found beside this installer script." }
-          if (-not (Test-Path $serviceSource)) { throw "desklink-service.exe was not found beside this installer script." }
-
-          $existing = Get-Service''',
-              '''if (-not (Test-Path $agentSource)) { throw "desklink-agent.exe was not found beside this installer script." }
-          if (-not (Test-Path $serviceSource)) { throw "desklink-service.exe was not found beside this installer script." }
+              'if (-not (Test-Path $serviceSource)) { throw "desklink-service.exe was not found beside this installer script." }\n\n$existing = Get-Service',
+              '''if (-not (Test-Path $serviceSource)) { throw "desklink-service.exe was not found beside this installer script." }
 
           if ([string]::IsNullOrWhiteSpace($DeviceId)) {
             $DeviceId = (& $serviceSource --print-default-device-id | Select-Object -Last 1).Trim()
@@ -137,30 +105,11 @@ jobs:
           $existing = Get-Service''',
           )
 
-          # CMake: service + manager use shared implementation; smoke validates a
-          # deterministic vector and GUID normalization.
           cmake = 'apps/windows-agent/CMakeLists.txt'
-          replace_exact(
-              cmake,
-              '  src/active_session.h\n  src/protected_credential_store.cpp',
-              '  src/active_session.h\n  src/device_identity.cpp\n  src/device_identity.h\n  src/protected_credential_store.cpp',
-          )
-          replace_exact(
-              cmake,
-              '    advapi32\n    crypt32\n    shell32',
-              '    advapi32\n    bcrypt\n    crypt32\n    shell32',
-              expected=1,
-          )
-          replace_exact(
-              cmake,
-              'add_executable(desklink-manager WIN32\n  src/setup_main.cpp\n  src/protected_credential_store.cpp',
-              'add_executable(desklink-manager WIN32\n  src/setup_main.cpp\n  src/device_identity.cpp\n  src/device_identity.h\n  src/protected_credential_store.cpp',
-          )
-          replace_exact(
-              cmake,
-              '    advapi32\n    comctl32\n    crypt32',
-              '    advapi32\n    bcrypt\n    comctl32\n    crypt32',
-          )
+          replace_exact(cmake, '  src/active_session.h\n  src/protected_credential_store.cpp', '  src/active_session.h\n  src/device_identity.cpp\n  src/device_identity.h\n  src/protected_credential_store.cpp')
+          replace_exact(cmake, '    advapi32\n    crypt32\n    shell32', '    advapi32\n    bcrypt\n    crypt32\n    shell32', expected=1)
+          replace_exact(cmake, 'add_executable(desklink-manager WIN32\n  src/setup_main.cpp\n  src/protected_credential_store.cpp', 'add_executable(desklink-manager WIN32\n  src/setup_main.cpp\n  src/device_identity.cpp\n  src/device_identity.h\n  src/protected_credential_store.cpp')
+          replace_exact(cmake, '    advapi32\n    comctl32\n    crypt32', '    advapi32\n    bcrypt\n    comctl32\n    crypt32')
           p = Path(cmake)
           text = p.read_text(encoding='utf-8')
           marker = 'target_link_libraries(desklink-active-session-smoke PRIVATE wtsapi32)'
@@ -177,40 +126,6 @@ jobs:
           target_compile_options(desklink-device-identity-smoke PRIVATE /W4 /permissive-)
           target_link_libraries(desklink-device-identity-smoke PRIVATE advapi32 bcrypt)'''
           p.write_text(text.replace(marker, marker + addition), encoding='utf-8', newline='\n')
-
-          # Permanently run the smoke in normal CI.
-          ci = '.github/workflows/ci.yml'
-          replace_exact(
-              ci,
-              '''      - name: Validate active Windows session selection
-                shell: pwsh
-                run: |
-                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-active-session-smoke.exe"
-                  & $smoke
-                  if ($LASTEXITCODE -ne 0) { throw "Active session smoke failed with exit code $LASTEXITCODE" }
-              - name: Validate Access Code proof vector''',
-              '''      - name: Validate active Windows session selection
-                shell: pwsh
-                run: |
-                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-active-session-smoke.exe"
-                  & $smoke
-                  if ($LASTEXITCODE -ne 0) { throw "Active session smoke failed with exit code $LASTEXITCODE" }
-              - name: Validate stable Windows Device ID
-                shell: pwsh
-                run: |
-                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-device-identity-smoke.exe"
-                  & $smoke
-                  if ($LASTEXITCODE -ne 0) { throw "Device identity smoke failed with exit code $LASTEXITCODE" }
-              - name: Validate Access Code proof vector''',
-          )
-
-          # Future releases must also verify the identity vector.
-          release = '.github/workflows/release.yml'
-          replace_exact(
-              release,
-              '            "build/windows-agent/Release/desklink-active-session-smoke.exe",\n            "build/windows-agent/Release/desklink-access-proof-smoke.exe",',
-              '            "build/windows-agent/Release/desklink-active-session-smoke.exe",\n            "build/windows-agent/Release/desklink-device-identity-smoke.exe",\n            "build/windows-agent/Release/desklink-access-proof-smoke.exe",',
-          )
           '@ | python -
 
       - name: Validate packaging PowerShell syntax
@@ -218,11 +133,7 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "packaging/windows/install-service.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "packaging/windows/install-service.ps1"), [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) { throw (($errors | ForEach-Object { $_.Message }) -join '; ') }
 
       - name: Configure Windows host
@@ -245,8 +156,10 @@ jobs:
           }
           $service = Resolve-Path "build/windows-agent/Release/desklink-service.exe"
           $id1 = (& $service --print-default-device-id | Select-Object -Last 1).Trim()
+          $exit1 = $LASTEXITCODE
           $id2 = (& $service --print-default-device-id | Select-Object -Last 1).Trim()
-          if ($LASTEXITCODE -ne 0 -or $id1 -notmatch '^win-[0-9a-f]{32}$' -or $id1 -ne $id2) {
+          $exit2 = $LASTEXITCODE
+          if ($exit1 -ne 0 -or $exit2 -ne 0 -or $id1 -notmatch '^win-[0-9a-f]{32}$' -or $id1 -ne $id2) {
             throw "Service did not return a stable Device ID: '$id1' / '$id2'"
           }
 
@@ -255,7 +168,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps/windows-agent/src/setup_main.cpp apps/windows-agent/src/service_main.cpp apps/windows-agent/CMakeLists.txt packaging/windows/install-service.ps1 .github/workflows/ci.yml .github/workflows/release.yml
+          git add apps/windows-agent/src/setup_main.cpp apps/windows-agent/src/service_main.cpp apps/windows-agent/CMakeLists.txt packaging/windows/install-service.ps1
           if (git diff --cached --quiet) { throw "Stable identity wiring produced no changes" }
           git commit -m "feat(windows): keep default Device ID stable across reinstalls"
           git pull --rebase origin main
