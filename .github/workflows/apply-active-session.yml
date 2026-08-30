@@ -78,4 +78,5 @@ jobs:
           git add apps/windows-agent/src/service_main.cpp apps/windows-agent/CMakeLists.txt
           if (git diff --cached --quiet) { throw "Active session patch produced no changes" }
           git commit -m "feat(windows): route service into active RDP session"
+          git pull --rebase origin main
           git push origin HEAD:main
