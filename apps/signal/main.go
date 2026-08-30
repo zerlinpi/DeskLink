@@ -22,8 +22,8 @@ const (
 	revocationSweepPeriod = 5 * time.Second
 	writeWait             = 8 * time.Second
 	maxMessageBytes       = 256 << 10
-	signalRate             = 30.0
-	signalBurst            = 60.0
+	signalRate            = 30.0
+	signalBurst           = 60.0
 )
 
 type envelope struct {
@@ -65,7 +65,7 @@ func newPeer(id string, conn *websocket.Conn, scopes ...signalRegistrationScope)
 		allowedTarget: scope.AllowedTarget,
 		controller:    scope.Controller,
 		authExpiresAt: scope.ExpiresAt,
-		tokens:         signalBurst,
+		tokens:        signalBurst,
 		lastRefill:    time.Now(),
 	}
 }
@@ -214,8 +214,8 @@ func originAllowed(origin string) bool {
 	return false
 }
 
-func peerOfflineSignal(target string, authQueued bool) map[string]any {
-	message := map[string]any{"type": "peer-offline", "target": target}
+func peerOfflineSignal(target string, session string, authQueued bool) map[string]any {
+	message := map[string]any{"type": "peer-offline", "target": target, "session": session}
 	if authQueued {
 		message["payload"] = map[string]any{
 			"authQueued":  true,
@@ -461,7 +461,7 @@ func main() {
 						metrics.pendingHostAuthDropped.Add(1)
 					}
 				}
-				_ = p.write(peerOfflineSignal(msg.Target, authQueued))
+				_ = p.write(peerOfflineSignal(msg.Target, msg.Session, authQueued))
 				continue
 			}
 
@@ -501,7 +501,7 @@ func main() {
 				}
 				h.remove(msg.Target, target)
 				_ = target.conn.Close()
-				_ = p.write(peerOfflineSignal(msg.Target, authQueued))
+				_ = p.write(peerOfflineSignal(msg.Target, msg.Session, authQueued))
 				log.Printf("forward %s -> %s: %v", id, msg.Target, err)
 			} else {
 				metrics.messagesForwarded.Add(1)
