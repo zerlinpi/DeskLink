@@ -3,7 +3,9 @@ import {
   HOST_WAIT_REFRESH_MAX_MS,
   hostWaitRefreshDelayMs,
   iceRestartDelayMs,
+  shouldBeginSignalOpen,
   shouldScheduleIceRestart,
+  shouldScheduleSignalReconnect,
   signalReconnectDelayMs,
 } from "./session_recovery";
 
@@ -25,6 +27,29 @@ describe("signalReconnectDelayMs", () => {
     expect(signalReconnectDelayMs(-3)).toBe(500);
     expect(signalReconnectDelayMs(Number.NaN)).toBe(500);
     expect(signalReconnectDelayMs(2.9)).toBe(2_000);
+  });
+});
+
+describe("signal open/reconnect gates", () => {
+  const openBase = {
+    manualDisconnect: false,
+    openInFlight: false,
+    socketActive: false,
+  } as const;
+
+  it("allows exactly one signal open attempt when idle", () => {
+    expect(shouldBeginSignalOpen(openBase)).toBe(true);
+    expect(shouldBeginSignalOpen({ ...openBase, openInFlight: true })).toBe(false);
+    expect(shouldBeginSignalOpen({ ...openBase, socketActive: true })).toBe(false);
+    expect(shouldBeginSignalOpen({ ...openBase, manualDisconnect: true })).toBe(false);
+  });
+
+  it("does not schedule a second reconnect while opening or while a timer/socket is active", () => {
+    expect(shouldScheduleSignalReconnect({ ...openBase, timerScheduled: false })).toBe(true);
+    expect(shouldScheduleSignalReconnect({ ...openBase, timerScheduled: true })).toBe(false);
+    expect(shouldScheduleSignalReconnect({ ...openBase, openInFlight: true, timerScheduled: false })).toBe(false);
+    expect(shouldScheduleSignalReconnect({ ...openBase, socketActive: true, timerScheduled: false })).toBe(false);
+    expect(shouldScheduleSignalReconnect({ ...openBase, manualDisconnect: true, timerScheduled: false })).toBe(false);
   });
 });
 
