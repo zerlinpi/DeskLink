@@ -1,0 +1,96 @@
+name: One-shot session recovery integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-session-recovery.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Integrate recovery policy into Web controller
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  'import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";\n',
+                  'import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";\nimport {\n  hostWaitRefreshDelayMs,\n  iceRestartDelayMs,\n  shouldScheduleIceRestart,\n  signalReconnectDelayMs,\n} from "./session_recovery";\n',
+              ),
+              (
+                  'const HOST_WAIT_REFRESH_SAFETY_MS = 5000;\nconst HOST_WAIT_REFRESH_MAX_MS = 10 * 60 * 1000;\n',
+                  '',
+              ),
+              (
+                  '    const advertised = Number(expiresInMs);\n    if (!Number.isFinite(advertised) || advertised <= 0) return;\n\n    const cappedLifetime = Math.min(HOST_WAIT_REFRESH_MAX_MS, advertised);\n    const delay = Math.max(1000, cappedLifetime - HOST_WAIT_REFRESH_SAFETY_MS);\n',
+                  '    const delay = hostWaitRefreshDelayMs(expiresInMs);\n    if (delay === null) return;\n',
+              ),
+              (
+                  '    if (manualDisconnectRef.current || pcRef.current !== pc) return;\n    if (iceRestartInFlightRef.current || iceRestartTimerRef.current !== null) return;\n    if (pc.connectionState === "connected" || pc.connectionState === "closed") return;\n\n    iceRestartTimerRef.current = window.setTimeout(() => {',
+                  '    if (!shouldScheduleIceRestart({\n      manualDisconnect: manualDisconnectRef.current,\n      currentPeer: pcRef.current === pc,\n      restartInFlight: iceRestartInFlightRef.current,\n      timerScheduled: iceRestartTimerRef.current !== null,\n      connectionState: pc.connectionState,\n    })) return;\n\n    iceRestartTimerRef.current = window.setTimeout(() => {',
+              ),
+              (
+                  '    }, immediate ? 0 : 2000);',
+                  '    }, iceRestartDelayMs(immediate));',
+              ),
+              (
+                  '    const attempt = signalReconnectAttemptRef.current++;\n    const delay = Math.min(10000, 500 * (2 ** Math.min(attempt, 5)));\n',
+                  '    const attempt = signalReconnectAttemptRef.current++;\n    const delay = signalReconnectDelayMs(attempt);\n',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one recovery integration anchor, got {count}: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --quiet && {
+            echo "No session recovery integration changes to commit"
+            exit 0
+          }
+          git commit -m "refactor(web): use tested session recovery policy"
+          git push origin HEAD:main
