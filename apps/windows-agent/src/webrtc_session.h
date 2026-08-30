@@ -11,10 +11,12 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #include <nlohmann/json_fwd.hpp>
 #include <rtc/rtc.hpp>
 
+#include "host_capabilities.h"
 #include "input_injector.h"
 
 namespace desklink {
@@ -73,6 +75,17 @@ class WebRtcSession {
   // channel. Returns false when no control channel is open.
   bool SendControlMessage(const std::string& text);
 
+  // Transitional overload: main.cpp in older host revisions still constructs a
+  // legacy flat host-capabilities message inside send_monitor_state(). New hosts
+  // publish nested HostCapabilitiesV1 independently, so discard that legacy
+  // advertisement before it reaches the wire while forwarding every other
+  // rvalue control message unchanged. Remove this overload with the old block
+  // during the incremental main.cpp split.
+  bool SendControlMessage(std::string&& text) {
+    if (IsLegacyHostCapabilitiesV1Message(text)) return true;
+    return SendControlMessage(static_cast<const std::string&>(text));
+  }
+
   // Encoded access units must be Annex-B (00 00 01 / 00 00 00 01 separated NAL units).
   // timestamp100ns is the capture/encode presentation timestamp in 100-ns units.
   bool SendH264AccessUnit(const uint8_t* data, size_t size, uint64_t timestamp100ns);
@@ -129,6 +142,10 @@ class WebRtcSession {
   std::condition_variable reconnect_cv_;
   bool reconnect_requested_{false};
   std::jthread reconnect_thread_;
+
+  // Keep this member last: its worker may call connected()/SendControlMessage(),
+  // so every session synchronization primitive must already be constructed.
+  HostCapabilitiesPublisher host_capabilities_publisher_{this};
 };
 
 }  // namespace desklink
