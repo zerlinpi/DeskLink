@@ -42,3 +42,53 @@ jobs:
             --env-file infra/production/.env.example \
             -f infra/production/docker-compose.yml \
             build signal web
+
+      - name: Exercise Signal readiness and fail-closed auth mounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose=(docker compose -f infra/production/docker-compose.yml)
+          cleanup() {
+            "${compose[@]}" down -v >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # Bootstrap output contains ephemeral test credentials, so keep it out
+          # of the public workflow log while still exercising the real tool.
+          ./infra/production/bootstrap.sh \
+            control.example.com \
+            203.0.113.10 \
+            ci-windows-host \
+            ci-controller \
+            >/tmp/desklink-bootstrap.log
+
+          "${compose[@]}" up -d signal
+          signal_id="$("${compose[@]}" ps -q signal)"
+          test -n "$signal_id"
+
+          for _ in $(seq 1 30); do
+            health="$(docker inspect -f '{{.State.Health.Status}}' "$signal_id")"
+            if [[ "$health" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$health" == "unhealthy" ]]; then
+              docker logs "$signal_id"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' "$signal_id")" = "healthy"
+
+          "${compose[@]}" exec -T signal \
+            wget -q -O - http://127.0.0.1:8080/readyz |
+            grep -q '"ok":true'
+
+          # A corrupt credential registry must make readiness fail instead of
+          # leaving the container marked healthy while all logins return 503.
+          chmod 600 infra/production/secrets/devices.json
+          printf '{broken-json\n' > infra/production/secrets/devices.json
+          if "${compose[@]}" exec -T signal \
+              wget -q -O /dev/null http://127.0.0.1:8080/readyz; then
+            echo "Signal readiness stayed successful with a corrupt device registry" >&2
+            exit 1
+          fi
