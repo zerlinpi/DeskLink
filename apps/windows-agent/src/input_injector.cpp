@@ -28,6 +28,23 @@ DWORD MouseButtonFlag(int button, bool down) {
       return down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
     case 2:
       return down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+    // PointerEvent.button uses 3/4 for browser Back/Forward mouse buttons.
+    // Windows represents both through XDOWN/XUP and distinguishes the physical
+    // button with mouseData, filled by MouseButtonData below.
+    case 3:
+    case 4:
+      return down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
+    default:
+      return 0;
+  }
+}
+
+DWORD MouseButtonData(int button) {
+  switch (button) {
+    case 3:
+      return XBUTTON1;
+    case 4:
+      return XBUTTON2;
     default:
       return 0;
   }
@@ -94,6 +111,7 @@ bool ReleaseAllInjectedInput() {
     INPUT input{};
     input.type = INPUT_MOUSE;
     input.mi.dwFlags = flag;
+    input.mi.mouseData = MouseButtonData(button);
     all_released = Send(input) && all_released;
   }
 
@@ -153,6 +171,7 @@ bool InputInjector::PointerButton(int button, bool down) const {
   INPUT input{};
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = flag;
+  input.mi.mouseData = MouseButtonData(button);
   if (!Send(input)) return false;
 
   std::scoped_lock lock(g_pressed_mutex);
