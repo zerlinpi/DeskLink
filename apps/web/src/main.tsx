@@ -2,10 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { accessProofAlgorithm, createAccessProof } from "./access_proof";
 import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";
+import { ControllerTokenCoordinator } from "./controller_token_coordinator";
 import {
   hostWaitRefreshDelayMs,
   iceRestartDelayMs,
+  isSignalOpenScopeCurrent,
+  shouldBeginSignalOpen,
   shouldScheduleIceRestart,
+  shouldScheduleSignalReconnect,
   signalReconnectDelayMs,
 } from "./session_recovery";
 import { shouldAcceptSignalMessage } from "./signal_scope";
@@ -180,23 +184,16 @@ function App() {
   const iceRestartInFlightRef = useRef(false);
   const signalReconnectTimerRef = useRef<number | null>(null);
   const signalReconnectAttemptRef = useRef(0);
+  const signalOpenInFlightRef = useRef(false);
   const hostWaitRefreshTimerRef = useRef<number | null>(null);
   const manualDisconnectRef = useRef(false);
   const initialPeerStartingRef = useRef(false);
-  const controllerTokenRef = useRef(STATIC_SIGNAL_AUTH_TOKEN);
-  const controllerTokenExpiryRef = useRef(STATIC_SIGNAL_AUTH_TOKEN ? Number.MAX_SAFE_INTEGER : 0);
-  const controllerTokenTargetRef = useRef("");
-  const controllerTokenRequestRef = useRef<Promise<string> | null>(null);
+  const controllerTokenCoordinatorRef = useRef(new ControllerTokenCoordinator());
 
   const runtimeControllerAuthEnabled = Boolean(CONTROLLER_SESSION_URL);
 
   const clearRuntimeControllerSession = () => {
-    if (runtimeControllerAuthEnabled) {
-      controllerTokenRef.current = "";
-      controllerTokenExpiryRef.current = 0;
-      controllerTokenTargetRef.current = "";
-    }
-    controllerTokenRequestRef.current = null;
+    if (runtimeControllerAuthEnabled) controllerTokenCoordinatorRef.current.clear();
   };
 
   const ensureSignalAuthToken = async (forceRefresh = false): Promise<string> => {
@@ -208,39 +205,24 @@ function App() {
     }
 
     const normalizedTarget = targetId.trim();
-    if (!normalizedTarget || !controllerAccount.trim() || !controllerKey) {
+    const normalizedAccount = controllerAccount.trim();
+    const accessKey = controllerKey;
+    if (!normalizedTarget || !normalizedAccount || !accessKey) {
       throw new Error("controller account, controller key and target device are required");
     }
 
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    if (!forceRefresh &&
-        controllerTokenRef.current &&
-        controllerTokenTargetRef.current === normalizedTarget &&
-        controllerTokenExpiryRef.current > nowSeconds + CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS) {
-      return controllerTokenRef.current;
-    }
-
-    if (controllerTokenRequestRef.current) return controllerTokenRequestRef.current;
-
-    const request = (async () => {
-      const endpoint = resolveControllerSessionUrl(SIGNAL_URL, CONTROLLER_SESSION_URL);
-      const session = await requestControllerSession(endpoint, {
-        accountId: controllerAccount.trim(),
+    const endpoint = resolveControllerSessionUrl(SIGNAL_URL, CONTROLLER_SESSION_URL);
+    return controllerTokenCoordinatorRef.current.getToken(normalizedTarget, {
+      forceRefresh,
+      nowSeconds: Math.floor(Date.now() / 1000),
+      refreshMarginSeconds: CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS,
+      request: () => requestControllerSession(endpoint, {
+        accountId: normalizedAccount,
         controllerId: localId,
         targetDeviceId: normalizedTarget,
-        accessKey: controllerKey,
-      });
-      controllerTokenRef.current = session.token;
-      controllerTokenExpiryRef.current = session.expiresAt;
-      controllerTokenTargetRef.current = normalizedTarget;
-      return session.token;
-    })();
-    controllerTokenRequestRef.current = request;
-    try {
-      return await request;
-    } finally {
-      if (controllerTokenRequestRef.current === request) controllerTokenRequestRef.current = null;
-    }
+        accessKey,
+      }),
+    });
   };
 
   const sendSignal = (type: string, payload: any = {}) => {
@@ -811,9 +793,15 @@ function App() {
   };
 
   const scheduleSignalReconnect = () => {
-    if (manualDisconnectRef.current || signalReconnectTimerRef.current !== null) return;
     const current = wsRef.current;
-    if (current?.readyState === WebSocket.OPEN || current?.readyState === WebSocket.CONNECTING) return;
+    const socketActive = current?.readyState === WebSocket.OPEN ||
+      current?.readyState === WebSocket.CONNECTING;
+    if (!shouldScheduleSignalReconnect({
+      manualDisconnect: manualDisconnectRef.current,
+      timerScheduled: signalReconnectTimerRef.current !== null,
+      openInFlight: signalOpenInFlightRef.current,
+      socketActive,
+    })) return;
 
     const attempt = signalReconnectAttemptRef.current++;
     const delay = signalReconnectDelayMs(attempt);
@@ -824,19 +812,43 @@ function App() {
   };
 
   const openSignalSocket = async (initial: boolean) => {
-    if (manualDisconnectRef.current) return;
+    const current = wsRef.current;
+    const socketActive = current?.readyState === WebSocket.OPEN ||
+      current?.readyState === WebSocket.CONNECTING;
+    if (!shouldBeginSignalOpen({
+      manualDisconnect: manualDisconnectRef.current,
+      openInFlight: signalOpenInFlightRef.current,
+      socketActive,
+    })) return;
 
+    const expectedSession = sessionRef.current;
+    const expectedTarget = targetId.trim();
+    signalOpenInFlightRef.current = true;
+    let staleAfterAuthorization = false;
     let authToken = "";
     try {
-      authToken = await ensureSignalAuthToken(false);
-    } catch (error) {
-      console.debug("DeskLink controller authorization failed", error);
-      clearHostWaitRefreshTimer();
-      setStatus(error instanceof Error ? error.message : "controller authorization failed");
-      manualDisconnectRef.current = true;
-      return;
+      try {
+        authToken = await ensureSignalAuthToken(false);
+      } catch (error) {
+        console.debug("DeskLink controller authorization failed", error);
+        clearHostWaitRefreshTimer();
+        setStatus(error instanceof Error ? error.message : "controller authorization failed");
+        manualDisconnectRef.current = true;
+        return;
+      }
+
+      staleAfterAuthorization = !isSignalOpenScopeCurrent({
+        manualDisconnect: manualDisconnectRef.current,
+        expectedSession,
+        currentSession: sessionRef.current,
+        expectedTarget,
+        currentTarget: targetId.trim(),
+      });
+      if (staleAfterAuthorization) return;
+    } finally {
+      signalOpenInFlightRef.current = false;
+      if (staleAfterAuthorization && !manualDisconnectRef.current) scheduleSignalReconnect();
     }
-    if (manualDisconnectRef.current) return;
 
     const legacyAuthToken = runtimeControllerAuthEnabled ? "" : authToken;
     const ws = new WebSocket(
