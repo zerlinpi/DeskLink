@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { accessProofAlgorithm, createAccessProof } from "./access_proof";
-import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";
+import { resolveControllerSessionUrl } from "./controller_session";
+import { createControllerSessionTokenRequest } from "./controller_token_request";
 import { ControllerTokenCoordinator } from "./controller_token_coordinator";
 import {
   hostWaitRefreshDelayMs,
@@ -216,7 +217,7 @@ function App() {
       forceRefresh,
       nowSeconds: Math.floor(Date.now() / 1000),
       refreshMarginSeconds: CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS,
-      request: () => requestControllerSession(endpoint, {
+      request: createControllerSessionTokenRequest(endpoint, {
         accountId: normalizedAccount,
         controllerId: localId,
         targetDeviceId: normalizedTarget,
