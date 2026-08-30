@@ -31,11 +31,6 @@ struct HostCapabilitiesV1Input {
 // by new hosts.
 nlohmann::json BuildHostCapabilitiesV1(const HostCapabilitiesV1Input& input);
 
-// Transitional guard for the old main.cpp monitor-state block. New Windows
-// sessions publish capabilities independently through HostCapabilitiesPublisher,
-// so legacy flat advertisements are discarded before reaching the wire.
-bool IsLegacyHostCapabilitiesV1Message(const std::string& text);
-
 class HostCapabilitiesPublisher {
  public:
   explicit HostCapabilitiesPublisher(WebRtcSession* session);

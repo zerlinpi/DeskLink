@@ -239,7 +239,7 @@ Restart-Service DeskLink
 
 ```bash
 cd apps/web
-npm install
+npm ci
 npm run dev
 ```
 
@@ -253,7 +253,7 @@ VITE_TURN_USERNAME=desklink
 VITE_TURN_PASSWORD=CHANGE_ME_NOW
 ```
 
-生产环境建议：
+生产源码构建时的 fallback 示例（部署后优先使用运行时配置）：
 
 ```dotenv
 VITE_SIGNAL_URL=wss://control.example.com/ws
@@ -266,12 +266,17 @@ VITE_TURN_CREDENTIALS_URL=https://control.example.com/api/v1/turn-credentials
 VITE_TURN_RUNTIME_REQUIRED=1
 ```
 
+生产部署的 `dist` 支持 **build once, deploy anywhere**：无需重新执行 Vite 构建，直接修改与 `index.html` 同目录的 `desklink-config.js` 即可切换 Signal、Controller Session、STUN/TURN 等公开端点和运行时开关。该文件必须保持公开配置属性，禁止写入 Access Code、Device Credential、Controller secret、Signal token、TURN shared secret 或长期 TURN 用户名/密码。`VITE_*` 仅作为源码构建期 fallback。
+
 ## Release 与下载
+
+当前 `main` 使用带 `-dev` 后缀的开发版本号；只有与 `VERSION` 完全匹配的稳定 `vX.Y.Z` tag 才能发布稳定 Release 和稳定容器标签。
 
 正式版本通过 GitHub Releases 发布。每个版本通常包含：
 
 - `desklink-windows-v<version>-x64.zip`：`DeskLink.exe`、Windows Agent/Service、媒体探针与安装/卸载脚本。
-- `desklink-web-v<version>.tar.gz`：浏览器控制端发布包。
+- `desklink-web-v<version>-dist.tar.gz`：可直接部署的浏览器控制端静态产物。
+- `desklink-web-v<version>-source.tar.gz`：用于审计、开发或自定义构建的 Web 源码包。
 - `desklink-signal-v<version>-linux-amd64`：Linux amd64 信令服务。
 - `SHA256SUMS.txt`：发布资产 SHA-256 校验值。
 

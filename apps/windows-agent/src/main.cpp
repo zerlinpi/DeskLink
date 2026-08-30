@@ -603,36 +603,6 @@ int wmain(int argc, wchar_t** argv) {
   };
 
   auto send_monitor_state = [&]() {
-    desklink::ServiceSecureAttentionStatus sas_status;
-    std::string sas_error;
-    const bool sas_status_ok = desklink::FetchServiceSecureAttentionStatus(
-        &sas_status,
-        &sas_error);
-    std::string sas_reason;
-    if (!sas_status_ok) {
-      sas_reason = "capability-unavailable";
-    } else if (!sas_status.broker_configured) {
-      sas_reason = "service-broker-unavailable";
-    } else if (!sas_status.api_available) {
-      sas_reason = "api-unavailable";
-    } else if (!sas_status.policy_readable) {
-      sas_reason = "policy-read-error";
-    } else if (!sas_status.policy_allows_services) {
-      sas_reason = "policy-not-allowed";
-    }
-
-    session.SendControlMessage(nlohmann::json{
-        {"t", "host-capabilities"},
-        {"version", 1},
-        {"secureAttentionAvailable", sas_status_ok && sas_status.available},
-        {"secureAttentionReason", sas_reason},
-        {"secureAttentionPolicy", sas_status.policy},
-        {"clipboardAvailable", true},
-        {"fileTransferAvailable", true},
-        {"audioAvailable", false},
-        {"protectedDesktopAvailable", false},
-    }.dump());
-
     nlohmann::json monitors = nlohmann::json::array();
     for (const auto& display : capture.EnumerateOutputs()) {
       monitors.push_back({

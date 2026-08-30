@@ -96,19 +96,4 @@ nlohmann::json BuildHostCapabilitiesV1(const HostCapabilitiesV1Input& input) {
   };
 }
 
-bool IsLegacyHostCapabilitiesV1Message(const std::string& text) {
-  if (text.find("host-capabilities") == std::string::npos) return false;
-  const auto message = nlohmann::json::parse(text, nullptr, false);
-  if (message.is_discarded() || !message.is_object()) return false;
-  if (message.value("t", "") != "host-capabilities" || message.value("version", 0) != 1) {
-    return false;
-  }
-  if (message.contains("capabilities")) return false;
-  return message.contains("secureAttentionAvailable") ||
-      message.contains("clipboardAvailable") ||
-      message.contains("fileTransferAvailable") ||
-      message.contains("audioAvailable") ||
-      message.contains("protectedDesktopAvailable");
-}
-
 }  // namespace desklink
