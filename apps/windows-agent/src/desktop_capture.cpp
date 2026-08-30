@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 
@@ -41,6 +42,11 @@ std::string WideToUtf8(const wchar_t* text) {
   }
   result.resize(static_cast<size_t>(required - 1));
   return result;
+}
+
+uint64_t RecreateRetryDelayMs(uint32_t failures) {
+  const uint32_t exponent = std::min<uint32_t>(failures, 4);
+  return std::min<uint64_t>(5000, 250ULL << exponent);
 }
 
 }  // namespace
@@ -115,11 +121,31 @@ bool DesktopCapture::RecreateDuplication() {
   hr = output_->DuplicateOutput(device_.Get(), &duplication_);
   if (FAILED(hr)) {
     std::wcerr << L"DesktopCapture: DuplicateOutput failed: 0x" << std::hex << hr
-               << L". Ensure the process runs in an interactive desktop session.\n";
+               << L". The desktop may be locked or transitioning; DeskLink will retry automatically.\n";
     return false;
   }
 
+  recreate_failures_ = 0;
+  next_recreate_attempt_ms_ = 0;
   return true;
+}
+
+bool DesktopCapture::TryRecreateDuplication() {
+  if (!adapter_ || !device_) return false;
+
+  const uint64_t now = GetTickCount64();
+  if (next_recreate_attempt_ms_ != 0 && now < next_recreate_attempt_ms_) {
+    return false;
+  }
+
+  if (RecreateDuplication()) return true;
+
+  recreate_failures_ = std::min<uint32_t>(recreate_failures_ + 1, 8);
+  const uint64_t delay_ms = RecreateRetryDelayMs(recreate_failures_);
+  next_recreate_attempt_ms_ = now + delay_ms;
+  std::wcerr << L"DesktopCapture: retrying desktop duplication in "
+             << delay_ms << L" ms\n";
+  return false;
 }
 
 std::vector<DisplayInfo> DesktopCapture::EnumerateOutputs() const {
@@ -172,7 +198,7 @@ bool DesktopCapture::SwitchOutput(uint32_t output_index) {
 }
 
 std::optional<CapturedFrame> DesktopCapture::Acquire(uint32_t timeout_ms) {
-  if (!duplication_) return std::nullopt;
+  if (!duplication_ && !TryRecreateDuplication()) return std::nullopt;
 
   ReleaseAcquiredFrame();
 
@@ -182,7 +208,10 @@ std::optional<CapturedFrame> DesktopCapture::Acquire(uint32_t timeout_ms) {
 
   if (hr == DXGI_ERROR_WAIT_TIMEOUT) return std::nullopt;
   if (hr == DXGI_ERROR_ACCESS_LOST) {
-    RecreateDuplication();
+    // Lock/unlock, fast user switching, display-mode changes and some UAC
+    // transitions can invalidate Desktop Duplication. Recreate immediately once;
+    // if Windows still denies access, future Acquire calls retry with backoff.
+    TryRecreateDuplication();
     return std::nullopt;
   }
   if (FAILED(hr)) {
@@ -221,6 +250,8 @@ void DesktopCapture::Reset() {
   height_ = 0;
   left_ = 0;
   top_ = 0;
+  next_recreate_attempt_ms_ = 0;
+  recreate_failures_ = 0;
 }
 
 }  // namespace desklink
