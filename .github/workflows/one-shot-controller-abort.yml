@@ -1,0 +1,134 @@
+name: One-shot controller abort integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-controller-abort.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Add abort-safe controller token requester
+        shell: bash
+        run: |
+          cat > apps/web/src/controller_token_request.ts <<'EOF'
+          import {
+            requestControllerSession,
+            type ControllerSession,
+            type ControllerSessionRequest,
+          } from "./controller_session";
+
+          export type ControllerSessionRequester = (
+            endpoint: string,
+            request: ControllerSessionRequest,
+            signal?: AbortSignal,
+          ) => Promise<ControllerSession>;
+
+          export function createControllerSessionTokenRequest(
+            endpoint: string,
+            request: ControllerSessionRequest,
+            requester: ControllerSessionRequester = requestControllerSession,
+          ): (signal: AbortSignal) => Promise<ControllerSession> {
+            return (signal) => requester(endpoint, request, signal);
+          }
+          EOF
+
+          cat > apps/web/src/controller_token_request.test.ts <<'EOF'
+          import { describe, expect, it, vi } from "vitest";
+          import {
+            createControllerSessionTokenRequest,
+            type ControllerSessionRequester,
+          } from "./controller_token_request";
+
+          describe("createControllerSessionTokenRequest", () => {
+            it("forwards the coordinator AbortSignal to the session requester", async () => {
+              const requester: ControllerSessionRequester = vi.fn(async () => ({
+                token: "token-a",
+                expiresAt: 10_000,
+              }));
+              const payload = {
+                accountId: "admin",
+                controllerId: "web-1",
+                targetDeviceId: "host-a",
+                accessKey: "secret",
+              };
+              const controller = new AbortController();
+              const request = createControllerSessionTokenRequest(
+                "https://signal.example/api/v1/controller-session",
+                payload,
+                requester,
+              );
+
+              await expect(request(controller.signal)).resolves.toEqual({
+                token: "token-a",
+                expiresAt: 10_000,
+              });
+              expect(requester).toHaveBeenCalledWith(
+                "https://signal.example/api/v1/controller-session",
+                payload,
+                controller.signal,
+              );
+            });
+          });
+          EOF
+
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          old = 'import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";\n'
+          new = 'import { resolveControllerSessionUrl } from "./controller_session";\nimport { createControllerSessionTokenRequest } from "./controller_token_request";\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'controller session import anchor count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = '''      request: () => requestControllerSession(endpoint, {\n        accountId: normalizedAccount,\n        controllerId: localId,\n        targetDeviceId: normalizedTarget,\n        accessKey,\n      }),\n'''
+          new = '''      request: createControllerSessionTokenRequest(endpoint, {\n        accountId: normalizedAccount,\n        controllerId: localId,\n        targetDeviceId: normalizedTarget,\n        accessKey,\n      }),\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'controller request integration anchor count={text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Validate Web controller
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm audit --audit-level=moderate
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Commit, rebase and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx apps/web/src/controller_token_request.ts apps/web/src/controller_token_request.test.ts
+          git diff --cached --check
+          git commit -m "fix(web): propagate controller auth cancellation to fetch"
+          git fetch origin main
+          git rebase origin/main
+          pushd apps/web
+          npm audit --audit-level=moderate
+          npm run typecheck
+          npm test
+          npm run build
+          popd
+          git push origin HEAD:main
