@@ -18,12 +18,14 @@ constexpr wchar_t kArgumentPrefix[] = L"--service-auth-pipe=";
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\DeskLink.Auth.";
 constexpr wchar_t kSignalTokenBrokerFlag[] = L"--service-signal-token-broker";
 constexpr wchar_t kAccessCodeBrokerFlag[] = L"--service-access-code-broker";
+constexpr wchar_t kSecureAttentionBrokerFlag[] = L"--service-sas-broker";
 constexpr size_t kMaxResponseBytes = 64 * 1024;
 
 struct BrokerLaunchOptions {
   std::wstring pipe_name;
   bool signal_token{false};
   bool access_code{false};
+  bool secure_attention_sequence{false};
 };
 
 BrokerLaunchOptions ServiceBrokerOptions() {
@@ -45,6 +47,9 @@ BrokerLaunchOptions ServiceBrokerOptions() {
     } else if (argument == kAccessCodeBrokerFlag) {
       options.access_code = true;
       explicit_capability = true;
+    } else if (argument == kSecureAttentionBrokerFlag) {
+      options.secure_attention_sequence = true;
+      explicit_capability = true;
     }
   }
   LocalFree(argv);
@@ -54,9 +59,9 @@ BrokerLaunchOptions ServiceBrokerOptions() {
   }
 
   // Existing Service builds launched the signal-token broker with only the Pipe
-  // argument. Preserve that behavior until the Service itself has migrated to
-  // explicit capability flags. As soon as any capability flag is present, only
-  // the explicitly named capabilities are enabled.
+  // argument. Preserve that behavior until all Service builds have migrated to
+  // explicit capability flags. Once any capability flag is present, only the
+  // explicitly named capabilities are enabled.
   if (!explicit_capability) options.signal_token = true;
   return options;
 }
@@ -207,6 +212,21 @@ bool ServiceSignalTokenBrokerConfigured() {
 bool ServiceAccessCodeBrokerConfigured() {
   const BrokerLaunchOptions options = ServiceBrokerOptions();
   return !options.pipe_name.empty() && options.access_code;
+}
+
+bool ServiceSecureAttentionBrokerConfigured() {
+  const BrokerLaunchOptions options = ServiceBrokerOptions();
+  return !options.pipe_name.empty() && options.secure_attention_sequence;
+}
+
+bool RequestServiceSecureAttentionSequence(std::string* error) {
+  if (!ServiceSecureAttentionBrokerConfigured()) {
+    SetError(error, "service secure-attention broker is not enabled");
+    return false;
+  }
+
+  nlohmann::json response;
+  return BrokerRequest("secure-attention-sequence", &response, error);
 }
 
 bool FetchServiceBrokerSignalToken(
