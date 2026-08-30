@@ -1,5 +1,6 @@
 #include "host_capabilities.h"
 
+#include <array>
 #include <fstream>
 #include <iostream>
 
@@ -47,20 +48,29 @@ int main() {
     return 1;
   }
 
-  if (desklink::IsLegacyHostCapabilitiesV1Message(produced.dump())) {
-    std::cerr << "Nested HostCapabilitiesV1 was incorrectly classified as legacy.\n";
+  if (produced.value("t", "") != "host-capabilities" ||
+      produced.value("version", 0) != 1 ||
+      !produced.contains("capabilities") ||
+      !produced["capabilities"].is_object()) {
+    std::cerr << "HostCapabilitiesV1 must use the canonical nested capabilities envelope.\n";
     return 1;
   }
 
-  const nlohmann::json legacy = {
-      {"t", "host-capabilities"},
-      {"version", 1},
-      {"secureAttentionAvailable", true},
-      {"clipboardAvailable", true},
+  static constexpr std::array<const char*, 7> kLegacyFlatFields = {
+      "secureAttentionAvailable",
+      "secureAttentionReason",
+      "secureAttentionPolicy",
+      "clipboardAvailable",
+      "fileTransferAvailable",
+      "audioAvailable",
+      "protectedDesktopAvailable",
   };
-  if (!desklink::IsLegacyHostCapabilitiesV1Message(legacy.dump())) {
-    std::cerr << "Legacy flat host capability advertisement was not detected.\n";
-    return 1;
+  for (const char* field : kLegacyFlatFields) {
+    if (produced.contains(field)) {
+      std::cerr << "HostCapabilitiesV1 unexpectedly emitted legacy flat field: "
+                << field << "\n";
+      return 1;
+    }
   }
 
   std::cout << "DeskLink HostCapabilitiesV1 producer smoke passed.\n";
