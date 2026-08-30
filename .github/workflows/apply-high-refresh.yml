@@ -96,39 +96,18 @@ jobs:
           marker = 'target_compile_options(desklink-h264-annexb-smoke PRIVATE /W4 /permissive-)'
           if text.count(marker) != 1:
               raise SystemExit(f"{cmake}: h264 smoke marker mismatch")
-          addition = '''\n\nadd_executable(desklink-video-policy-smoke
-            src/video_policy_smoke.cpp
-            src/video_policy.cpp
-            src/video_policy.h
-          )
-          target_compile_definitions(desklink-video-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-          target_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)'''
+          addition = '\n\nadd_executable(desklink-video-policy-smoke\n  src/video_policy_smoke.cpp\n  src/video_policy.cpp\n  src/video_policy.h\n)\ntarget_compile_definitions(desklink-video-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)\ntarget_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)'
           p.write_text(text.replace(marker, marker + addition), encoding="utf-8", newline="\n")
 
           ci = ".github/workflows/ci.yml"
-          replace_exact(
-              ci,
-              '''      - name: Validate Access Code proof vector
-                shell: pwsh''',
-              '''      - name: Validate high-refresh video policy
-                shell: pwsh
-                run: |
-                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-video-policy-smoke.exe"
-                  & $smoke
-                  if ($LASTEXITCODE -ne 0) { throw "High-refresh video policy smoke failed with exit code $LASTEXITCODE" }
-              - name: Validate Access Code proof vector
-                shell: pwsh''',
-          )
+          old_ci = '      - name: Validate Access Code proof vector\n        shell: pwsh'
+          new_ci = '      - name: Validate high-refresh video policy\n        shell: pwsh\n        run: |\n          $smoke = Resolve-Path "build/windows-agent/Release/desklink-video-policy-smoke.exe"\n          & $smoke\n          if ($LASTEXITCODE -ne 0) { throw "High-refresh video policy smoke failed with exit code $LASTEXITCODE" }\n      - name: Validate Access Code proof vector\n        shell: pwsh'
+          replace_exact(ci, old_ci, new_ci)
 
           release = ".github/workflows/release.yml"
-          replace_exact(
-              release,
-              '''            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
-                      "build/windows-agent/Release/desklink-access-proof-smoke.exe",''',
-              '''            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
-                      "build/windows-agent/Release/desklink-video-policy-smoke.exe",
-                      "build/windows-agent/Release/desklink-access-proof-smoke.exe",''',
-          )
+          old_release = '            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",\n            "build/windows-agent/Release/desklink-access-proof-smoke.exe",'
+          new_release = '            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",\n            "build/windows-agent/Release/desklink-video-policy-smoke.exe",\n            "build/windows-agent/Release/desklink-access-proof-smoke.exe",'
+          replace_exact(release, old_release, new_release)
           '@ | python -
 
       - name: Configure Windows host
