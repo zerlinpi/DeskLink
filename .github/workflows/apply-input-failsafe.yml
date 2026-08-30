@@ -26,68 +26,76 @@ jobs:
           path = Path("apps/windows-agent/src/webrtc_session.cpp")
           text = path.read_text(encoding="utf-8")
 
-          old = '''  peer->onStateChange([](rtc::PeerConnection::State state) {
-            std::cout << "WebRTC state: " << state << "\\n";
-          });
-          peer->onIceStateChange([](rtc::PeerConnection::IceState state) {
-            std::cout << "ICE state: " << state << "\\n";
-          });'''
-          new = '''  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
-          peer->onStateChange([this, weak_peer](rtc::PeerConnection::State state) {
-            auto owner = weak_peer.lock();
-            if (!owner) return;
-            {
-              std::scoped_lock lock(mutex_);
-              if (peer_ != owner) return;
-            }
-
-            if (state == rtc::PeerConnection::State::Disconnected ||
-                state == rtc::PeerConnection::State::Failed ||
-                state == rtc::PeerConnection::State::Closed) {
-              // Do not wait for DataChannel close callbacks: during Wi-Fi/IP/NAT
-              // transitions SCTP can remain half-open long enough to leave a
-              // modifier or mouse button logically pressed on Windows.
-              input_.ReleaseAll();
-            }
-            std::cout << "WebRTC state: " << state << "\\n";
-          });
-          peer->onIceStateChange([](rtc::PeerConnection::IceState state) {
-            std::cout << "ICE state: " << state << "\\n";
-          });'''
+          old = (
+              '  peer->onStateChange([](rtc::PeerConnection::State state) {\n'
+              '    std::cout << "WebRTC state: " << state << "\\n";\n'
+              '  });\n'
+              '  peer->onIceStateChange([](rtc::PeerConnection::IceState state) {\n'
+              '    std::cout << "ICE state: " << state << "\\n";\n'
+              '  });'
+          )
+          new = (
+              '  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;\n'
+              '  peer->onStateChange([this, weak_peer](rtc::PeerConnection::State state) {\n'
+              '    auto owner = weak_peer.lock();\n'
+              '    if (!owner) return;\n'
+              '    {\n'
+              '      std::scoped_lock lock(mutex_);\n'
+              '      if (peer_ != owner) return;\n'
+              '    }\n\n'
+              '    if (state == rtc::PeerConnection::State::Disconnected ||\n'
+              '        state == rtc::PeerConnection::State::Failed ||\n'
+              '        state == rtc::PeerConnection::State::Closed) {\n'
+              '      // Do not wait for DataChannel close callbacks: during Wi-Fi/IP/NAT\n'
+              '      // transitions SCTP can remain half-open long enough to leave a\n'
+              '      // modifier or mouse button logically pressed on Windows.\n'
+              '      input_.ReleaseAll();\n'
+              '    }\n'
+              '    std::cout << "WebRTC state: " << state << "\\n";\n'
+              '  });\n'
+              '  peer->onIceStateChange([](rtc::PeerConnection::IceState state) {\n'
+              '    std::cout << "ICE state: " << state << "\\n";\n'
+              '  });'
+          )
           if text.count(old) != 1:
               raise SystemExit(f"state callback anchor mismatch: {text.count(old)}")
           text = text.replace(old, new)
 
-          old = '''  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
-          peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {'''
-          new = '''  peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {'''
+          old = (
+              '  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;\n'
+              '  peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {'
+          )
+          new = '  peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {'
           if text.count(old) != 1:
               raise SystemExit(f"weak peer anchor mismatch: {text.count(old)}")
           text = text.replace(old, new)
 
-          old = '''  channel->onClosed([this, label, weak_channel]() {
-            if (label == "control") {
-              input_.ReleaseAll();
-              auto closed = weak_channel.lock();
-              std::scoped_lock lock(mutex_);
-              if (!closed || control_ == closed) control_.reset();
-            }
-            std::cout << label << " DataChannel closed\\n";
-          });'''
-          new = '''  channel->onClosed([this, label, weak_channel]() {
-            if (label == "control" || label == "pointer") {
-              // Both channels can carry user input in current/future controllers.
-              // Closing either one is a loss-of-authority boundary: release any
-              // injected state immediately rather than risking a stuck key/button.
-              input_.ReleaseAll();
-            }
-            if (label == "control") {
-              auto closed = weak_channel.lock();
-              std::scoped_lock lock(mutex_);
-              if (!closed || control_ == closed) control_.reset();
-            }
-            std::cout << label << " DataChannel closed\\n";
-          });'''
+          old = (
+              '  channel->onClosed([this, label, weak_channel]() {\n'
+              '    if (label == "control") {\n'
+              '      input_.ReleaseAll();\n'
+              '      auto closed = weak_channel.lock();\n'
+              '      std::scoped_lock lock(mutex_);\n'
+              '      if (!closed || control_ == closed) control_.reset();\n'
+              '    }\n'
+              '    std::cout << label << " DataChannel closed\\n";\n'
+              '  });'
+          )
+          new = (
+              '  channel->onClosed([this, label, weak_channel]() {\n'
+              '    if (label == "control" || label == "pointer") {\n'
+              '      // Closing either input channel is a loss-of-authority boundary.\n'
+              '      // Release injected state immediately rather than risking a stuck key/button.\n'
+              '      input_.ReleaseAll();\n'
+              '    }\n'
+              '    if (label == "control") {\n'
+              '      auto closed = weak_channel.lock();\n'
+              '      std::scoped_lock lock(mutex_);\n'
+              '      if (!closed || control_ == closed) control_.reset();\n'
+              '    }\n'
+              '    std::cout << label << " DataChannel closed\\n";\n'
+              '  });'
+          )
           if text.count(old) != 1:
               raise SystemExit(f"channel close anchor mismatch: {text.count(old)}")
           text = text.replace(old, new)
