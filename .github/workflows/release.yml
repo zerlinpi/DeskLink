@@ -154,6 +154,8 @@ jobs:
         run: |
           $smokes = @(
             "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
+            "build/windows-agent/Release/desklink-video-policy-smoke.exe",
+            "build/windows-agent/Release/desklink-active-session-smoke.exe",
             "build/windows-agent/Release/desklink-access-proof-smoke.exe",
             "build/windows-agent/Release/desklink-service-auth-smoke.exe"
           )
