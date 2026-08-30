@@ -179,6 +179,7 @@ function App() {
   const pointerRafRef = useRef<number | null>(null);
   const statsTimerRef = useRef<number | null>(null);
   const statsBaselineRef = useRef<StatsBaseline | null>(null);
+  const telemetryAttemptRef = useRef(new AsyncAttemptCoordinator());
   const offerSentRef = useRef(false);
   const negotiationPendingRef = useRef(false);
   const pendingLocalIceRef = useRef<RTCIceCandidateInit[]>([]);
@@ -315,17 +316,26 @@ function App() {
     if (statsTimerRef.current !== null) window.clearInterval(statsTimerRef.current);
     statsTimerRef.current = null;
     statsBaselineRef.current = null;
+    telemetryAttemptRef.current.invalidate();
   };
 
   const collectTelemetry = async (pc: RTCPeerConnection) => {
-    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) ||
-        pc.connectionState !== "connected" || controlRef.current?.readyState !== "open") {
-      return;
-    }
+    const attempt = telemetryAttemptRef.current.begin("telemetry");
+    if (!attempt) return;
+
+    const control = controlRef.current;
+    const resourcesCurrent = () =>
+      telemetryAttemptRef.current.isCurrent(attempt) &&
+      isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) &&
+      control !== null &&
+      isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) &&
+      pc.connectionState === "connected" &&
+      control.readyState === "open";
 
     try {
+      if (!resourcesCurrent()) return;
       const report = await pc.getStats();
-      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
+      if (!resourcesCurrent()) return;
       let inboundVideo: any = null;
       let selectedPair: any = null;
       let selectedPairId = "";
@@ -413,7 +423,11 @@ function App() {
         remoteCandidateType: remoteCandidate?.candidateType ?? null,
       });
     } catch (error) {
-      console.debug("DeskLink telemetry collection failed", error);
+      if (telemetryAttemptRef.current.isCurrent(attempt)) {
+        console.debug("DeskLink telemetry collection failed", error);
+      }
+    } finally {
+      telemetryAttemptRef.current.finish(attempt);
     }
   };
 
