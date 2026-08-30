@@ -1,0 +1,66 @@
+name: One-shot controller request cancellation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-controller-request-cancellation.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Forward controller token cancellation signal
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+          old = "      request: () => requestControllerSession(endpoint, {\n        accountId: normalizedAccount,\n        controllerId: localId,\n        targetDeviceId: normalizedTarget,\n        accessKey,\n      }),\n"
+          new = "      request: (signal) => requestControllerSession(endpoint, {\n        accountId: normalizedAccount,\n        controllerId: localId,\n        targetDeviceId: normalizedTarget,\n        accessKey,\n      }, signal),\n"
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one controller request cancellation anchor, got {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+      - name: Typecheck Web controller
+        working-directory: apps/web
+        run: npm run typecheck
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): abort obsolete controller session requests"
+          git push origin HEAD:main
