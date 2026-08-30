@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "device_identity.h"
 #include "protected_credential_store.h"
 
 namespace {
@@ -126,10 +127,14 @@ bool StartsWith(const std::wstring& value, const wchar_t* prefix) {
 }
 
 std::wstring DefaultDeviceId() {
+  std::wstring error;
+  std::wstring id = desklink::StableDefaultDeviceId(&error);
+  if (!id.empty()) return id;
+
   wchar_t name[MAX_COMPUTERNAME_LENGTH + 1]{};
   DWORD size = static_cast<DWORD>(std::size(name));
   if (GetComputerNameW(name, &size) && size > 0) {
-    std::wstring id = L"win-";
+    id = L"win-";
     id.append(name, size);
     for (wchar_t& ch : id) {
       if (!((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||

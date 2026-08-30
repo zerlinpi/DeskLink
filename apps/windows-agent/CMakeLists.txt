@@ -149,6 +149,8 @@ add_executable(desklink-service
   src/service_main.cpp
   src/active_session.cpp
   src/active_session.h
+  src/device_identity.cpp
+  src/device_identity.h
   src/protected_credential_store.cpp
   src/protected_credential_store.h
   src/service_auth_broker.cpp
@@ -166,6 +168,7 @@ target_link_libraries(
   PRIVATE
     nlohmann_json::nlohmann_json
     advapi32
+    bcrypt
     crypt32
     shell32
     userenv
@@ -180,6 +183,8 @@ target_link_libraries(
 # without requiring PowerShell or a separate support utility.
 add_executable(desklink-manager WIN32
   src/setup_main.cpp
+  src/device_identity.cpp
+  src/device_identity.h
   src/protected_credential_store.cpp
   src/protected_credential_store.h
   "${CMAKE_CURRENT_BINARY_DIR}/desklink-manager-version.rc"
@@ -192,6 +197,7 @@ target_link_libraries(
   desklink-manager
   PRIVATE
     advapi32
+    bcrypt
     comctl32
     crypt32
     shell32
@@ -283,3 +289,12 @@ add_executable(desklink-active-session-smoke
 target_compile_definitions(desklink-active-session-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-active-session-smoke PRIVATE /W4 /permissive-)
 target_link_libraries(desklink-active-session-smoke PRIVATE wtsapi32)
+
+add_executable(desklink-device-identity-smoke
+  src/device_identity_smoke.cpp
+  src/device_identity.cpp
+  src/device_identity.h
+)
+target_compile_definitions(desklink-device-identity-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-device-identity-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(desklink-device-identity-smoke PRIVATE advapi32 bcrypt)

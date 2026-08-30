@@ -2,7 +2,7 @@
 param(
   [string]$InstallDir = "$env:ProgramFiles\DeskLink",
   [Parameter(Mandatory = $true)][string]$SignalUrl,
-  [Parameter(Mandatory = $true)][string]$DeviceId,
+  [string]$DeviceId = "",
   [string]$SignalTokenUrl = "",
   [string]$StunUrl = "",
   [string]$TurnHost = "",
@@ -39,7 +39,7 @@ Assert-Administrator
 if ($SignalUrl -notmatch '^wss?://') {
   throw "SignalUrl must start with ws:// or wss://."
 }
-if ($DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {
+if (-not [string]::IsNullOrWhiteSpace($DeviceId) -and $DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {
   throw "DeviceId may contain only letters, digits, '.', '_' and '-'."
 }
 if ($TurnPort -lt 1 -or $TurnPort -gt 65535) { throw "TurnPort must be 1-65535." }
@@ -56,6 +56,14 @@ $managerSource = Join-Path $packageDir "DeskLink.exe"
 $mediaProbeSource = Join-Path $packageDir "desklink-media-probe.exe"
 if (-not (Test-Path $agentSource)) { throw "desklink-agent.exe was not found beside this installer script." }
 if (-not (Test-Path $serviceSource)) { throw "desklink-service.exe was not found beside this installer script." }
+
+if ([string]::IsNullOrWhiteSpace($DeviceId)) {
+  $DeviceId = (& $serviceSource --print-default-device-id | Select-Object -Last 1).Trim()
+  if ($LASTEXITCODE -ne 0 -or $DeviceId -notmatch '^[A-Za-z0-9._-]{1,128}$') {
+    throw "Unable to derive a stable default DeskLink DeviceId. Specify -DeviceId explicitly."
+  }
+  Write-Host "Using stable DeskLink Device ID: $DeviceId"
+}
 
 $existing = Get-Service -Name DeskLink -ErrorAction SilentlyContinue
 if ($existing -and $existing.Status -ne "Stopped") {

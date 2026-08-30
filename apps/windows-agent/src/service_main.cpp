@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "active_session.h"
+#include "device_identity.h"
 #include "protected_credential_store.h"
 #include "service_auth_broker.h"
 
@@ -948,7 +949,17 @@ int UninstallService() {
 int wmain(int argc, wchar_t** argv) {
   if (argc >= 2) {
     const std::wstring command = argv[1];
-    if (command == L"--install") return InstallService();
+    if (command == L"--print-default-device-id") {
+        std::wstring error;
+        const std::wstring id = desklink::StableDefaultDeviceId(&error);
+        if (id.empty()) {
+          std::wcerr << L"Unable to derive stable Device ID: " << error << L"\n";
+          return 1;
+        }
+        std::wcout << id << L"\n";
+        return 0;
+      }
+      if (command == L"--install") return InstallService();
     if (command == L"--uninstall") return UninstallService();
     if (command == L"--store-device-credential") return StoreDeviceCredentialCommand();
     if (command == L"--clear-device-credential") return ClearDeviceCredentialCommand();
@@ -956,7 +967,7 @@ int wmain(int argc, wchar_t** argv) {
     if (command == L"--clear-access-code") return ClearAccessCodeCommand();
     if (command != L"--service") {
       std::wcerr
-          << L"Usage: desklink-service.exe --install | --uninstall | --service | "
+          << L"Usage: desklink-service.exe --print-default-device-id | --install | --uninstall | --service | "
              L"--store-device-credential | --clear-device-credential | "
              L"--store-access-code | --clear-access-code\n";
       return 2;
