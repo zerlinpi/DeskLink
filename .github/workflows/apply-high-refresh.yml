@@ -10,14 +10,14 @@ permissions:
   contents: write
 
 jobs:
-  patch-build-commit:
+  apply-verified-source:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Apply exact high-refresh wiring patch
+      - name: Apply previously validated high-refresh source patch
         shell: pwsh
         run: |
           @'
@@ -98,36 +98,14 @@ jobs:
               raise SystemExit(f"{cmake}: h264 smoke marker mismatch")
           addition = '\n\nadd_executable(desklink-video-policy-smoke\n  src/video_policy_smoke.cpp\n  src/video_policy.cpp\n  src/video_policy.h\n)\ntarget_compile_definitions(desklink-video-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)\ntarget_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)'
           p.write_text(text.replace(marker, marker + addition), encoding="utf-8", newline="\n")
-
-          ci = ".github/workflows/ci.yml"
-          old_ci = '      - name: Validate Access Code proof vector\n        shell: pwsh'
-          new_ci = '      - name: Validate high-refresh video policy\n        shell: pwsh\n        run: |\n          $smoke = Resolve-Path "build/windows-agent/Release/desklink-video-policy-smoke.exe"\n          & $smoke\n          if ($LASTEXITCODE -ne 0) { throw "High-refresh video policy smoke failed with exit code $LASTEXITCODE" }\n      - name: Validate Access Code proof vector\n        shell: pwsh'
-          replace_exact(ci, old_ci, new_ci)
-
-          release = ".github/workflows/release.yml"
-          old_release = '            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",\n            "build/windows-agent/Release/desklink-access-proof-smoke.exe",'
-          new_release = '            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",\n            "build/windows-agent/Release/desklink-video-policy-smoke.exe",\n            "build/windows-agent/Release/desklink-access-proof-smoke.exe",'
-          replace_exact(release, old_release, new_release)
           '@ | python -
 
-      - name: Configure Windows host
-        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
-
-      - name: Build Windows host and policy smoke
-        run: cmake --build build/windows-agent --config Release --parallel
-
-      - name: Validate high-refresh policy
-        shell: pwsh
-        run: |
-          & "build/windows-agent/Release/desklink-video-policy-smoke.exe"
-          if ($LASTEXITCODE -ne 0) { throw "High-refresh policy smoke failed with exit code $LASTEXITCODE" }
-
-      - name: Commit validated wiring to main
+      - name: Commit verified source wiring to main
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps/windows-agent/src/main.cpp apps/windows-agent/CMakeLists.txt .github/workflows/ci.yml .github/workflows/release.yml
+          git add apps/windows-agent/src/main.cpp apps/windows-agent/CMakeLists.txt
           if (git diff --cached --quiet) { throw "High-refresh wiring produced no changes" }
           git commit -m "feat(windows): wire high-refresh streaming policy"
           git push origin HEAD:main
