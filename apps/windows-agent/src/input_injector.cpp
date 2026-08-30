@@ -8,7 +8,6 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 namespace desklink {
 namespace {
@@ -99,35 +98,47 @@ LONG NormalizeVirtualCoordinate(double pixel, LONG origin, LONG extent) {
 }  // namespace
 
 bool ReleaseAllInjectedInput() {
-  std::vector<uint32_t> keys;
-  std::vector<int> buttons;
-  {
-    std::scoped_lock lock(g_pressed_mutex);
-    keys.assign(g_pressed_keys.begin(), g_pressed_keys.end());
-    buttons.assign(g_pressed_buttons.begin(), g_pressed_buttons.end());
-    g_pressed_keys.clear();
-    g_pressed_buttons.clear();
-  }
+  // Key/button injection and bookkeeping share this mutex. That makes the
+  // release boundary authoritative: a concurrent remote KeyDown cannot be
+  // injected between our snapshot and bookkeeping update and become stranded.
+  // Failed KEYUP/MOUSEUP events remain tracked so a later disconnect/stop path
+  // can retry after a temporary UIPI/desktop transition has ended.
+  std::scoped_lock lock(g_pressed_mutex);
 
   bool all_released = true;
-  for (const uint32_t token : keys) {
+  for (auto it = g_pressed_keys.begin(); it != g_pressed_keys.end();) {
+    const uint32_t token = *it;
     const unsigned short vk = static_cast<unsigned short>(token & 0xFFFFu);
     const bool extended = (token & kExtendedKeyMarker) != 0;
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = vk;
     input.ki.dwFlags = KEYEVENTF_KEYUP | (extended ? KEYEVENTF_EXTENDEDKEY : 0);
-    all_released = Send(input) && all_released;
+    if (Send(input)) {
+      it = g_pressed_keys.erase(it);
+    } else {
+      all_released = false;
+      ++it;
+    }
   }
 
-  for (const int button : buttons) {
+  for (auto it = g_pressed_buttons.begin(); it != g_pressed_buttons.end();) {
+    const int button = *it;
     const DWORD flag = MouseButtonFlag(button, false);
-    if (flag == 0) continue;
+    if (flag == 0) {
+      it = g_pressed_buttons.erase(it);
+      continue;
+    }
     INPUT input{};
     input.type = INPUT_MOUSE;
     input.mi.dwFlags = flag;
     input.mi.mouseData = MouseButtonData(button);
-    all_released = Send(input) && all_released;
+    if (Send(input)) {
+      it = g_pressed_buttons.erase(it);
+    } else {
+      all_released = false;
+      ++it;
+    }
   }
 
   return all_released;
@@ -183,13 +194,15 @@ bool InputInjector::PointerButton(int button, bool down) const {
   const DWORD flag = MouseButtonFlag(button, down);
   if (flag == 0) return false;
 
+  // Serialize the physical injection with pressed-state bookkeeping so a
+  // release-all boundary cannot race a just-injected button down.
+  std::scoped_lock lock(g_pressed_mutex);
   INPUT input{};
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = flag;
   input.mi.mouseData = MouseButtonData(button);
   if (!Send(input)) return false;
 
-  std::scoped_lock lock(g_pressed_mutex);
   if (down) {
     g_pressed_buttons.insert(button);
   } else {
@@ -255,6 +268,10 @@ bool InputInjector::Key(const std::string& code, bool down) const {
   const bool extended = IsExtendedCode(code, vk);
   const uint32_t pressed_token = PressedKeyToken(vk, extended);
 
+  // Serialize injection and bookkeeping. This prevents a transport-loss
+  // release-all from finishing between SendInput(KEYDOWN) and insertion into
+  // the pressed set, which would otherwise strand a synthetic modifier.
+  std::scoped_lock lock(g_pressed_mutex);
   INPUT input{};
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = vk;
@@ -262,7 +279,6 @@ bool InputInjector::Key(const std::string& code, bool down) const {
   if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (!Send(input)) return false;
 
-  std::scoped_lock lock(g_pressed_mutex);
   if (down) {
     g_pressed_keys.insert(pressed_token);
   } else {
