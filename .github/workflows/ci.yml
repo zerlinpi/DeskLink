@@ -242,6 +242,18 @@ jobs:
           $smoke = Resolve-Path "build/windows-agent/Release/desklink-h264-annexb-smoke.exe"
           & $smoke
           if ($LASTEXITCODE -ne 0) { throw "H264 Annex-B smoke failed with exit code $LASTEXITCODE" }
+      - name: Validate high-refresh video policy
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-video-policy-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Video policy smoke failed with exit code $LASTEXITCODE" }
+      - name: Validate active Windows session selection
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-active-session-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Active session smoke failed with exit code $LASTEXITCODE" }
       - name: Validate Access Code proof vector
         shell: pwsh
         run: |
