@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://desklink.local/protocol/host-capabilities-v1.schema.json",
+  "title": "DeskLink HostCapabilitiesV1",
+  "description": "Versioned host capability advertisement sent on the authenticated reliable control DataChannel.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["t", "version", "capabilities"],
+  "properties": {
+    "t": { "const": "host-capabilities" },
+    "version": { "const": 1 },
+    "capabilities": { "$ref": "#/$defs/HostCapabilitiesV1" }
+  },
+  "$defs": {
+    "Capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "metadata": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": true
+        }
+      }
+    },
+    "Resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 }
+      }
+    },
+    "CodecCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codec"],
+      "properties": {
+        "codec": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "profiles": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "uniqueItems": true
+        },
+        "maximumFps": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "maximumResolution": { "$ref": "#/$defs/Resolution" }
+      }
+    },
+    "HostCapabilitiesV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "secureAttention",
+        "clipboard",
+        "fileTransfer",
+        "systemAudio",
+        "microphone",
+        "protectedDesktop",
+        "multiMonitor",
+        "highRefresh",
+        "virtualDisplay",
+        "privacyMode",
+        "virtualHid",
+        "gamepad",
+        "codecs",
+        "maximumFps",
+        "maximumResolution"
+      ],
+      "properties": {
+        "version": { "const": 1 },
+        "secureAttention": { "$ref": "#/$defs/Capability" },
+        "clipboard": { "$ref": "#/$defs/Capability" },
+        "fileTransfer": { "$ref": "#/$defs/Capability" },
+        "systemAudio": { "$ref": "#/$defs/Capability" },
+        "microphone": { "$ref": "#/$defs/Capability" },
+        "protectedDesktop": { "$ref": "#/$defs/Capability" },
+        "multiMonitor": { "$ref": "#/$defs/Capability" },
+        "highRefresh": { "$ref": "#/$defs/Capability" },
+        "virtualDisplay": { "$ref": "#/$defs/Capability" },
+        "privacyMode": { "$ref": "#/$defs/Capability" },
+        "virtualHid": { "$ref": "#/$defs/Capability" },
+        "gamepad": { "$ref": "#/$defs/Capability" },
+        "codecs": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/CodecCapability" }
+        },
+        "maximumFps": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "maximumResolution": { "$ref": "#/$defs/Resolution" }
+      }
+    }
+  }
+}
