@@ -37,6 +37,7 @@ constexpr int kDiagnoseButton = 1013;
 constexpr int kDiagnosticText = 1014;
 constexpr int kCopyDeviceButton = 1015;
 constexpr int kCopyDiagnosticsButton = 1016;
+constexpr int kFps = 1017;
 
 HFONT g_font = nullptr;
 HFONT g_title_font = nullptr;
@@ -825,6 +826,7 @@ void InstallOrUpdate(HWND window) {
   std::wstring signal_token_url = GetControlText(window, kSignalTokenUrl);
   std::wstring turn_credentials_url = GetControlText(window, kTurnCredentialsUrl);
   std::wstring device_credential = GetControlText(window, kDeviceCredential);
+  std::wstring fps_text = GetControlText(window, kFps);
 
   auto cleanup = [&]() {
     SecureClear(&access_code);
@@ -854,7 +856,18 @@ void InstallOrUpdate(HWND window) {
     ShowError(window, L"TURN 端口必须是 1–65535。");
     return;
   }
-  if (!access_code.empty() && (access_code.size() < 8 || access_code.size() > 256)) {
+  int parsed_fps = 0;
+try {
+  parsed_fps = std::stoi(fps_text.empty() ? L"60" : fps_text);
+} catch (...) {
+  parsed_fps = 0;
+}
+if (parsed_fps < 15 || parsed_fps > 144) {
+  cleanup();
+  ShowError(window, L"目标帧率必须是 15–144 FPS。普通办公建议 60；高刷设备可使用 90 / 120 / 144。");
+  return;
+}
+if (!access_code.empty() && (access_code.size() < 8 || access_code.size() > 256)) {
     cleanup();
     ShowError(window, L"访问码长度必须为 8–256 个字符。建议使用随机高强度访问码。");
     return;
@@ -903,6 +916,7 @@ void InstallOrUpdate(HWND window) {
       {L"DESKLINK_SIGNAL_TOKEN_URL", signal_token_url},
       {L"DESKLINK_TURN_CREDENTIALS_URL", turn_credentials_url},
       {L"DESKLINK_OUTPUT_INDEX", L"0"},
+      {L"DESKLINK_FPS", std::to_wstring(parsed_fps)},
   };
   if (!signal_token_url.empty()) settings.emplace_back(L"DESKLINK_SIGNAL_TOKEN_REQUIRED", L"1");
   if (!turn_credentials_url.empty()) settings.emplace_back(L"DESKLINK_TURN_RUNTIME_REQUIRED", L"1");
@@ -1023,6 +1037,7 @@ void Prefill(HWND window) {
 
   SetControlText(window, kSignalUrl, from_env(L"DESKLINK_SIGNAL_URL", L"ws://localhost:8080/ws"));
   SetControlText(window, kDeviceId, from_env(L"DESKLINK_DEVICE_ID", DefaultDeviceId().c_str()));
+  SetControlText(window, kFps, from_env(L"DESKLINK_FPS", L"60"));
   SetControlText(window, kStunUrl, from_env(L"DESKLINK_STUN_URL", L""));
   SetControlText(window, kTurnHost, from_env(L"DESKLINK_TURN_HOST", L""));
   SetControlText(window, kTurnPort, from_env(L"DESKLINK_TURN_PORT", L"3478"));
@@ -1091,6 +1106,9 @@ void CreateControls(HWND window) {
   y += row;
   AddLabel(window, L"设备凭证", label_x, y + 5, 150);
   AddEdit(window, kDeviceCredential, edit_x, y, edit_width, L"启用信令鉴权时填写 dc2...；留空保留", true);
+  y += row;
+  AddLabel(window, L"目标帧率 FPS", label_x, y + 5, 150);
+  AddEdit(window, kFps, edit_x, y, edit_width, L"60（可选 90 / 120 / 144）");
 
   HWND hint = CreateWindowExW(
       0,
@@ -1225,7 +1243,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
       CW_USEDEFAULT,
       CW_USEDEFAULT,
       730,
-      850,
+      900,
       nullptr,
       nullptr,
       instance,
