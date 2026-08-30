@@ -16,6 +16,7 @@ function friendlyStatus(value: string) {
   if (normalized.includes("authorizing host")) return "正在验证远端";
   if (normalized.includes("proving host access")) return "正在验证访问码";
   if (normalized.includes("negotiating")) return "正在建立远程画面";
+  if (normalized.includes("establishing control channel")) return "正在建立控制通道";
   if (normalized.includes("recovering control channel")) return "控制通道恢复中";
   if (normalized.includes("reconnecting network")) return "网络恢复中";
   if (normalized.includes("reconnecting signaling")) return "信令重连中";

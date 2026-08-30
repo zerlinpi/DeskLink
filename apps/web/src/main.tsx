@@ -814,15 +814,21 @@ function App() {
         clearIceRestartTimer();
         clearIceRestartWatchdog();
         iceRestartInFlightRef.current = false;
-        setStatus(wsRef.current?.readyState === WebSocket.OPEN
-          ? "control ready"
-          : "control ready · signaling reconnecting");
-        if (controlRef.current?.readyState === "open") startTelemetry(pc);
-        if (controlRef.current?.readyState === "closed") {
-          scheduleDataChannelRecovery(pc, "control", controlRef.current);
+        const control = controlRef.current;
+        if (control?.readyState === "open") {
+          setStatus(wsRef.current?.readyState === WebSocket.OPEN
+            ? "control ready"
+            : "control ready · signaling reconnecting");
+          startTelemetry(pc);
+        } else if (control?.readyState === "closed") {
+          setStatus("recovering control channel");
+          scheduleDataChannelRecovery(pc, "control", control);
+        } else {
+          setStatus("establishing control channel");
         }
-        if (pointerRef.current?.readyState === "closed") {
-          scheduleDataChannelRecovery(pc, "pointer", pointerRef.current);
+        const pointer = pointerRef.current;
+        if (pointer?.readyState === "closed") {
+          scheduleDataChannelRecovery(pc, "pointer", pointer);
         }
       } else if (state === "disconnected") {
         clearDataChannelRecoveryTimer("control");
