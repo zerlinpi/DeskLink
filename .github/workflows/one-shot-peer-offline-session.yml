@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  integrate:
+  verify-e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,96 +19,54 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
 
-      - name: Bind peer-offline replies to the request session
+      - name: Assert peer-offline session at the WebSocket boundary
         shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
-
-          main = Path('apps/signal/main.go')
-          text = main.read_text(encoding='utf-8')
+          path = Path('apps/signal/signal_e2e_test.go')
+          text = path.read_text(encoding='utf-8')
           replacements = [
               (
-                  'func peerOfflineSignal(target string, authQueued bool) map[string]any {\n\tmessage := map[string]any{"type": "peer-offline", "target": target}\n',
-                  'func peerOfflineSignal(target string, session string, authQueued bool) map[string]any {\n\tmessage := map[string]any{"type": "peer-offline", "target": target, "session": session}\n',
+                  'func expectSignalE2EPeerOffline(\n\tt *testing.T,\n\tcontroller *websocket.Conn,\n\thostID string,\n\texpectQueued bool,\n) {',
+                  'func expectSignalE2EPeerOffline(\n\tt *testing.T,\n\tcontroller *websocket.Conn,\n\thostID string,\n\tsession string,\n\texpectQueued bool,\n) {',
               ),
               (
-                  'peerOfflineSignal(msg.Target, authQueued)',
-                  'peerOfflineSignal(msg.Target, msg.Session, authQueued)',
-              ),
-          ]
-          for old, new in replacements:
-              count = text.count(old)
-              expected = 2 if old == 'peerOfflineSignal(msg.Target, authQueued)' else 1
-              if count != expected:
-                  raise SystemExit(f'expected {expected} main.go anchors, got {count}: {old!r}')
-              text = text.replace(old, new)
-          main.write_text(text, encoding='utf-8')
-
-          test = Path('apps/signal/main_test.go')
-          text = test.read_text(encoding='utf-8')
-          replacements = [
-              (
-                  '\tconst target = "windows-host-1"\n\tplain := peerOfflineSignal(target, false)\n',
-                  '\tconst target = "windows-host-1"\n\tconst session = "session-123"\n\tplain := peerOfflineSignal(target, session, false)\n',
+                  '\tif message.Type != "peer-offline" || message.Target != hostID {\n\t\tt.Fatalf("expected peer-offline for %s, got %+v", hostID, message)\n\t}\n',
+                  '\tif message.Type != "peer-offline" || message.Target != hostID || message.Session != session {\n\t\tt.Fatalf("expected peer-offline for %s session %s, got %+v", hostID, session, message)\n\t}\n',
               ),
               (
-                  '\tif plain["target"] != target {\n\t\tt.Fatalf("peer-offline signal lost target scope: %#v", plain["target"])\n\t}\n',
-                  '\tif plain["target"] != target {\n\t\tt.Fatalf("peer-offline signal lost target scope: %#v", plain["target"])\n\t}\n\tif plain["session"] != session {\n\t\tt.Fatalf("peer-offline signal lost session scope: %#v", plain["session"])\n\t}\n',
+                  '\t\twriteSignalE2EAuthRequest(t, controller, hostID, session)\n\t\texpectSignalE2EPeerOffline(t, controller, hostID, true)\n',
+                  '\t\twriteSignalE2EAuthRequest(t, controller, hostID, session)\n\t\texpectSignalE2EPeerOffline(t, controller, hostID, session, true)\n',
               ),
               (
-                  '\tqueued := peerOfflineSignal(target, true)\n',
-                  '\tqueued := peerOfflineSignal(target, session, true)\n',
-              ),
-              (
-                  '\tif queued["target"] != target {\n\t\tt.Fatalf("queued peer-offline signal lost target scope: %#v", queued["target"])\n\t}\n',
-                  '\tif queued["target"] != target {\n\t\tt.Fatalf("queued peer-offline signal lost target scope: %#v", queued["target"])\n\t}\n\tif queued["session"] != session {\n\t\tt.Fatalf("queued peer-offline signal lost session scope: %#v", queued["session"])\n\t}\n',
+                  '\t\twriteSignalE2EAuthRequest(t, oldController, hostID, oldSession)\n\t\texpectSignalE2EPeerOffline(t, oldController, hostID, true)\n',
+                  '\t\twriteSignalE2EAuthRequest(t, oldController, hostID, oldSession)\n\t\texpectSignalE2EPeerOffline(t, oldController, hostID, oldSession, true)\n',
               ),
           ]
           for old, new in replacements:
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f'expected one main_test.go anchor, got {count}: {old!r}')
+                  raise SystemExit(f'expected one signal_e2e anchor, got {count}: {old!r}')
               text = text.replace(old, new, 1)
-          test.write_text(text, encoding='utf-8')
+          path.write_text(text, encoding='utf-8')
           PY
-          gofmt -w apps/signal/main.go apps/signal/main_test.go
+          gofmt -w apps/signal/signal_e2e_test.go
           git diff --check
 
-      - name: Test signaling service
+      - name: Run signaling unit and WebSocket E2E tests
         working-directory: apps/signal
         run: go test ./...
 
-      - name: Install locked Web dependencies
-        working-directory: apps/web
-        run: npm ci
-      - name: Audit Web dependencies
-        working-directory: apps/web
-        run: npm audit --audit-level=moderate
-      - name: Typecheck Web controller
-        working-directory: apps/web
-        run: npm run typecheck
-      - name: Run Web tests
-        working-directory: apps/web
-        run: npm test
-      - name: Build Web production bundle
-        working-directory: apps/web
-        run: npm run build
-
-      - name: Commit source integration
+      - name: Commit E2E contract coverage
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps/signal/main.go apps/signal/main_test.go
+          git add apps/signal/signal_e2e_test.go
           git diff --cached --check
           git diff --cached --quiet && exit 0
-          git commit -m "fix(signal): scope peer-offline replies to sessions"
+          git commit -m "test(signal): assert peer-offline session over websocket"
           git push origin HEAD:main
