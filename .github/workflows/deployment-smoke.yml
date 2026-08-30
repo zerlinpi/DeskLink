@@ -55,7 +55,7 @@ jobs:
 
           # Bootstrap output contains ephemeral test credentials, so keep it out
           # of the public workflow log while still exercising the real tool.
-          ./infra/production/bootstrap.sh \
+          sh infra/production/bootstrap.sh \
             control.example.com \
             203.0.113.10 \
             ci-windows-host \
