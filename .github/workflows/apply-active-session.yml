@@ -42,22 +42,6 @@ jobs:
               '    const DWORD active_session = WTSGetActiveConsoleSessionId();',
               '    const DWORD active_session = desklink::FindActiveInteractiveSession();',
           )
-          replace_exact(
-              service,
-              '''    if (session_changed) {
-            observed_active_session = active_session;
-            StopAgent();''',
-              '''    if (session_changed) {
-            observed_active_session = active_session;
-            if (active_session == kNoSession) {
-              LogEvent(EVENTLOG_INFORMATION_TYPE, L"No active interactive user session; Agent will wait");
-            } else {
-              LogEvent(
-                  EVENTLOG_INFORMATION_TYPE,
-                  L"Selected active interactive Windows session " + std::to_wstring(active_session));
-            }
-            StopAgent();''',
-          )
 
           cmake = "apps/windows-agent/CMakeLists.txt"
           replace_exact(
