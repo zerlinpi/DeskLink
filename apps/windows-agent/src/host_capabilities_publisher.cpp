@@ -8,6 +8,8 @@
 #include <iostream>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
 #include "service_auth_client.h"
 #include "webrtc_session.h"
 
