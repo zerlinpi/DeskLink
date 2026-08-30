@@ -18,6 +18,10 @@ import {
 import { shouldAcceptSignalMessage } from "./signal_scope";
 import { isActiveSessionResource } from "./session_resource_scope";
 import { encodePointerMove, encodePointerWheel } from "./pointer_wire";
+import {
+  POINTER_MOVE_BUFFER_BUDGET_BYTES,
+  shouldDeferPointerMove,
+} from "./pointer_transport";
 import "./styles.css";
 
 type SignalMessage = {
@@ -469,14 +473,28 @@ function App() {
     };
   };
 
+  const flushPendingPointerMove = () => {
+    const latest = pendingMoveRef.current;
+    const channel = pointerRef.current;
+    if (!latest || channel?.readyState !== "open") return;
+
+    channel.bufferedAmountLowThreshold = POINTER_MOVE_BUFFER_BUDGET_BYTES;
+    if (shouldDeferPointerMove(channel.bufferedAmount)) return;
+
+    try {
+      channel.send(encodePointerMove(latest.x, latest.y));
+      if (pendingMoveRef.current === latest) pendingMoveRef.current = null;
+    } catch (error) {
+      console.debug("DeskLink pointer move send deferred", error);
+    }
+  };
+
   const queuePointerMove = (payload: PointerPayload) => {
     pendingMoveRef.current = payload;
     if (pointerRafRef.current !== null) return;
     pointerRafRef.current = requestAnimationFrame(() => {
       pointerRafRef.current = null;
-      const latest = pendingMoveRef.current;
-      pendingMoveRef.current = null;
-      if (latest) sendPointerFast(encodePointerMove(latest.x, latest.y));
+      flushPendingPointerMove();
     });
   };
 
@@ -661,7 +679,29 @@ function App() {
       ordered: false,
       maxRetransmits: 0,
     });
+    pointer.bufferedAmountLowThreshold = POINTER_MOVE_BUFFER_BUDGET_BYTES;
     pointerRef.current = pointer;
+    pointer.onopen = () => {
+      if (!isActiveSessionResource(pointerRef.current, pointer, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
+        return;
+      }
+      flushPendingPointerMove();
+    };
+    pointer.onbufferedamountlow = () => {
+      if (!isActiveSessionResource(pointerRef.current, pointer, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
+        return;
+      }
+      flushPendingPointerMove();
+    };
+    pointer.onclose = () => {
+      if (pointerRef.current !== pointer) return;
+      pendingMoveRef.current = null;
+      if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
+      pointerRafRef.current = null;
+      pointerRef.current = null;
+    };
 
     return pc;
   };
