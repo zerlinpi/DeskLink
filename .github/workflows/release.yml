@@ -59,6 +59,7 @@ jobs:
           set -euo pipefail
           pushd apps/web
           npm ci
+          npm audit --audit-level=moderate
           npm run typecheck
           npm test
           npm run build
