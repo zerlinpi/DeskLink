@@ -18,6 +18,14 @@ export type SignalReconnectGate = SignalOpenGate & {
   timerScheduled: boolean;
 };
 
+export type SignalOpenScope = {
+  manualDisconnect: boolean;
+  expectedSession: string;
+  currentSession: string;
+  expectedTarget: string;
+  currentTarget: string;
+};
+
 const SIGNAL_RECONNECT_BASE_MS = 500;
 const SIGNAL_RECONNECT_MAX_MS = 10_000;
 const SIGNAL_RECONNECT_EXPONENT_CAP = 5;
@@ -35,6 +43,12 @@ export function signalReconnectDelayMs(attempt: number): number {
 
 export function shouldBeginSignalOpen(gate: SignalOpenGate): boolean {
   return !gate.manualDisconnect && !gate.openInFlight && !gate.socketActive;
+}
+
+export function isSignalOpenScopeCurrent(scope: SignalOpenScope): boolean {
+  return !scope.manualDisconnect &&
+    scope.expectedSession === scope.currentSession &&
+    scope.expectedTarget === scope.currentTarget;
 }
 
 export function shouldScheduleSignalReconnect(gate: SignalReconnectGate): boolean {
