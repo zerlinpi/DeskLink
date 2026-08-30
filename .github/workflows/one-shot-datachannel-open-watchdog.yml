@@ -1,0 +1,130 @@
+name: One-shot DataChannel open watchdog integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-datachannel-open-watchdog.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Integrate stalled DataChannel watchdog
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  'import {\n  dataChannelRecoveryDelayMs,\n  resetDataChannelRecoveryAttempt,\n  shouldScheduleDataChannelRecovery,\n  type RecoverableChannelKind,\n} from "./data_channel_recovery";\n',
+                  'import {\n  DATA_CHANNEL_OPEN_TIMEOUT_MS,\n  dataChannelRecoveryDelayMs,\n  resetDataChannelRecoveryAttempt,\n  shouldArmDataChannelOpenWatchdog,\n  shouldExpireDataChannelOpenWatchdog,\n  shouldScheduleDataChannelRecovery,\n  type RecoverableChannelKind,\n} from "./data_channel_recovery";\n',
+              ),
+              (
+                  '  const dataChannelRecoveryTimerRef = useRef<Record<RecoverableChannelKind, number | null>>({\n    control: null,\n    pointer: null,\n  });\n  const dataChannelRecoveryAttemptRef = useRef<Record<RecoverableChannelKind, number>>({\n',
+                  '  const dataChannelRecoveryTimerRef = useRef<Record<RecoverableChannelKind, number | null>>({\n    control: null,\n    pointer: null,\n  });\n  const dataChannelOpenWatchdogRef = useRef<Record<RecoverableChannelKind, number | null>>({\n    control: null,\n    pointer: null,\n  });\n  const dataChannelRecoveryAttemptRef = useRef<Record<RecoverableChannelKind, number>>({\n',
+              ),
+              (
+                  '  const clearDataChannelRecoveryTimer = (kind: RecoverableChannelKind) => {\n    const timer = dataChannelRecoveryTimerRef.current[kind];\n    if (timer !== null) window.clearTimeout(timer);\n    dataChannelRecoveryTimerRef.current[kind] = null;\n  };\n\n  const resetDataChannelRecoveryState = () => {\n    clearDataChannelRecoveryTimer("control");\n    clearDataChannelRecoveryTimer("pointer");\n    dataChannelRecoveryAttemptRef.current = { control: 0, pointer: 0 };\n  };\n',
+                  '  const clearDataChannelRecoveryTimer = (kind: RecoverableChannelKind) => {\n    const timer = dataChannelRecoveryTimerRef.current[kind];\n    if (timer !== null) window.clearTimeout(timer);\n    dataChannelRecoveryTimerRef.current[kind] = null;\n  };\n\n  const clearDataChannelOpenWatchdog = (kind: RecoverableChannelKind) => {\n    const timer = dataChannelOpenWatchdogRef.current[kind];\n    if (timer !== null) window.clearTimeout(timer);\n    dataChannelOpenWatchdogRef.current[kind] = null;\n  };\n\n  const resetDataChannelRecoveryState = () => {\n    clearDataChannelRecoveryTimer("control");\n    clearDataChannelRecoveryTimer("pointer");\n    clearDataChannelOpenWatchdog("control");\n    clearDataChannelOpenWatchdog("pointer");\n    dataChannelRecoveryAttemptRef.current = { control: 0, pointer: 0 };\n  };\n',
+              ),
+              (
+                  '  const scheduleDataChannelRecovery = (\n',
+                  '  const armDataChannelOpenWatchdog = (\n    pc: RTCPeerConnection,\n    kind: RecoverableChannelKind,\n    channel: RTCDataChannel,\n  ) => {\n    const currentChannel = kind === "control" ? controlRef.current : pointerRef.current;\n    if (!shouldArmDataChannelOpenWatchdog({\n      manualDisconnect: manualDisconnectRef.current,\n      currentPeer: pcRef.current === pc,\n      peerState: pc.connectionState,\n      channelCurrent: currentChannel === channel,\n      channelState: channel.readyState,\n      watchdogScheduled: dataChannelOpenWatchdogRef.current[kind] !== null,\n    })) return;\n\n    dataChannelOpenWatchdogRef.current[kind] = window.setTimeout(() => {\n      dataChannelOpenWatchdogRef.current[kind] = null;\n      const activeChannel = kind === "control" ? controlRef.current : pointerRef.current;\n      if (!shouldExpireDataChannelOpenWatchdog({\n        manualDisconnect: manualDisconnectRef.current,\n        currentPeer: pcRef.current === pc,\n        peerState: pc.connectionState,\n        channelCurrent: activeChannel === channel,\n        channelState: channel.readyState,\n      })) return;\n\n      if (kind === "control") setStatus("recovering control channel");\n      channel.close();\n    }, DATA_CHANNEL_OPEN_TIMEOUT_MS);\n  };\n\n  const scheduleDataChannelRecovery = (\n',
+              ),
+              (
+                  '      clearDataChannelRecoveryTimer("control");\n      dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(\n',
+                  '      clearDataChannelRecoveryTimer("control");\n      clearDataChannelOpenWatchdog("control");\n      dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(\n',
+              ),
+              (
+                  '    control.onclose = () => {\n      if (controlRef.current !== control) return;\n      stopTelemetry();\n',
+                  '    control.onclose = () => {\n      if (controlRef.current !== control) return;\n      clearDataChannelOpenWatchdog("control");\n      stopTelemetry();\n',
+              ),
+              (
+                  '      scheduleDataChannelRecovery(pc, "control", control);\n    };\n  };\n\n  const attachPointerChannel',
+                  '      scheduleDataChannelRecovery(pc, "control", control);\n    };\n    armDataChannelOpenWatchdog(pc, "control", control);\n  };\n\n  const attachPointerChannel',
+              ),
+              (
+                  '      clearDataChannelRecoveryTimer("pointer");\n      dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(\n',
+                  '      clearDataChannelRecoveryTimer("pointer");\n      clearDataChannelOpenWatchdog("pointer");\n      dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(\n',
+              ),
+              (
+                  '    pointer.onclose = () => {\n      if (pointerRef.current !== pointer) return;\n      if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);\n',
+                  '    pointer.onclose = () => {\n      if (pointerRef.current !== pointer) return;\n      clearDataChannelOpenWatchdog("pointer");\n      if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);\n',
+              ),
+              (
+                  '      scheduleDataChannelRecovery(pc, "pointer", pointer);\n    };\n  };\n\n  const createRecoverableDataChannel',
+                  '      scheduleDataChannelRecovery(pc, "pointer", pointer);\n    };\n    armDataChannelOpenWatchdog(pc, "pointer", pointer);\n  };\n\n  const createRecoverableDataChannel',
+              ),
+              (
+                  '        } else {\n          setStatus("establishing control channel");\n        }\n        const pointer = pointerRef.current;\n        if (pointer?.readyState === "closed") {\n          scheduleDataChannelRecovery(pc, "pointer", pointer);\n        }\n',
+                  '        } else {\n          setStatus("establishing control channel");\n          if (control?.readyState === "connecting") {\n            armDataChannelOpenWatchdog(pc, "control", control);\n          }\n        }\n        const pointer = pointerRef.current;\n        if (pointer?.readyState === "closed") {\n          scheduleDataChannelRecovery(pc, "pointer", pointer);\n        } else if (pointer?.readyState === "connecting") {\n          armDataChannelOpenWatchdog(pc, "pointer", pointer);\n        }\n',
+              ),
+              (
+                  '        clearDataChannelRecoveryTimer("control");\n        clearDataChannelRecoveryTimer("pointer");\n        setStatus("reconnecting network");\n',
+                  '        clearDataChannelRecoveryTimer("control");\n        clearDataChannelRecoveryTimer("pointer");\n        clearDataChannelOpenWatchdog("control");\n        clearDataChannelOpenWatchdog("pointer");\n        setStatus("reconnecting network");\n',
+              ),
+              (
+                  '        clearDataChannelRecoveryTimer("control");\n        clearDataChannelRecoveryTimer("pointer");\n        setStatus("reconnecting network");\n        scheduleIceRestart(pc, true);\n',
+                  '        clearDataChannelRecoveryTimer("control");\n        clearDataChannelRecoveryTimer("pointer");\n        clearDataChannelOpenWatchdog("control");\n        clearDataChannelOpenWatchdog("pointer");\n        setStatus("reconnecting network");\n        scheduleIceRestart(pc, true);\n',
+              ),
+              (
+                  '        clearDataChannelRecoveryTimer("control");\n        clearDataChannelRecoveryTimer("pointer");\n        iceRestartInFlightRef.current = false;\n',
+                  '        clearDataChannelRecoveryTimer("control");\n        clearDataChannelRecoveryTimer("pointer");\n        clearDataChannelOpenWatchdog("control");\n        clearDataChannelOpenWatchdog("pointer");\n        iceRestartInFlightRef.current = false;\n',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one integration anchor, got {count}: {old[:120]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+
+      - name: Test Web controller
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build Web controller
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(web): recover stalled DataChannel opens"
+          git push origin HEAD:main
