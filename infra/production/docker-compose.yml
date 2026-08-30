@@ -1,6 +1,8 @@
 services:
   signal:
     image: ${DESKLINK_SIGNAL_IMAGE:-ghcr.io/zerlinpi/desklink-signal:latest}
+    build:
+      context: ../../apps/signal
     restart: unless-stopped
     environment:
       DESKLINK_SIGNAL_ADDR: :8080
