@@ -49,6 +49,18 @@ describe("shouldAcceptSignalMessage", () => {
     expect(shouldAcceptSignalMessage({ type: "ice", from: scope.hostId }, scope)).toBe(false);
   });
 
+  it("accepts peer-offline only for the active target", () => {
+    expect(shouldAcceptSignalMessage({
+      type: "peer-offline",
+      target: scope.hostId,
+    }, scope)).toBe(true);
+    expect(shouldAcceptSignalMessage({
+      type: "peer-offline",
+      target: "old-target",
+    }, scope)).toBe(false);
+    expect(shouldAcceptSignalMessage({ type: "peer-offline" }, scope)).toBe(false);
+  });
+
   it("accepts a device revocation only when it applies to the active target", () => {
     expect(shouldAcceptSignalMessage({
       type: "device-revoked",
@@ -66,7 +78,6 @@ describe("shouldAcceptSignalMessage", () => {
   });
 
   it("does not change unrelated signaling-service messages", () => {
-    expect(shouldAcceptSignalMessage({ type: "peer-offline" }, scope)).toBe(true);
     expect(shouldAcceptSignalMessage({ type: "error" }, scope)).toBe(true);
   });
 });
