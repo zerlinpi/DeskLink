@@ -16,12 +16,15 @@ bool ServiceSecureAttentionBrokerConfigured();
 struct ServiceSecureAttentionStatus {
   bool broker_configured{false};
   bool api_available{false};
+  bool policy_readable{false};
   bool policy_allows_services{false};
   bool available{false};
   std::string policy{"unknown"};
 };
 
-// Queries the LocalSystem broker without changing Windows policy or sending SAS.
+// Reads local Windows SAS API/policy capability and combines it with the launch
+// capability declared by the LocalSystem Service. This is read-only and does
+// not add another privileged Service RPC.
 bool FetchServiceSecureAttentionStatus(
     ServiceSecureAttentionStatus* status,
     std::string* error);
