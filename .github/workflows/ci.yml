@@ -20,6 +20,10 @@ jobs:
           python-version: "3.13"
       - name: Validate repository version invariants
         run: python tools/version/check-version.py
+      - name: Install pinned protocol schema validator
+        run: python -m pip install --disable-pip-version-check -r tools/protocol/requirements.txt
+      - name: Validate HostCapabilitiesV1 contract fixture
+        run: python tools/protocol/validate-host-capabilities.py
 
   changes:
     runs-on: ubuntu-latest
@@ -78,7 +82,7 @@ jobs:
 
           affected '^(apps/signal/|tools/auth/|infra/docker-compose\.yml$)' && signal=true
           affected '^(apps/web/|tools/auth/verify-access-proof-vector\.mjs$)' && web=true
-          affected '^(tools/network/|infra/)' && repo=true
+          affected '^(tools/network/|infra/|tools/protocol/)' && repo=true
           affected '^(apps/windows-agent/|packaging/windows/|tools/auth/verify-access-proof-vector\.mjs$)' && windows=true
 
           # Packaging changes can alter deployable artifacts even when product
@@ -307,6 +311,12 @@ jobs:
           $smoke = Resolve-Path "build/windows-agent/Release/desklink-secure-attention-smoke.exe"
           & $smoke
           if ($LASTEXITCODE -ne 0) { throw "Secure Attention smoke failed with exit code $LASTEXITCODE" }
+      - name: Validate HostCapabilitiesV1 producer contract
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-host-capabilities-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "HostCapabilitiesV1 producer smoke failed with exit code $LASTEXITCODE" }
       - name: Validate Access Code proof vector
         shell: pwsh
         run: |
