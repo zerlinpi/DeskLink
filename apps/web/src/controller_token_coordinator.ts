@@ -7,6 +7,7 @@ type CachedControllerToken = ControllerSession & {
 type InFlightControllerToken = {
   id: symbol;
   target: string;
+  controller: AbortController;
   promise: Promise<string>;
 };
 
@@ -14,7 +15,7 @@ export type ControllerTokenRequestOptions = {
   forceRefresh?: boolean;
   nowSeconds: number;
   refreshMarginSeconds: number;
-  request: () => Promise<ControllerSession>;
+  request: (signal: AbortSignal) => Promise<ControllerSession>;
 };
 
 export class ControllerTokenCoordinator {
@@ -23,7 +24,13 @@ export class ControllerTokenCoordinator {
 
   clear(): void {
     this.cached = null;
+    this.cancelInFlight();
+  }
+
+  private cancelInFlight(): void {
+    const inFlight = this.inFlight;
     this.inFlight = null;
+    inFlight?.controller.abort();
   }
 
   async getToken(target: string, options: ControllerTokenRequestOptions): Promise<string> {
@@ -37,9 +44,11 @@ export class ControllerTokenCoordinator {
     }
 
     if (this.inFlight?.target === normalizedTarget) return this.inFlight.promise;
+    if (this.inFlight) this.cancelInFlight();
 
     const requestId = Symbol(normalizedTarget);
-    const promise = options.request().then((session) => {
+    const controller = new AbortController();
+    const promise = options.request(controller.signal).then((session) => {
       if (this.inFlight?.id === requestId) {
         this.cached = {
           target: normalizedTarget,
@@ -55,6 +64,7 @@ export class ControllerTokenCoordinator {
     this.inFlight = {
       id: requestId,
       target: normalizedTarget,
+      controller,
       promise,
     };
     return promise;
