@@ -1,0 +1,97 @@
+name: Apply Active Session Routing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-active-session.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build-commit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply active-session routing patch
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str, expected: int = 1):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} matches, found {count} for {old[:80]!r}")
+              p.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+
+          service = "apps/windows-agent/src/service_main.cpp"
+          replace_exact(
+              service,
+              '#include "protected_credential_store.h"\n#include "service_auth_broker.h"',
+              '#include "active_session.h"\n#include "protected_credential_store.h"\n#include "service_auth_broker.h"',
+          )
+          replace_exact(
+              service,
+              '    const DWORD active_session = WTSGetActiveConsoleSessionId();',
+              '    const DWORD active_session = desklink::FindActiveInteractiveSession();',
+          )
+          replace_exact(
+              service,
+              '''    if (session_changed) {
+            observed_active_session = active_session;
+            StopAgent();''',
+              '''    if (session_changed) {
+            observed_active_session = active_session;
+            if (active_session == kNoSession) {
+              LogEvent(EVENTLOG_INFORMATION_TYPE, L"No active interactive user session; Agent will wait");
+            } else {
+              LogEvent(
+                  EVENTLOG_INFORMATION_TYPE,
+                  L"Selected active interactive Windows session " + std::to_wstring(active_session));
+            }
+            StopAgent();''',
+          )
+
+          cmake = "apps/windows-agent/CMakeLists.txt"
+          replace_exact(
+              cmake,
+              'add_executable(desklink-service\n  src/service_main.cpp',
+              'add_executable(desklink-service\n  src/service_main.cpp\n  src/active_session.cpp\n  src/active_session.h',
+          )
+          p = Path(cmake)
+          text = p.read_text(encoding="utf-8")
+          marker = 'target_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)'
+          if text.count(marker) != 1:
+              raise SystemExit(f"{cmake}: video policy smoke marker mismatch")
+          addition = '\n\nadd_executable(desklink-active-session-smoke\n  src/active_session_smoke.cpp\n  src/active_session.cpp\n  src/active_session.h\n)\ntarget_compile_definitions(desklink-active-session-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)\ntarget_compile_options(desklink-active-session-smoke PRIVATE /W4 /permissive-)\ntarget_link_libraries(desklink-active-session-smoke PRIVATE wtsapi32)'
+          p.write_text(text.replace(marker, marker + addition), encoding="utf-8", newline="\n")
+          '@ | python -
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+
+      - name: Build Windows host
+        run: cmake --build build/windows-agent --config Release --parallel
+
+      - name: Validate session selector
+        shell: pwsh
+        run: |
+          & "build/windows-agent/Release/desklink-active-session-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Active session selector smoke failed with exit code $LASTEXITCODE" }
+
+      - name: Commit validated session routing to main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/windows-agent/src/service_main.cpp apps/windows-agent/CMakeLists.txt
+          if (git diff --cached --quiet) { throw "Active session patch produced no changes" }
+          git commit -m "feat(windows): route service into active RDP session"
+          git push origin HEAD:main
