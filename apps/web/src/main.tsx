@@ -2,6 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { accessProofAlgorithm, createAccessProof } from "./access_proof";
 import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";
+import {
+  hostWaitRefreshDelayMs,
+  iceRestartDelayMs,
+  shouldScheduleIceRestart,
+  signalReconnectDelayMs,
+} from "./session_recovery";
 import "./styles.css";
 
 type SignalMessage = {
@@ -69,8 +75,6 @@ const TURN_CREDENTIALS_URL = import.meta.env.VITE_TURN_CREDENTIALS_URL ?? "";
 const TURN_RUNTIME_REQUIRED = import.meta.env.VITE_TURN_RUNTIME_REQUIRED === "1";
 const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
 const CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS = 90;
-const HOST_WAIT_REFRESH_SAFETY_MS = 5000;
-const HOST_WAIT_REFRESH_MAX_MS = 10 * 60 * 1000;
 const SIGNAL_PROTOCOL = "desklink-v1";
 const CONTROLLER_AUTH_PROTOCOL_PREFIX = "desklink-auth.";
 const HOST_SCOPED_SIGNAL_TYPES = new Set([
@@ -287,11 +291,8 @@ function App() {
 
   const scheduleHostWaitRefresh = (expiresInMs: unknown) => {
     clearHostWaitRefreshTimer();
-    const advertised = Number(expiresInMs);
-    if (!Number.isFinite(advertised) || advertised <= 0) return;
-
-    const cappedLifetime = Math.min(HOST_WAIT_REFRESH_MAX_MS, advertised);
-    const delay = Math.max(1000, cappedLifetime - HOST_WAIT_REFRESH_SAFETY_MS);
+    const delay = hostWaitRefreshDelayMs(expiresInMs);
+    if (delay === null) return;
     const expectedSession = sessionRef.current;
     const expectedTarget = targetId.trim();
 
@@ -516,16 +517,20 @@ function App() {
   };
 
   const scheduleIceRestart = (pc: RTCPeerConnection, immediate = false) => {
-    if (manualDisconnectRef.current || pcRef.current !== pc) return;
-    if (iceRestartInFlightRef.current || iceRestartTimerRef.current !== null) return;
-    if (pc.connectionState === "connected" || pc.connectionState === "closed") return;
+    if (!shouldScheduleIceRestart({
+      manualDisconnect: manualDisconnectRef.current,
+      currentPeer: pcRef.current === pc,
+      restartInFlight: iceRestartInFlightRef.current,
+      timerScheduled: iceRestartTimerRef.current !== null,
+      connectionState: pc.connectionState,
+    })) return;
 
     iceRestartTimerRef.current = window.setTimeout(() => {
       iceRestartTimerRef.current = null;
       if (manualDisconnectRef.current || pcRef.current !== pc) return;
       if (pc.connectionState === "connected" || pc.connectionState === "closed") return;
       void restartIce(pc);
-    }, immediate ? 0 : 2000);
+    }, iceRestartDelayMs(immediate));
   };
 
   const restartIce = async (pc: RTCPeerConnection) => {
@@ -822,7 +827,7 @@ function App() {
     if (current?.readyState === WebSocket.OPEN || current?.readyState === WebSocket.CONNECTING) return;
 
     const attempt = signalReconnectAttemptRef.current++;
-    const delay = Math.min(10000, 500 * (2 ** Math.min(attempt, 5)));
+    const delay = signalReconnectDelayMs(attempt);
     signalReconnectTimerRef.current = window.setTimeout(() => {
       signalReconnectTimerRef.current = null;
       if (!manualDisconnectRef.current) void openSignalSocket(false);
