@@ -5,10 +5,13 @@ WORKDIR /app
 
 COPY package.json package-lock.json tsconfig.json index.html vite.config.ts ./
 COPY src ./src
+COPY public ./public
+COPY scripts ./scripts
 
-# The browser controller is static, so public endpoints are injected at build
-# time. Production Compose uses same-origin /ws and /api routes to avoid CORS
-# and mixed-content mistakes behind HTTPS.
+# These build arguments are compatibility/default values only. The deployable
+# bundle can override public endpoint settings later through desklink-config.js
+# without rebuilding the image. Authentication secrets are intentionally not
+# part of that runtime configuration surface.
 ARG VITE_SIGNAL_URL=/ws
 ARG VITE_CONTROLLER_SESSION_URL=/api/v1/controller-session
 ARG VITE_CONTROLLER_AUTH_REQUIRED=1
