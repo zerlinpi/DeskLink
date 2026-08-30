@@ -40,7 +40,6 @@ class H264Encoder {
   const std::wstring& encoder_name() const { return encoder_name_; }
 
  private:
-  bool ConfigureCodecApi(uint32_t bitrate_bps);
   bool WaitForEvent(MediaEventType wanted);
   bool SubmitInput(ID3D11Texture2D* texture, uint64_t timestamp100ns);
   bool ReadOutput(EncodedH264Frame* output);

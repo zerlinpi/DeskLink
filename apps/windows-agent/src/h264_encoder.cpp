@@ -96,6 +96,7 @@ struct ActivatedEncoderCandidate {
   Microsoft::WRL::ComPtr<ICodecAPI> codec_api;
   DWORD input_stream_id{0};
   DWORD output_stream_id{0};
+  MFT_OUTPUT_STREAM_INFO output_stream_info{};
   std::wstring name;
   bool adapter_matched{false};
 };
@@ -117,13 +118,92 @@ std::wstring ReadActivationName(IMFActivate* activation) {
   return name;
 }
 
+bool ConfigureCandidateCodecApi(ICodecAPI* codec, uint32_t fps, uint32_t bitrate_bps) {
+  if (!codec) return false;
+
+  // Vendor-specific support varies, so these tuning knobs intentionally remain
+  // best-effort. Media type and stream-start compatibility below are mandatory.
+  SetCodecBool(codec, CODECAPI_AVLowLatencyMode, true);
+  SetCodecUInt32(
+      codec,
+      CODECAPI_AVEncCommonRateControlMode,
+      static_cast<uint32_t>(eAVEncCommonRateControlMode_CBR));
+  SetCodecUInt32(codec, CODECAPI_AVEncCommonMeanBitRate, bitrate_bps);
+  SetCodecUInt32(codec, CODECAPI_AVEncMPVGOPSize, fps == 0 ? 60 : fps);
+  SetCodecUInt32(codec, CODECAPI_AVEncCommonQualityVsSpeed, 25);
+  SetCodecUInt32(codec, CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+  return true;
+}
+
+HRESULT BuildH264OutputMediaType(
+    uint32_t width,
+    uint32_t height,
+    uint32_t fps,
+    uint32_t bitrate_bps,
+    Microsoft::WRL::ComPtr<IMFMediaType>* media_type) {
+  if (!media_type) return E_POINTER;
+  media_type->Reset();
+
+  HRESULT hr = MFCreateMediaType(media_type->ReleaseAndGetAddressOf());
+  if (FAILED(hr)) return hr;
+  IMFMediaType* type = media_type->Get();
+
+  hr = type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+  if (FAILED(hr)) return hr;
+  hr = type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+  if (FAILED(hr)) return hr;
+  hr = type->SetUINT32(MF_MT_AVG_BITRATE, bitrate_bps);
+  if (FAILED(hr)) return hr;
+  hr = MFSetAttributeSize(type, MF_MT_FRAME_SIZE, width, height);
+  if (FAILED(hr)) return hr;
+  hr = MFSetAttributeRatio(type, MF_MT_FRAME_RATE, fps, 1);
+  if (FAILED(hr)) return hr;
+  hr = type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+  if (FAILED(hr)) return hr;
+  hr = type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+  if (FAILED(hr)) return hr;
+  return MFSetAttributeRatio(type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+}
+
+HRESULT BuildNv12InputMediaType(
+    uint32_t width,
+    uint32_t height,
+    uint32_t fps,
+    Microsoft::WRL::ComPtr<IMFMediaType>* media_type) {
+  if (!media_type) return E_POINTER;
+  media_type->Reset();
+
+  HRESULT hr = MFCreateMediaType(media_type->ReleaseAndGetAddressOf());
+  if (FAILED(hr)) return hr;
+  IMFMediaType* type = media_type->Get();
+
+  hr = type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+  if (FAILED(hr)) return hr;
+  hr = type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+  if (FAILED(hr)) return hr;
+  hr = MFSetAttributeSize(type, MF_MT_FRAME_SIZE, width, height);
+  if (FAILED(hr)) return hr;
+  hr = MFSetAttributeRatio(type, MF_MT_FRAME_RATE, fps, 1);
+  if (FAILED(hr)) return hr;
+  hr = type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+  if (FAILED(hr)) return hr;
+  return MFSetAttributeRatio(type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+}
+
 bool TryActivateHardwareEncoderCandidates(
     IMFActivate** activations,
     UINT32 activation_count,
     IMFDXGIDeviceManager* device_manager,
+    uint32_t width,
+    uint32_t height,
+    uint32_t fps,
+    uint32_t bitrate_bps,
     bool adapter_matched,
     ActivatedEncoderCandidate* selected) {
-  if (!activations || activation_count == 0 || !device_manager || !selected) return false;
+  if (!activations || activation_count == 0 || !device_manager || !selected ||
+      width == 0 || height == 0 || fps == 0 || bitrate_bps == 0) {
+    return false;
+  }
 
   for (UINT32 i = 0; i < activation_count; ++i) {
     IMFActivate* activation = activations[i];
@@ -206,12 +286,57 @@ bool TryActivateHardwareEncoderCandidates(
 
     Microsoft::WRL::ComPtr<ICodecAPI> codec_api;
     transform.As(&codec_api);
+    ConfigureCandidateCodecApi(codec_api.Get(), fps, bitrate_bps);
+
+    Microsoft::WRL::ComPtr<IMFMediaType> output_type;
+    hr = BuildH264OutputMediaType(width, height, fps, bitrate_bps, &output_type);
+    if (FAILED(hr)) {
+      reject(L"H264 output media type", hr);
+      continue;
+    }
+    hr = transform->SetOutputType(output_stream_id, output_type.Get(), 0);
+    if (FAILED(hr)) {
+      reject(L"SetOutputType", hr);
+      continue;
+    }
+
+    Microsoft::WRL::ComPtr<IMFMediaType> input_type;
+    hr = BuildNv12InputMediaType(width, height, fps, &input_type);
+    if (FAILED(hr)) {
+      reject(L"NV12 input media type", hr);
+      continue;
+    }
+    hr = transform->SetInputType(input_stream_id, input_type.Get(), 0);
+    if (FAILED(hr)) {
+      reject(L"SetInputType(NV12)", hr);
+      continue;
+    }
+
+    MFT_OUTPUT_STREAM_INFO output_stream_info{};
+    hr = transform->GetOutputStreamInfo(output_stream_id, &output_stream_info);
+    if (FAILED(hr)) {
+      reject(L"GetOutputStreamInfo", hr);
+      continue;
+    }
+
+    transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    hr = transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    if (FAILED(hr)) {
+      reject(L"BEGIN_STREAMING", hr);
+      continue;
+    }
+    hr = transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    if (FAILED(hr)) {
+      reject(L"START_OF_STREAM", hr);
+      continue;
+    }
 
     selected->transform = transform;
     selected->event_generator = event_generator;
     selected->codec_api = codec_api;
     selected->input_stream_id = input_stream_id;
     selected->output_stream_id = output_stream_id;
+    selected->output_stream_info = output_stream_info;
     selected->name = name;
     selected->adapter_matched = adapter_matched;
     return true;
@@ -261,6 +386,10 @@ bool H264Encoder::Initialize(
           adapter_activations,
           adapter_activation_count,
           device_manager_.Get(),
+          width,
+          height,
+          fps,
+          bitrate_bps,
           true,
           &selected_encoder);
     }
@@ -282,6 +411,10 @@ bool H264Encoder::Initialize(
           global_activations,
           global_activation_count,
           device_manager_.Get(),
+          width,
+          height,
+          fps,
+          bitrate_bps,
           false,
           &selected_encoder);
     }
@@ -299,6 +432,7 @@ bool H264Encoder::Initialize(
   codec_api_ = selected_encoder.codec_api;
   input_stream_id_ = selected_encoder.input_stream_id;
   output_stream_id_ = selected_encoder.output_stream_id;
+  output_stream_info_ = selected_encoder.output_stream_info;
   encoder_name_ = selected_encoder.name;
   const bool adapter_matched_encoder = selected_encoder.adapter_matched;
 
@@ -307,96 +441,13 @@ bool H264Encoder::Initialize(
   fps_ = fps;
   bitrate_bps_ = bitrate_bps;
   frame_duration100ns_ = 10'000'000ULL / fps;
-  ConfigureCodecApi(bitrate_bps);
-
-  Microsoft::WRL::ComPtr<IMFMediaType> output_type;
-  hr = MFCreateMediaType(&output_type);
-  if (FAILED(hr) ||
-      FAILED(output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) ||
-      FAILED(output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264)) ||
-      FAILED(output_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate_bps)) ||
-      FAILED(MFSetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE, width, height)) ||
-      FAILED(MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE, fps, 1)) ||
-      FAILED(output_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive)) ||
-      FAILED(output_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base)) ||
-      FAILED(MFSetAttributeRatio(output_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1))) {
-    std::wcerr << L"H264Encoder: failed to configure H264 output media type\n";
-    Reset();
-    return false;
-  }
-
-  hr = transform_->SetOutputType(output_stream_id_, output_type.Get(), 0);
-  if (FAILED(hr)) {
-    std::wcerr << L"H264Encoder: SetOutputType failed: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
   CacheSequenceHeader();
-
-  Microsoft::WRL::ComPtr<IMFMediaType> input_type;
-  hr = MFCreateMediaType(&input_type);
-  if (FAILED(hr) ||
-      FAILED(input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) ||
-      FAILED(input_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12)) ||
-      FAILED(MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, width, height)) ||
-      FAILED(MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE, fps, 1)) ||
-      FAILED(input_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive)) ||
-      FAILED(MFSetAttributeRatio(input_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1))) {
-    std::wcerr << L"H264Encoder: failed to configure NV12 input media type\n";
-    Reset();
-    return false;
-  }
-
-  hr = transform_->SetInputType(input_stream_id_, input_type.Get(), 0);
-  if (FAILED(hr)) {
-    std::wcerr << L"H264Encoder: SetInputType(NV12) failed: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
-
-  hr = transform_->GetOutputStreamInfo(output_stream_id_, &output_stream_info_);
-  if (FAILED(hr)) {
-    std::wcerr << L"H264Encoder: GetOutputStreamInfo failed: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
-
-  transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-  hr = transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-  if (FAILED(hr)) {
-    std::wcerr << L"H264Encoder: BEGIN_STREAMING failed: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
-  hr = transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
-  if (FAILED(hr)) {
-    std::wcerr << L"H264Encoder: START_OF_STREAM failed: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
 
   std::wcout << L"H264 hardware encoder: "
              << (encoder_name_.empty() ? L"<unknown>" : encoder_name_)
              << (adapter_matched_encoder ? L" [capture-adapter match]" : L" [global fallback]")
              << L", " << width << L"x" << height << L" @ " << fps
              << L" fps, " << (bitrate_bps / 1'000'000.0) << L" Mbps\n";
-  return true;
-}
-
-bool H264Encoder::ConfigureCodecApi(uint32_t bitrate_bps) {
-  if (!codec_api_) return false;
-
-  // Unsupported knobs are intentionally non-fatal because vendors expose slightly
-  // different ICodecAPI capabilities. The two critical settings are attempted first.
-  SetCodecBool(codec_api_.Get(), CODECAPI_AVLowLatencyMode, true);
-  SetCodecUInt32(
-      codec_api_.Get(),
-      CODECAPI_AVEncCommonRateControlMode,
-      static_cast<uint32_t>(eAVEncCommonRateControlMode_CBR));
-  SetCodecUInt32(codec_api_.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate_bps);
-  SetCodecUInt32(codec_api_.Get(), CODECAPI_AVEncMPVGOPSize, fps_ == 0 ? 60 : fps_);
-  SetCodecUInt32(codec_api_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, 25);
-  SetCodecUInt32(codec_api_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
   return true;
 }
 
