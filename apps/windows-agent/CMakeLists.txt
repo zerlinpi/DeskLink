@@ -115,6 +115,8 @@ add_executable(desklink-agent
   src/signal_token_client.h
   src/turn_credential_client.cpp
   src/turn_credential_client.h
+  src/video_policy.cpp
+  src/video_policy.h
   src/webrtc_session.cpp
   src/webrtc_session.h
   "${CMAKE_CURRENT_BINARY_DIR}/desklink-agent-version.rc"
@@ -262,3 +264,11 @@ add_executable(desklink-h264-annexb-smoke
 )
 target_compile_definitions(desklink-h264-annexb-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-h264-annexb-smoke PRIVATE /W4 /permissive-)
+
+add_executable(desklink-video-policy-smoke
+  src/video_policy_smoke.cpp
+  src/video_policy.cpp
+  src/video_policy.h
+)
+target_compile_definitions(desklink-video-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)

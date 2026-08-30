@@ -22,6 +22,7 @@
 #include "gpu_color_converter.h"
 #include "h264_encoder.h"
 #include "service_auth_client.h"
+#include "video_policy.h"
 #include "webrtc_session.h"
 
 using Microsoft::WRL::ComPtr;
@@ -115,21 +116,6 @@ VideoSize FitWithin(
   width = std::max<uint32_t>(2, width & ~1U);
   height = std::max<uint32_t>(2, height & ~1U);
   return {width, height};
-}
-
-uint32_t LowerFpsTier(uint32_t current, uint32_t target) {
-  if (target <= 15 || current <= 15) return std::min(current, target);
-  if (current > 45 && target > 45) return 45;
-  if (current > 30 && target > 30) return 30;
-  if (current > 24 && target > 24) return 24;
-  return std::max<uint32_t>(15, std::min(current, target));
-}
-
-uint32_t RaiseFpsTier(uint32_t current, uint32_t target) {
-  if (current >= target) return target;
-  if (current < 30 && target > current) return std::min<uint32_t>(target, 30);
-  if (current < 45 && target > current) return std::min<uint32_t>(target, 45);
-  return target;
 }
 
 VideoSize ResolutionLimitForTier(
@@ -283,12 +269,12 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
 
-  const uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 60);
+  const uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 144);
   const uint32_t target_bitrate = EnvUIntOr(
       "DESKLINK_BITRATE_BPS",
-      12'000'000,
+      desklink::DefaultBitrateForFps(target_fps),
       1'000'000,
-      50'000'000);
+      60'000'000);
   const uint32_t min_bitrate = EnvUIntOr(
       "DESKLINK_MIN_BITRATE_BPS",
       std::min<uint32_t>(2'000'000, target_bitrate),
@@ -357,6 +343,8 @@ int wmain(int argc, wchar_t** argv) {
   session_config.turn_port = EnvPortOr("DESKLINK_TURN_PORT", session_config.turn_port);
   session_config.turn_username = EnvOr("DESKLINK_TURN_USERNAME", session_config.turn_username);
   session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);
+  session_config.media_pacing_bitrate_bps = desklink::PacingBitrateForMedia(target_bitrate);
+  session_config.media_pacing_interval_ms = desklink::PacingIntervalMsForFps(target_fps);
   session_config.on_keyframe_requested = [&]() {
     keyframe_requested.store(true, std::memory_order_relaxed);
   };
@@ -478,7 +466,7 @@ int wmain(int argc, wchar_t** argv) {
         fps_ceiling);
     if (severe_feedback_streak >= 3 &&
         now - last_fps_change >= std::chrono::seconds(3)) {
-      const uint32_t lower = LowerFpsTier(current_fps, fps_ceiling);
+      const uint32_t lower = desklink::LowerFpsTier(current_fps, fps_ceiling);
       if (lower < current_fps) {
         requested_fps.store(lower, std::memory_order_relaxed);
         last_fps_change = now;
@@ -486,7 +474,7 @@ int wmain(int argc, wchar_t** argv) {
       severe_feedback_streak = 0;
     } else if (healthy_feedback_streak >= 8 &&
                now - last_fps_change >= std::chrono::seconds(8)) {
-      const uint32_t higher = RaiseFpsTier(current_fps, fps_ceiling);
+      const uint32_t higher = desklink::RaiseFpsTier(current_fps, fps_ceiling);
       if (higher > current_fps) {
         requested_fps.store(higher, std::memory_order_relaxed);
         last_fps_change = now;
@@ -827,7 +815,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     bool encoded_fresh_frame = false;
-    auto frame = capture.Acquire(16);
+    auto frame = capture.Acquire(desklink::CaptureTimeoutMsForFps(active_fps));
 
     const long new_controlled_left = capture.left();
     const long new_controlled_top = capture.top();
