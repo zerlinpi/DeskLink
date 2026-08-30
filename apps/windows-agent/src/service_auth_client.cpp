@@ -189,12 +189,12 @@ bool BrokerRequest(
     SetError(error, "local service authentication response is not valid JSON");
     return false;
   }
+
+  *response_json = parsed;
   if (!parsed.value("ok", false)) {
     SetError(error, parsed.value("error", "local service authentication failed"));
     return false;
   }
-
-  *response_json = std::move(parsed);
   return true;
 }
 
@@ -219,14 +219,48 @@ bool ServiceSecureAttentionBrokerConfigured() {
   return !options.pipe_name.empty() && options.secure_attention_sequence;
 }
 
-bool RequestServiceSecureAttentionSequence(std::string* error) {
-  if (!ServiceSecureAttentionBrokerConfigured()) {
+bool FetchServiceSecureAttentionStatus(
+    ServiceSecureAttentionStatus* status,
+    std::string* error) {
+  if (!status) {
+    SetError(error, "secure-attention status output is required");
+    return false;
+  }
+  *status = {};
+  status->broker_configured = ServiceSecureAttentionBrokerConfigured();
+  if (!status->broker_configured) {
     SetError(error, "service secure-attention broker is not enabled");
     return false;
   }
 
   nlohmann::json response;
-  return BrokerRequest("secure-attention-sequence", &response, error);
+  if (!BrokerRequest("secure-attention-status", &response, error)) return false;
+
+  status->api_available = response.value("apiAvailable", false);
+  status->policy_allows_services = response.value("policyAllowsServices", false);
+  status->available = response.value("available", false);
+  status->policy = response.value("policy", "unknown");
+  if (status->policy.size() > 64) status->policy = "unknown";
+  return true;
+}
+
+bool RequestServiceSecureAttentionSequence(
+    std::string* error,
+    std::string* error_code) {
+  if (error_code) error_code->clear();
+  if (!ServiceSecureAttentionBrokerConfigured()) {
+    SetError(error, "service secure-attention broker is not enabled");
+    if (error_code) *error_code = "service-broker-unavailable";
+    return false;
+  }
+
+  nlohmann::json response;
+  if (BrokerRequest("secure-attention-sequence", &response, error)) return true;
+  if (error_code && response.is_object()) {
+    *error_code = response.value("errorCode", "dispatch-failed");
+  }
+  if (error_code && error_code->empty()) *error_code = "dispatch-failed";
+  return false;
 }
 
 bool FetchServiceBrokerSignalToken(
