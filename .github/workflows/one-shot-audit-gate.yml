@@ -1,0 +1,79 @@
+name: One-shot Web dependency audit gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-audit-gate.yml
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Add permanent dependency audit gates
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          ci_path = Path('.github/workflows/ci.yml')
+          ci = ci_path.read_text(encoding='utf-8')
+          old = '''      - name: Install locked Web dependencies
+        run: npm ci
+      - name: Typecheck
+'''
+          new = '''      - name: Install locked Web dependencies
+        run: npm ci
+      - name: Audit Web dependencies
+        run: npm audit --audit-level=moderate
+      - name: Typecheck
+'''
+          if ci.count(old) != 1:
+              raise SystemExit(f'CI audit insertion anchor count={ci.count(old)}')
+          ci_path.write_text(ci.replace(old, new, 1), encoding='utf-8')
+
+          release_path = Path('.github/workflows/release.yml')
+          release = release_path.read_text(encoding='utf-8')
+          old = '''          npm ci
+          npm run typecheck
+'''
+          new = '''          npm ci
+          npm audit --audit-level=moderate
+          npm run typecheck
+'''
+          if release.count(old) != 1:
+              raise SystemExit(f'Release audit insertion anchor count={release.count(old)}')
+          release_path.write_text(release.replace(old, new, 1), encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Verify current dependency graph meets the new gate
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm audit --audit-level=moderate
+
+      - name: Commit gates and remove this one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/one-shot-audit-gate.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A .github/workflows
+          git diff --cached --check
+          git commit -m "ci(web): block moderate and higher dependency advisories"
+          git push origin HEAD:main
