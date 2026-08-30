@@ -5,8 +5,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstdint>
+#include <cwctype>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -29,9 +29,9 @@ void SetError(std::wstring* error, const std::wstring& message, DWORD code = ERR
 
 std::wstring TrimAndNormalizeGuid(std::wstring_view input) {
   size_t begin = 0;
-  while (begin < input.size() && iswspace(input[begin])) ++begin;
+  while (begin < input.size() && std::iswspace(input[begin])) ++begin;
   size_t end = input.size();
-  while (end > begin && iswspace(input[end - 1])) --end;
+  while (end > begin && std::iswspace(input[end - 1])) --end;
 
   if (end > begin + 1 && input[begin] == L'{' && input[end - 1] == L'}') {
     ++begin;
