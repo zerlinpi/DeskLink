@@ -1,0 +1,120 @@
+name: Apply High Refresh Fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-high-refresh-fallback.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build-commit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply encoder fallback patch
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str, expected: int = 1):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} matches, found {count} for {old[:90]!r}")
+              p.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+
+          path = "apps/windows-agent/src/main.cpp"
+          replace_exact(
+              path,
+              '  const uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 144);',
+              '  uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 144);',
+          )
+          old = '''  desklink::GpuColorConverter converter;
+          bool converter_ready = converter.Initialize(
+              device.Get(),
+              source_width,
+              source_height,
+              encode_size.width,
+              encode_size.height,
+              target_fps);
+
+          desklink::H264Encoder encoder;
+          bool encoder_ready = converter_ready && encoder.Initialize(
+              device.Get(),
+              encode_size.width,
+              encode_size.height,
+              target_fps,
+              target_bitrate);
+          '''
+          new = '''  desklink::GpuColorConverter converter;
+          desklink::H264Encoder encoder;
+          bool converter_ready = false;
+          bool encoder_ready = false;
+
+          auto initialize_video_pipeline_at_fps = [&](uint32_t fps) {
+            encoder.Reset();
+            converter.Reset();
+            converter_ready = converter.Initialize(
+                device.Get(),
+                source_width,
+                source_height,
+                encode_size.width,
+                encode_size.height,
+                fps);
+            encoder_ready = converter_ready && encoder.Initialize(
+                device.Get(),
+                encode_size.width,
+                encode_size.height,
+                fps,
+                target_bitrate);
+            return encoder_ready;
+          };
+
+          const uint32_t requested_target_fps = target_fps;
+          initialize_video_pipeline_at_fps(target_fps);
+          while (!encoder_ready && target_fps > 60) {
+            const uint32_t fallback_fps = desklink::LowerFpsTier(target_fps, target_fps);
+            if (fallback_fps >= target_fps) break;
+            std::wcerr << L"Video pipeline unavailable at " << target_fps
+                       << L" fps; retrying " << fallback_fps << L" fps.\\n";
+            target_fps = fallback_fps;
+            initialize_video_pipeline_at_fps(target_fps);
+          }
+          if (encoder_ready && target_fps != requested_target_fps) {
+            std::wcout << L"High-refresh compatibility fallback selected " << target_fps
+                       << L" fps instead of requested " << requested_target_fps << L" fps.\\n";
+          }
+          '''
+          replace_exact(path, old, new)
+          '@ | python -
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+
+      - name: Build Windows host
+        run: cmake --build build/windows-agent --config Release --parallel
+
+      - name: Validate high-refresh policy smoke
+        shell: pwsh
+        run: |
+          & "build/windows-agent/Release/desklink-video-policy-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "High-refresh policy smoke failed with exit code $LASTEXITCODE" }
+
+      - name: Commit validated fallback to main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/windows-agent/src/main.cpp
+          if (git diff --cached --quiet) { throw "High-refresh fallback patch produced no changes" }
+          git commit -m "fix(windows): fall back when high-refresh encoder init fails"
+          git pull --rebase origin main
+          git push origin HEAD:main
