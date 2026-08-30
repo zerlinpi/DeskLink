@@ -110,6 +110,8 @@ add_executable(desklink-agent
   src/performance_tuning.cpp
   src/service_auth_client.cpp
   src/service_auth_client.h
+  src/secure_attention.cpp
+  src/secure_attention.h
   src/service_shutdown_bridge.cpp
   src/signal_token_client.cpp
   src/signal_token_client.h
@@ -129,6 +131,7 @@ target_link_libraries(
   PRIVATE
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
+    advapi32
     d3d11
     dxgi
     dxguid
