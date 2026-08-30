@@ -3,8 +3,11 @@ import { createRoot } from "react-dom/client";
 import { accessProofAlgorithm, createAccessProof } from "./access_proof";
 import { AsyncAttemptCoordinator } from "./async_attempt";
 import {
+  DATA_CHANNEL_OPEN_TIMEOUT_MS,
   dataChannelRecoveryDelayMs,
   resetDataChannelRecoveryAttempt,
+  shouldArmDataChannelOpenWatchdog,
+  shouldExpireDataChannelOpenWatchdog,
   shouldScheduleDataChannelRecovery,
   type RecoverableChannelKind,
 } from "./data_channel_recovery";
@@ -197,6 +200,10 @@ function App() {
     control: null,
     pointer: null,
   });
+  const dataChannelOpenWatchdogRef = useRef<Record<RecoverableChannelKind, number | null>>({
+    control: null,
+    pointer: null,
+  });
   const dataChannelRecoveryAttemptRef = useRef<Record<RecoverableChannelKind, number>>({
     control: 0,
     pointer: 0,
@@ -302,9 +309,17 @@ function App() {
     dataChannelRecoveryTimerRef.current[kind] = null;
   };
 
+  const clearDataChannelOpenWatchdog = (kind: RecoverableChannelKind) => {
+    const timer = dataChannelOpenWatchdogRef.current[kind];
+    if (timer !== null) window.clearTimeout(timer);
+    dataChannelOpenWatchdogRef.current[kind] = null;
+  };
+
   const resetDataChannelRecoveryState = () => {
     clearDataChannelRecoveryTimer("control");
     clearDataChannelRecoveryTimer("pointer");
+    clearDataChannelOpenWatchdog("control");
+    clearDataChannelOpenWatchdog("pointer");
     dataChannelRecoveryAttemptRef.current = { control: 0, pointer: 0 };
   };
 
@@ -644,6 +659,37 @@ function App() {
     }
   };
 
+  const armDataChannelOpenWatchdog = (
+    pc: RTCPeerConnection,
+    kind: RecoverableChannelKind,
+    channel: RTCDataChannel,
+  ) => {
+    const currentChannel = kind === "control" ? controlRef.current : pointerRef.current;
+    if (!shouldArmDataChannelOpenWatchdog({
+      manualDisconnect: manualDisconnectRef.current,
+      currentPeer: pcRef.current === pc,
+      peerState: pc.connectionState,
+      channelCurrent: currentChannel === channel,
+      channelState: channel.readyState,
+      watchdogScheduled: dataChannelOpenWatchdogRef.current[kind] !== null,
+    })) return;
+
+    dataChannelOpenWatchdogRef.current[kind] = window.setTimeout(() => {
+      dataChannelOpenWatchdogRef.current[kind] = null;
+      const activeChannel = kind === "control" ? controlRef.current : pointerRef.current;
+      if (!shouldExpireDataChannelOpenWatchdog({
+        manualDisconnect: manualDisconnectRef.current,
+        currentPeer: pcRef.current === pc,
+        peerState: pc.connectionState,
+        channelCurrent: activeChannel === channel,
+        channelState: channel.readyState,
+      })) return;
+
+      if (kind === "control") setStatus("recovering control channel");
+      channel.close();
+    }, DATA_CHANNEL_OPEN_TIMEOUT_MS);
+  };
+
   const scheduleDataChannelRecovery = (
     pc: RTCPeerConnection,
     kind: RecoverableChannelKind,
@@ -690,6 +736,7 @@ function App() {
         return;
       }
       clearDataChannelRecoveryTimer("control");
+      clearDataChannelOpenWatchdog("control");
       dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(
         "control",
         dataChannelRecoveryAttemptRef.current,
@@ -715,6 +762,7 @@ function App() {
     };
     control.onclose = () => {
       if (controlRef.current !== control) return;
+      clearDataChannelOpenWatchdog("control");
       stopTelemetry();
       setHostCapabilities(null);
       if (isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) &&
@@ -723,6 +771,7 @@ function App() {
       }
       scheduleDataChannelRecovery(pc, "control", control);
     };
+    armDataChannelOpenWatchdog(pc, "control", control);
   };
 
   const attachPointerChannel = (pc: RTCPeerConnection, pointer: RTCDataChannel) => {
@@ -734,6 +783,7 @@ function App() {
         return;
       }
       clearDataChannelRecoveryTimer("pointer");
+      clearDataChannelOpenWatchdog("pointer");
       dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(
         "pointer",
         dataChannelRecoveryAttemptRef.current,
@@ -749,10 +799,12 @@ function App() {
     };
     pointer.onclose = () => {
       if (pointerRef.current !== pointer) return;
+      clearDataChannelOpenWatchdog("pointer");
       if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
       pointerRafRef.current = null;
       scheduleDataChannelRecovery(pc, "pointer", pointer);
     };
+    armDataChannelOpenWatchdog(pc, "pointer", pointer);
   };
 
   const createRecoverableDataChannel = (
@@ -825,20 +877,29 @@ function App() {
           scheduleDataChannelRecovery(pc, "control", control);
         } else {
           setStatus("establishing control channel");
+          if (control?.readyState === "connecting") {
+            armDataChannelOpenWatchdog(pc, "control", control);
+          }
         }
         const pointer = pointerRef.current;
         if (pointer?.readyState === "closed") {
           scheduleDataChannelRecovery(pc, "pointer", pointer);
+        } else if (pointer?.readyState === "connecting") {
+          armDataChannelOpenWatchdog(pc, "pointer", pointer);
         }
       } else if (state === "disconnected") {
         clearDataChannelRecoveryTimer("control");
         clearDataChannelRecoveryTimer("pointer");
+        clearDataChannelOpenWatchdog("control");
+        clearDataChannelOpenWatchdog("pointer");
         setStatus("reconnecting network");
         scheduleIceRestart(pc, false);
       } else if (state === "failed") {
         stopTelemetry();
         clearDataChannelRecoveryTimer("control");
         clearDataChannelRecoveryTimer("pointer");
+        clearDataChannelOpenWatchdog("control");
+        clearDataChannelOpenWatchdog("pointer");
         setStatus("reconnecting network");
         scheduleIceRestart(pc, true);
       } else if (state === "closed") {
@@ -847,6 +908,8 @@ function App() {
         clearIceRestartWatchdog();
         clearDataChannelRecoveryTimer("control");
         clearDataChannelRecoveryTimer("pointer");
+        clearDataChannelOpenWatchdog("control");
+        clearDataChannelOpenWatchdog("pointer");
         iceRestartInFlightRef.current = false;
       } else {
         setStatus(state);
