@@ -1,0 +1,208 @@
+name: One-shot dependency and capability hardening
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Apply hardening changes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          package_path = Path('apps/web/package.json')
+          package = json.loads(package_path.read_text(encoding='utf-8'))
+          package['devDependencies']['vite'] = '7.3.5'
+          package_path.write_text(json.dumps(package, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+          main_path = Path('apps/windows-agent/src/main.cpp')
+          main = main_path.read_text(encoding='utf-8')
+          legacy_block = '''  auto send_monitor_state = [&]() {
+    desklink::ServiceSecureAttentionStatus sas_status;
+    std::string sas_error;
+    const bool sas_status_ok = desklink::FetchServiceSecureAttentionStatus(
+        &sas_status,
+        &sas_error);
+    std::string sas_reason;
+    if (!sas_status_ok) {
+      sas_reason = "capability-unavailable";
+    } else if (!sas_status.broker_configured) {
+      sas_reason = "service-broker-unavailable";
+    } else if (!sas_status.api_available) {
+      sas_reason = "api-unavailable";
+    } else if (!sas_status.policy_readable) {
+      sas_reason = "policy-read-error";
+    } else if (!sas_status.policy_allows_services) {
+      sas_reason = "policy-not-allowed";
+    }
+
+    session.SendControlMessage(nlohmann::json{
+        {"t", "host-capabilities"},
+        {"version", 1},
+        {"secureAttentionAvailable", sas_status_ok && sas_status.available},
+        {"secureAttentionReason", sas_reason},
+        {"secureAttentionPolicy", sas_status.policy},
+        {"clipboardAvailable", true},
+        {"fileTransferAvailable", true},
+        {"audioAvailable", false},
+        {"protectedDesktopAvailable", false},
+    }.dump());
+
+'''
+          if legacy_block not in main:
+              raise SystemExit('legacy main.cpp host-capabilities block was not found')
+          main_path.write_text(main.replace(legacy_block, '  auto send_monitor_state = [&]() {\n', 1), encoding='utf-8')
+
+          session_header_path = Path('apps/windows-agent/src/webrtc_session.h')
+          session_header = session_header_path.read_text(encoding='utf-8')
+          overload = '''  // Transitional overload: main.cpp in older host revisions still constructs a
+  // legacy flat host-capabilities message inside send_monitor_state(). New hosts
+  // publish nested HostCapabilitiesV1 independently, so discard that legacy
+  // advertisement before it reaches the wire while forwarding every other
+  // rvalue control message unchanged. Remove this overload with the old block
+  // during the incremental main.cpp split.
+  bool SendControlMessage(std::string&& text) {
+    if (IsLegacyHostCapabilitiesV1Message(text)) return true;
+    return SendControlMessage(static_cast<const std::string&>(text));
+  }
+
+'''
+          if overload not in session_header:
+              raise SystemExit('transitional SendControlMessage overload was not found')
+          session_header_path.write_text(session_header.replace(overload, '', 1), encoding='utf-8')
+
+          cap_header_path = Path('apps/windows-agent/src/host_capabilities.h')
+          cap_header = cap_header_path.read_text(encoding='utf-8')
+          guard_decl = '''// Transitional guard for the old main.cpp monitor-state block. New Windows
+// sessions publish capabilities independently through HostCapabilitiesPublisher,
+// so legacy flat advertisements are discarded before reaching the wire.
+bool IsLegacyHostCapabilitiesV1Message(const std::string& text);
+
+'''
+          if guard_decl not in cap_header:
+              raise SystemExit('legacy capability guard declaration was not found')
+          cap_header_path.write_text(cap_header.replace(guard_decl, '', 1), encoding='utf-8')
+
+          cap_cpp_path = Path('apps/windows-agent/src/host_capabilities.cpp')
+          cap_cpp = cap_cpp_path.read_text(encoding='utf-8')
+          guard_impl = '''bool IsLegacyHostCapabilitiesV1Message(const std::string& text) {
+  if (text.find("host-capabilities") == std::string::npos) return false;
+  const auto message = nlohmann::json::parse(text, nullptr, false);
+  if (message.is_discarded() || !message.is_object()) return false;
+  if (message.value("t", "") != "host-capabilities" || message.value("version", 0) != 1) {
+    return false;
+  }
+  if (message.contains("capabilities")) return false;
+  return message.contains("secureAttentionAvailable") ||
+      message.contains("clipboardAvailable") ||
+      message.contains("fileTransferAvailable") ||
+      message.contains("audioAvailable") ||
+      message.contains("protectedDesktopAvailable");
+}
+
+'''
+          if guard_impl not in cap_cpp:
+              raise SystemExit('legacy capability guard implementation was not found')
+          cap_cpp_path.write_text(cap_cpp.replace(guard_impl, '', 1), encoding='utf-8')
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          replacements = [
+              (
+                  'cd apps/web\nnpm install\nnpm run dev',
+                  'cd apps/web\nnpm ci\nnpm run dev',
+              ),
+              (
+                  '生产环境建议：',
+                  '生产源码构建时的 fallback 示例（部署后优先使用运行时配置）：',
+              ),
+              (
+                  'VITE_TURN_RUNTIME_REQUIRED=1\n```\n\n## Release 与下载',
+                  'VITE_TURN_RUNTIME_REQUIRED=1\n```\n\n生产部署的 `dist` 支持 **build once, deploy anywhere**：无需重新执行 Vite 构建，直接修改与 `index.html` 同目录的 `desklink-config.js` 即可切换 Signal、Controller Session、STUN/TURN 等公开端点和运行时开关。该文件必须保持公开配置属性，禁止写入 Access Code、Device Credential、Controller secret、Signal token、TURN shared secret 或长期 TURN 用户名/密码。`VITE_*` 仅作为源码构建期 fallback。\n\n## Release 与下载',
+              ),
+              (
+                  '正式版本通过 GitHub Releases 发布。每个版本通常包含：',
+                  '当前 `main` 使用带 `-dev` 后缀的开发版本号；只有与 `VERSION` 完全匹配的稳定 `vX.Y.Z` tag 才能发布稳定 Release 和稳定容器标签。\n\n正式版本通过 GitHub Releases 发布。每个版本通常包含：',
+              ),
+              (
+                  '- `desklink-web-v<version>.tar.gz`：浏览器控制端发布包。',
+                  '- `desklink-web-v<version>-dist.tar.gz`：可直接部署的浏览器控制端静态产物。\n- `desklink-web-v<version>-source.tar.gz`：用于审计、开发或自定义构建的 Web 源码包。',
+              ),
+          ]
+          for old, new in replacements:
+              if old not in readme:
+                  raise SystemExit(f'README replacement anchor not found: {old[:80]!r}')
+              readme = readme.replace(old, new, 1)
+          readme_path.write_text(readme, encoding='utf-8')
+          PY
+
+      - name: Refresh npm lockfile
+        working-directory: apps/web
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Audit Web dependency tree
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Verify legacy capability shim is gone
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -n "secureAttentionAvailable" apps/windows-agent/src/main.cpp
+          ! grep -n "IsLegacyHostCapabilitiesV1Message" \
+            apps/windows-agent/src/host_capabilities.h \
+            apps/windows-agent/src/host_capabilities.cpp \
+            apps/windows-agent/src/webrtc_session.h
+          git diff --check
+
+      - name: Commit hardened dependency graph and cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md \
+            apps/web/package.json \
+            apps/web/package-lock.json \
+            apps/windows-agent/src/main.cpp \
+            apps/windows-agent/src/webrtc_session.h \
+            apps/windows-agent/src/host_capabilities.h \
+            apps/windows-agent/src/host_capabilities.cpp
+          git diff --cached --quiet && {
+            echo "No hardening changes to commit"
+            exit 0
+          }
+          git commit -m "security(web): upgrade Vite and remove legacy capability shim"
+          git push origin HEAD:main
