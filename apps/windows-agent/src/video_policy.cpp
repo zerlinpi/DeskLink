@@ -5,6 +5,36 @@
 
 namespace desklink {
 
+AdaptationPolicy AdaptationPolicyForMode(AdaptationMode mode, uint32_t fps_ceiling) {
+  fps_ceiling = std::clamp<uint32_t>(fps_ceiling, 15, 144);
+  if (mode == AdaptationMode::Game) {
+    return {
+        std::min<uint32_t>(fps_ceiling, 45),  // minimum_fps
+        std::min<uint32_t>(fps_ceiling, 45),  // resolution_trigger_fps
+        6,   // severe_fps_streak: hold FPS longer before stepping down
+        2,   // resolution_pressure_streak: shed pixels earlier
+        5,   // resolution_change_cooldown_seconds
+        75,  // bitrate_pressure_percent
+        60,  // severe_bitrate_percent
+        78,  // moderate_bitrate_percent
+        false,
+    };
+  }
+
+  // These values intentionally preserve the pre-mode DeskLink behavior.
+  return {
+      std::min<uint32_t>(fps_ceiling, 15),
+      std::min<uint32_t>(fps_ceiling, 24),
+      3,
+      4,
+      8,
+      45,
+      65,
+      82,
+      true,
+  };
+}
+
 uint32_t LowerFpsTier(uint32_t current, uint32_t ceiling) {
   current = std::min(current, ceiling);
   if (current > 120) return std::min<uint32_t>(ceiling, 120);

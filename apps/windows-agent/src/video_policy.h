@@ -4,6 +4,28 @@
 
 namespace desklink {
 
+enum class AdaptationMode : uint8_t {
+  Desktop = 0,
+  Game = 1,
+};
+
+struct AdaptationPolicy {
+  uint32_t minimum_fps;
+  uint32_t resolution_trigger_fps;
+  uint32_t severe_fps_streak;
+  uint32_t resolution_pressure_streak;
+  uint32_t resolution_change_cooldown_seconds;
+  uint32_t bitrate_pressure_percent;
+  uint32_t severe_bitrate_percent;
+  uint32_t moderate_bitrate_percent;
+  bool resolution_requires_fps_trigger;
+};
+
+// Desktop mode preserves text clarity and resolution for as long as possible.
+// Game mode protects motion/input responsiveness by shedding bitrate and
+// resolution before allowing frame rate to collapse.
+AdaptationPolicy AdaptationPolicyForMode(AdaptationMode mode, uint32_t fps_ceiling);
+
 // Supported adaptive frame-rate ladder. The configured target may be any value
 // from 15..144; transitions use these stable tiers and clamp back to the exact
 // configured ceiling when it lies between two tiers. DeskLink keeps 60 fps as

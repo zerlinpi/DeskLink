@@ -355,6 +355,7 @@ int wmain(int argc, wchar_t** argv) {
   uint32_t healthy_feedback_streak = 0;
   uint32_t resolution_pressure_streak = 0;
   uint32_t resolution_healthy_streak = 0;
+  desklink::AdaptationMode adaptation_mode = desklink::AdaptationMode::Desktop;
 
   desklink::SessionConfig session_config;
   session_config.signal_url = EnvOr("DESKLINK_SIGNAL_URL", session_config.signal_url);
@@ -408,6 +409,24 @@ int wmain(int argc, wchar_t** argv) {
               << " Mbps, resolution-tier " << limits.best_resolution_tier
               << ".." << limits.worst_resolution_tier << "\n";
   };
+  session_config.on_adaptation_mode_requested = [&](desklink::AdaptationMode mode) {
+    std::scoped_lock lock(adaptation_mutex);
+    if (adaptation_mode == mode) return;
+    adaptation_mode = mode;
+
+    severe_feedback_streak = 0;
+    healthy_feedback_streak = 0;
+    resolution_pressure_streak = 0;
+    resolution_healthy_streak = 0;
+    const auto now = std::chrono::steady_clock::now();
+    last_bitrate_change = now - std::chrono::seconds(10);
+    last_fps_change = now;
+    last_resolution_change = now - std::chrono::seconds(20);
+
+    std::cout << "Controller adaptation mode: "
+              << (mode == desklink::AdaptationMode::Game ? "game" : "desktop")
+              << "\n";
+  };
   session_config.on_network_feedback = [&](const desklink::NetworkFeedback& feedback) {
     std::scoped_lock lock(adaptation_mutex);
     const auto now = std::chrono::steady_clock::now();
@@ -422,6 +441,8 @@ int wmain(int argc, wchar_t** argv) {
         requested_bitrate.load(std::memory_order_relaxed),
         bitrate_ceiling);
     uint32_t next = current;
+    const desklink::AdaptationPolicy adaptation_policy =
+        desklink::AdaptationPolicyForMode(adaptation_mode, fps_ceiling);
 
     const bool capacity_severe = feedback.available_incoming_bitrate_bps > 0.0 &&
                                  feedback.available_incoming_bitrate_bps <
@@ -447,9 +468,15 @@ int wmain(int argc, wchar_t** argv) {
                          capacity_healthy;
 
     if (severe && since_change >= std::chrono::seconds(1)) {
-      next = std::max<uint32_t>(min_bitrate, static_cast<uint32_t>(current * 0.65));
+      next = std::max<uint32_t>(
+          min_bitrate,
+          static_cast<uint32_t>(static_cast<uint64_t>(current) *
+                                adaptation_policy.severe_bitrate_percent / 100));
     } else if (moderate && since_change >= std::chrono::seconds(2)) {
-      next = std::max<uint32_t>(min_bitrate, static_cast<uint32_t>(current * 0.82));
+      next = std::max<uint32_t>(
+          min_bitrate,
+          static_cast<uint32_t>(static_cast<uint64_t>(current) *
+                                adaptation_policy.moderate_bitrate_percent / 100));
     } else if (healthy && since_change >= std::chrono::seconds(5)) {
       const uint32_t increase = std::max<uint32_t>(250'000, current / 12);
       next = std::min<uint32_t>(bitrate_ceiling, current + increase);
@@ -486,9 +513,11 @@ int wmain(int argc, wchar_t** argv) {
     const uint32_t current_fps = std::min<uint32_t>(
         requested_fps.load(std::memory_order_relaxed),
         fps_ceiling);
-    if (severe_feedback_streak >= 3 &&
+    if (severe_feedback_streak >= adaptation_policy.severe_fps_streak &&
         now - last_fps_change >= std::chrono::seconds(3)) {
-      const uint32_t lower = desklink::LowerFpsTier(current_fps, fps_ceiling);
+      const uint32_t lower = std::max<uint32_t>(
+          adaptation_policy.minimum_fps,
+          desklink::LowerFpsTier(current_fps, fps_ceiling));
       if (lower < current_fps) {
         requested_fps.store(lower, std::memory_order_relaxed);
         last_fps_change = now;
@@ -505,14 +534,16 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     const uint32_t adaptive_fps = requested_fps.load(std::memory_order_relaxed);
-    const uint32_t fps_floor = std::min<uint32_t>(fps_ceiling, 24);
     const uint32_t bitrate_pressure_floor = std::max<uint32_t>(
         min_bitrate,
-        static_cast<uint32_t>(static_cast<uint64_t>(bitrate_ceiling) * 45 / 100));
-    const bool resolution_exhausted = adaptive_fps <= fps_floor &&
-                                      next <= bitrate_pressure_floor;
+        static_cast<uint32_t>(static_cast<uint64_t>(bitrate_ceiling) *
+                              adaptation_policy.bitrate_pressure_percent / 100));
+    const bool fps_pressure_ready = !adaptation_policy.resolution_requires_fps_trigger ||
+                                    adaptive_fps <= adaptation_policy.resolution_trigger_fps;
+    const bool resolution_under_pressure = fps_pressure_ready &&
+                                           next <= bitrate_pressure_floor;
 
-    if (severe && resolution_exhausted) {
+    if (severe && resolution_under_pressure) {
       resolution_pressure_streak = std::min<uint32_t>(resolution_pressure_streak + 1, 60);
     } else {
       resolution_pressure_streak = 0;
@@ -532,8 +563,9 @@ int wmain(int argc, wchar_t** argv) {
         requested_resolution_tier.load(std::memory_order_relaxed),
         best_resolution_tier,
         worst_resolution_tier);
-    if (resolution_pressure_streak >= 4 &&
-        now - last_resolution_change >= std::chrono::seconds(8) &&
+    if (resolution_pressure_streak >= adaptation_policy.resolution_pressure_streak &&
+        now - last_resolution_change >=
+            std::chrono::seconds(adaptation_policy.resolution_change_cooldown_seconds) &&
         current_tier < worst_resolution_tier) {
       requested_resolution_tier.store(current_tier + 1, std::memory_order_relaxed);
       last_resolution_change = now;

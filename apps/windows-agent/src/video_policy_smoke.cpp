@@ -16,6 +16,8 @@ void Require(bool condition, const char* message) {
 }  // namespace
 
 int main() {
+  using desklink::AdaptationMode;
+  using desklink::AdaptationPolicyForMode;
   using desklink::CaptureTimeoutMsForFps;
   using desklink::DefaultBitrateForFps;
   using desklink::LowerFpsTier;
@@ -57,6 +59,30 @@ int main() {
   Require(PacingIntervalMsForFps(90) == 3, "90 fps pacing interval");
   Require(PacingIntervalMsForFps(144) == 2, "144 fps pacing interval");
 
-  std::cout << "High-refresh video policy smoke passed.\n";
+  const auto desktop = AdaptationPolicyForMode(AdaptationMode::Desktop, 144);
+  Require(desktop.minimum_fps == 15, "desktop minimum FPS must preserve existing behavior");
+  Require(desktop.resolution_trigger_fps == 24, "desktop resolution trigger FPS");
+  Require(desktop.severe_fps_streak == 3, "desktop FPS pressure streak");
+  Require(desktop.resolution_pressure_streak == 4, "desktop resolution pressure streak");
+  Require(desktop.resolution_change_cooldown_seconds == 8, "desktop resolution cooldown");
+  Require(desktop.bitrate_pressure_percent == 45, "desktop bitrate pressure threshold");
+  Require(desktop.severe_bitrate_percent == 65, "desktop severe bitrate factor");
+  Require(desktop.moderate_bitrate_percent == 82, "desktop moderate bitrate factor");
+  Require(desktop.resolution_requires_fps_trigger, "desktop must exhaust FPS before resolution");
+
+  const auto game = AdaptationPolicyForMode(AdaptationMode::Game, 144);
+  Require(game.minimum_fps == 45, "game mode must preserve a 45 FPS floor");
+  Require(game.severe_fps_streak == 6, "game mode must hold FPS longer under pressure");
+  Require(game.resolution_pressure_streak == 2, "game mode must reduce resolution earlier");
+  Require(game.resolution_change_cooldown_seconds == 5, "game resolution cooldown");
+  Require(game.bitrate_pressure_percent == 75, "game mode must treat bitrate pressure earlier");
+  Require(game.severe_bitrate_percent == 60, "game mode severe bitrate factor");
+  Require(game.moderate_bitrate_percent == 78, "game mode moderate bitrate factor");
+  Require(!game.resolution_requires_fps_trigger, "game mode must not wait for FPS exhaustion");
+
+  const auto capped_game = AdaptationPolicyForMode(AdaptationMode::Game, 30);
+  Require(capped_game.minimum_fps == 30, "game FPS floor must respect a lower configured ceiling");
+
+  std::cout << "High-refresh and adaptation video policy smoke passed.\n";
   return 0;
 }

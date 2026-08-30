@@ -19,6 +19,7 @@
 #include "host_capabilities.h"
 #include "input_channel_authority.h"
 #include "input_injector.h"
+#include "video_policy.h"
 
 namespace desklink {
 
@@ -53,6 +54,7 @@ struct SessionConfig {
   uint32_t media_pacing_interval_ms{5};
   std::function<void(const NetworkFeedback&)> on_network_feedback;
   std::function<void(VideoProfile)> on_video_profile_requested;
+  std::function<void(AdaptationMode)> on_adaptation_mode_requested;
   std::function<void()> on_monitor_state_requested;
   std::function<void(uint32_t)> on_monitor_switch_requested;
   std::function<void()> on_keyframe_requested;

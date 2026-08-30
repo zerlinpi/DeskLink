@@ -1241,6 +1241,18 @@ void WebRtcSession::HandleControl(const std::string& text) {
     return;
   }
 
+  if (type == "adaptation-mode") {
+    if (!config_.on_adaptation_mode_requested) return;
+
+    const std::string mode = event.value("mode", "");
+    if (mode == "desktop") {
+      config_.on_adaptation_mode_requested(AdaptationMode::Desktop);
+    } else if (mode == "game") {
+      config_.on_adaptation_mode_requested(AdaptationMode::Game);
+    }
+    return;
+  }
+
   if (type == "monitor-list-request") {
     if (config_.on_monitor_state_requested) config_.on_monitor_state_requested();
     return;
