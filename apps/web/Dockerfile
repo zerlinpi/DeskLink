@@ -3,7 +3,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 
-COPY package.json tsconfig.json index.html ./
+COPY package.json package-lock.json tsconfig.json index.html vite.config.ts ./
 COPY src ./src
 
 # The browser controller is static, so public endpoints are injected at build
@@ -29,7 +29,8 @@ ENV VITE_SIGNAL_URL=${VITE_SIGNAL_URL} \
     VITE_TURN_RUNTIME_REQUIRED=${VITE_TURN_RUNTIME_REQUIRED} \
     VITE_ICE_TRANSPORT_POLICY=${VITE_ICE_TRANSPORT_POLICY}
 
-RUN npm install \
+RUN npm ci \
+    && npm test \
     && npm run build
 
 FROM nginx:alpine
