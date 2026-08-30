@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "active_session.h"
 #include "protected_credential_store.h"
 #include "service_auth_broker.h"
 
@@ -754,7 +755,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
 
   while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
     const auto now = clock::now();
-    const DWORD active_session = WTSGetActiveConsoleSessionId();
+    const DWORD active_session = desklink::FindActiveInteractiveSession();
     const bool session_changed = active_session != observed_active_session;
     const bool agent_dead = g_agent_process && !AgentAlive();
 

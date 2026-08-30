@@ -147,6 +147,8 @@ target_link_libraries(
 
 add_executable(desklink-service
   src/service_main.cpp
+  src/active_session.cpp
+  src/active_session.h
   src/protected_credential_store.cpp
   src/protected_credential_store.h
   src/service_auth_broker.cpp
@@ -272,3 +274,12 @@ add_executable(desklink-video-policy-smoke
 )
 target_compile_definitions(desklink-video-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)
+
+add_executable(desklink-active-session-smoke
+  src/active_session_smoke.cpp
+  src/active_session.cpp
+  src/active_session.h
+)
+target_compile_definitions(desklink-active-session-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-active-session-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(desklink-active-session-smoke PRIVATE wtsapi32)
