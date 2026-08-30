@@ -480,7 +480,7 @@ function App() {
   };
 
   const sendOffer = async (pc: RTCPeerConnection, iceRestart = false) => {
-    if (pcRef.current !== pc) return false;
+    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return false;
     if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
 
     offerSentRef.current = false;
@@ -489,9 +489,10 @@ function App() {
     if (iceRestart) pendingRemoteIceRef.current = [];
 
     const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
-    if (pcRef.current !== pc) return false;
+    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return false;
     await pc.setLocalDescription(offer);
-    if (pcRef.current !== pc || wsRef.current?.readyState !== WebSocket.OPEN) {
+    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return false;
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
       negotiationPendingRef.current = false;
       return false;
     }
@@ -556,6 +557,7 @@ function App() {
 
       const sent = await sendOffer(pc, true);
       if (!sent) {
+        if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
         iceRestartInFlightRef.current = false;
         scheduleSignalReconnect();
         return;
@@ -564,7 +566,8 @@ function App() {
       clearIceRestartWatchdog();
       iceRestartWatchdogRef.current = window.setTimeout(() => {
         iceRestartWatchdogRef.current = null;
-        if (pcRef.current !== pc || pc.connectionState === "connected") {
+        if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
+        if (pc.connectionState === "connected") {
           iceRestartInFlightRef.current = false;
           return;
         }
@@ -572,6 +575,7 @@ function App() {
         scheduleIceRestart(pc, false);
       }, 8000);
     } catch (error) {
+      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
       console.debug("DeskLink ICE restart failed", error);
       iceRestartInFlightRef.current = false;
       scheduleIceRestart(pc, false);
