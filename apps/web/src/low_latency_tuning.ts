@@ -4,9 +4,19 @@ type TunableReceiver = RTCRtpReceiver & {
 };
 
 type AddTransceiver = RTCPeerConnection["addTransceiver"];
+type DataChannelSend = RTCDataChannel["send"];
 
-const prototype = RTCPeerConnection.prototype;
-const originalAddTransceiver: AddTransceiver = prototype.addTransceiver;
+const peerPrototype = RTCPeerConnection.prototype;
+const originalAddTransceiver: AddTransceiver = peerPrototype.addTransceiver;
+const dataChannelPrototype = RTCDataChannel.prototype;
+const originalDataChannelSend: DataChannelSend = dataChannelPrototype.send;
+
+// Pointer motion is deliberately latest-wins. Even an unordered/unreliable SCTP
+// DataChannel can accumulate a local send buffer faster than the network drains
+// it. Once that happens, sending old mouse positions only increases perceived
+// latency. Drop only move events under backpressure; wheel, button, keyboard and
+// release-all events retain their existing delivery semantics.
+const POINTER_MOVE_MAX_BUFFERED_BYTES = 8 * 1024;
 
 function tuneReceiver(receiver: RTCRtpReceiver) {
   const tunable = receiver as TunableReceiver;
@@ -28,7 +38,15 @@ function tuneReceiver(receiver: RTCRtpReceiver) {
   }
 }
 
-prototype.addTransceiver = function addDeskLinkTransceiver(
+function isStalePointerMove(channel: RTCDataChannel, data: unknown) {
+  if (channel.label !== "pointer" || channel.bufferedAmount <= POINTER_MOVE_MAX_BUFFERED_BYTES) {
+    return false;
+  }
+  if (typeof data !== "string") return false;
+  return data.includes('"t":"pointer"') && data.includes('"kind":"move"');
+}
+
+peerPrototype.addTransceiver = function addDeskLinkTransceiver(
   this: RTCPeerConnection,
   trackOrKind: MediaStreamTrack | string,
   init?: RTCRtpTransceiverInit,
@@ -38,3 +56,11 @@ prototype.addTransceiver = function addDeskLinkTransceiver(
   if (kind === "video") tuneReceiver(transceiver.receiver);
   return transceiver;
 } as AddTransceiver;
+
+dataChannelPrototype.send = function sendDeskLinkData(
+  this: RTCDataChannel,
+  data: string | Blob | ArrayBuffer | ArrayBufferView,
+): void {
+  if (isStalePointerMove(this, data)) return;
+  originalDataChannelSend.call(this, data as never);
+} as DataChannelSend;
