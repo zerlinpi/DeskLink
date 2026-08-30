@@ -189,6 +189,8 @@ jobs:
         run: node ../../tools/auth/verify-access-proof-vector.mjs
       - name: Install locked Web dependencies
         run: npm ci
+      - name: Audit Web dependencies
+        run: npm audit --audit-level=moderate
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests
