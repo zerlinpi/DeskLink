@@ -1,0 +1,110 @@
+name: One-shot controller recovery integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-controller-recovery-integration.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Integrate controller recovery race fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  'import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";\n',
+                  'import { requestControllerSession, resolveControllerSessionUrl } from "./controller_session";\nimport { ControllerTokenCoordinator } from "./controller_token_coordinator";\n',
+              ),
+              (
+                  '  hostWaitRefreshDelayMs,\n  iceRestartDelayMs,\n  shouldScheduleIceRestart,\n  signalReconnectDelayMs,\n',
+                  '  hostWaitRefreshDelayMs,\n  iceRestartDelayMs,\n  isSignalOpenScopeCurrent,\n  shouldBeginSignalOpen,\n  shouldScheduleIceRestart,\n  shouldScheduleSignalReconnect,\n  signalReconnectDelayMs,\n',
+              ),
+              (
+                  '  const signalReconnectTimerRef = useRef<number | null>(null);\n  const signalReconnectAttemptRef = useRef(0);\n',
+                  '  const signalReconnectTimerRef = useRef<number | null>(null);\n  const signalReconnectAttemptRef = useRef(0);\n  const signalOpenInFlightRef = useRef(false);\n',
+              ),
+              (
+                  '  const controllerTokenRef = useRef(STATIC_SIGNAL_AUTH_TOKEN);\n  const controllerTokenExpiryRef = useRef(STATIC_SIGNAL_AUTH_TOKEN ? Number.MAX_SAFE_INTEGER : 0);\n  const controllerTokenTargetRef = useRef("");\n  const controllerTokenRequestRef = useRef<Promise<string> | null>(null);\n',
+                  '  const controllerTokenCoordinatorRef = useRef(new ControllerTokenCoordinator());\n',
+              ),
+              (
+                  '  const clearRuntimeControllerSession = () => {\n    if (runtimeControllerAuthEnabled) {\n      controllerTokenRef.current = "";\n      controllerTokenExpiryRef.current = 0;\n      controllerTokenTargetRef.current = "";\n    }\n    controllerTokenRequestRef.current = null;\n  };\n',
+                  '  const clearRuntimeControllerSession = () => {\n    if (runtimeControllerAuthEnabled) controllerTokenCoordinatorRef.current.clear();\n  };\n',
+              ),
+              (
+                  '    const normalizedTarget = targetId.trim();\n    if (!normalizedTarget || !controllerAccount.trim() || !controllerKey) {\n      throw new Error("controller account, controller key and target device are required");\n    }\n\n    const nowSeconds = Math.floor(Date.now() / 1000);\n    if (!forceRefresh &&\n        controllerTokenRef.current &&\n        controllerTokenTargetRef.current === normalizedTarget &&\n        controllerTokenExpiryRef.current > nowSeconds + CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS) {\n      return controllerTokenRef.current;\n    }\n\n    if (controllerTokenRequestRef.current) return controllerTokenRequestRef.current;\n\n    const request = (async () => {\n      const endpoint = resolveControllerSessionUrl(SIGNAL_URL, CONTROLLER_SESSION_URL);\n      const session = await requestControllerSession(endpoint, {\n        accountId: controllerAccount.trim(),\n        controllerId: localId,\n        targetDeviceId: normalizedTarget,\n        accessKey: controllerKey,\n      });\n      controllerTokenRef.current = session.token;\n      controllerTokenExpiryRef.current = session.expiresAt;\n      controllerTokenTargetRef.current = normalizedTarget;\n      return session.token;\n    })();\n    controllerTokenRequestRef.current = request;\n    try {\n      return await request;\n    } finally {\n      if (controllerTokenRequestRef.current === request) controllerTokenRequestRef.current = null;\n    }\n',
+                  '    const normalizedTarget = targetId.trim();\n    const normalizedAccount = controllerAccount.trim();\n    const accessKey = controllerKey;\n    if (!normalizedTarget || !normalizedAccount || !accessKey) {\n      throw new Error("controller account, controller key and target device are required");\n    }\n\n    const endpoint = resolveControllerSessionUrl(SIGNAL_URL, CONTROLLER_SESSION_URL);\n    return controllerTokenCoordinatorRef.current.getToken(normalizedTarget, {\n      forceRefresh,\n      nowSeconds: Math.floor(Date.now() / 1000),\n      refreshMarginSeconds: CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS,\n      request: () => requestControllerSession(endpoint, {\n        accountId: normalizedAccount,\n        controllerId: localId,\n        targetDeviceId: normalizedTarget,\n        accessKey,\n      }),\n    });\n',
+              ),
+              (
+                  '  const scheduleSignalReconnect = () => {\n    if (manualDisconnectRef.current || signalReconnectTimerRef.current !== null) return;\n    const current = wsRef.current;\n    if (current?.readyState === WebSocket.OPEN || current?.readyState === WebSocket.CONNECTING) return;\n\n    const attempt = signalReconnectAttemptRef.current++;\n',
+                  '  const scheduleSignalReconnect = () => {\n    const current = wsRef.current;\n    const socketActive = current?.readyState === WebSocket.OPEN ||\n      current?.readyState === WebSocket.CONNECTING;\n    if (!shouldScheduleSignalReconnect({\n      manualDisconnect: manualDisconnectRef.current,\n      timerScheduled: signalReconnectTimerRef.current !== null,\n      openInFlight: signalOpenInFlightRef.current,\n      socketActive,\n    })) return;\n\n    const attempt = signalReconnectAttemptRef.current++;\n',
+              ),
+              (
+                  '  const openSignalSocket = async (initial: boolean) => {\n    if (manualDisconnectRef.current) return;\n\n    let authToken = "";\n    try {\n      authToken = await ensureSignalAuthToken(false);\n    } catch (error) {\n      console.debug("DeskLink controller authorization failed", error);\n      clearHostWaitRefreshTimer();\n      setStatus(error instanceof Error ? error.message : "controller authorization failed");\n      manualDisconnectRef.current = true;\n      return;\n    }\n    if (manualDisconnectRef.current) return;\n\n    const legacyAuthToken = runtimeControllerAuthEnabled ? "" : authToken;\n',
+                  '  const openSignalSocket = async (initial: boolean) => {\n    const current = wsRef.current;\n    const socketActive = current?.readyState === WebSocket.OPEN ||\n      current?.readyState === WebSocket.CONNECTING;\n    if (!shouldBeginSignalOpen({\n      manualDisconnect: manualDisconnectRef.current,\n      openInFlight: signalOpenInFlightRef.current,\n      socketActive,\n    })) return;\n\n    const expectedSession = sessionRef.current;\n    const expectedTarget = targetId.trim();\n    signalOpenInFlightRef.current = true;\n    let staleAfterAuthorization = false;\n    let authToken = "";\n    try {\n      try {\n        authToken = await ensureSignalAuthToken(false);\n      } catch (error) {\n        console.debug("DeskLink controller authorization failed", error);\n        clearHostWaitRefreshTimer();\n        setStatus(error instanceof Error ? error.message : "controller authorization failed");\n        manualDisconnectRef.current = true;\n        return;\n      }\n\n      staleAfterAuthorization = !isSignalOpenScopeCurrent({\n        manualDisconnect: manualDisconnectRef.current,\n        expectedSession,\n        currentSession: sessionRef.current,\n        expectedTarget,\n        currentTarget: targetId.trim(),\n      });\n      if (staleAfterAuthorization) return;\n    } finally {\n      signalOpenInFlightRef.current = false;\n      if (staleAfterAuthorization && !manualDisconnectRef.current) scheduleSignalReconnect();\n    }\n\n    const legacyAuthToken = runtimeControllerAuthEnabled ? "" : authToken;\n',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one integration anchor, got {count}: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+
+      - name: Typecheck Web controller
+        working-directory: apps/web
+        run: npm run typecheck
+
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): serialize signaling recovery across reconnects"
+          git push origin HEAD:main
