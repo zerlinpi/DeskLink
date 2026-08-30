@@ -318,10 +318,14 @@ function App() {
   };
 
   const collectTelemetry = async (pc: RTCPeerConnection) => {
-    if (pc.connectionState !== "connected" || controlRef.current?.readyState !== "open") return;
+    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) ||
+        pc.connectionState !== "connected" || controlRef.current?.readyState !== "open") {
+      return;
+    }
 
     try {
       const report = await pc.getStats();
+      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
       let inboundVideo: any = null;
       let selectedPair: any = null;
       let selectedPairId = "";
