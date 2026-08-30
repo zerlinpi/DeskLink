@@ -138,10 +138,10 @@ jobs:
             if (type == "video-profile") {''')
 
           path = 'apps/windows-agent/src/service_auth_broker_smoke.cpp'
-          replace_one(path,
-          '''  if (!desklink::ServiceSignalTokenBrokerConfigured() ||
-              !desklink::ServiceAccessCodeBrokerConfigured()) {''',
-          '''  if (!desklink::ServiceSignalTokenBrokerConfigured() ||
+          replace_regex(
+              path,
+              r'  if \(!desklink::ServiceSignalTokenBrokerConfigured\(\) \|\|\s*!desklink::ServiceAccessCodeBrokerConfigured\(\)\) \{',
+              '''  if (!desklink::ServiceSignalTokenBrokerConfigured() ||
               !desklink::ServiceAccessCodeBrokerConfigured() ||
               !desklink::ServiceSecureAttentionBrokerConfigured()) {''')
           replace_one(path,
