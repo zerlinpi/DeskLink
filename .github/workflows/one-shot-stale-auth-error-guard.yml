@@ -29,39 +29,8 @@ jobs:
           from pathlib import Path
           path = Path('apps/web/src/main.tsx')
           text = path.read_text(encoding='utf-8')
-          old = '''      try {
-        authToken = await ensureSignalAuthToken(false);
-      } catch (error) {
-        console.debug("DeskLink controller authorization failed", error);
-        clearHostWaitRefreshTimer();
-        setStatus(error instanceof Error ? error.message : "controller authorization failed");
-        manualDisconnectRef.current = true;
-        return;
-      }
-
-      staleAfterAuthorization = !isSignalOpenScopeCurrent({
-'''
-          new = '''      try {
-        authToken = await ensureSignalAuthToken(false);
-      } catch (error) {
-        staleAfterAuthorization = !isSignalOpenScopeCurrent({
-          manualDisconnect: manualDisconnectRef.current,
-          expectedSession,
-          currentSession: sessionRef.current,
-          expectedTarget,
-          currentTarget: targetId.trim(),
-        });
-        if (staleAfterAuthorization) return;
-
-        console.debug("DeskLink controller authorization failed", error);
-        clearHostWaitRefreshTimer();
-        setStatus(error instanceof Error ? error.message : "controller authorization failed");
-        manualDisconnectRef.current = true;
-        return;
-      }
-
-      staleAfterAuthorization = !isSignalOpenScopeCurrent({
-'''
+          old = "      try {\n        authToken = await ensureSignalAuthToken(false);\n      } catch (error) {\n        console.debug(\"DeskLink controller authorization failed\", error);\n        clearHostWaitRefreshTimer();\n        setStatus(error instanceof Error ? error.message : \"controller authorization failed\");\n        manualDisconnectRef.current = true;\n        return;\n      }\n\n      staleAfterAuthorization = !isSignalOpenScopeCurrent({\n"
+          new = "      try {\n        authToken = await ensureSignalAuthToken(false);\n      } catch (error) {\n        staleAfterAuthorization = !isSignalOpenScopeCurrent({\n          manualDisconnect: manualDisconnectRef.current,\n          expectedSession,\n          currentSession: sessionRef.current,\n          expectedTarget,\n          currentTarget: targetId.trim(),\n        });\n        if (staleAfterAuthorization) return;\n\n        console.debug(\"DeskLink controller authorization failed\", error);\n        clearHostWaitRefreshTimer();\n        setStatus(error instanceof Error ? error.message : \"controller authorization failed\");\n        manualDisconnectRef.current = true;\n        return;\n      }\n\n      staleAfterAuthorization = !isSignalOpenScopeCurrent({\n"
           if text.count(old) != 1:
               raise SystemExit(f'expected one stale-auth guard anchor, got {text.count(old)}')
           path.write_text(text.replace(old, new, 1), encoding='utf-8')
