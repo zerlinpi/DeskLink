@@ -48,6 +48,7 @@ class DesktopCapture {
 
  private:
   bool RecreateDuplication();
+  bool TryRecreateDuplication();
   void ReleaseAcquiredFrame();
 
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
@@ -60,6 +61,8 @@ class DesktopCapture {
   LONG left_{0};
   LONG top_{0};
   bool frame_acquired_{false};
+  uint64_t next_recreate_attempt_ms_{0};
+  uint32_t recreate_failures_{0};
 };
 
 }  // namespace desklink
