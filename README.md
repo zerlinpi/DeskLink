@@ -45,7 +45,7 @@ DeskLink 的目标是实现接近向日葵远程控制与网易 UU 远程一类�
 
 ### 实时远程画面
 
-- Windows DXGI Desktop Duplication 屏幕采集。
+- Windows DXGI Desktop Duplication 屏幕采集；锁屏/用户切换/桌面模式变化导致 `DXGI_ERROR_ACCESS_LOST` 后会节流重试重建，回到正常桌面后无需手动重启 Agent。
 - D3D11 Video Processor GPU 缩放以及 BGRA → NV12 转换。
 - Media Foundation 硬件 H.264 低延迟编码。
 - 关闭 B 帧、短 GOP、CBR 等低延迟编码策略。
@@ -58,7 +58,7 @@ DeskLink 的目标是实现接近向日葵远程控制与网易 UU 远程一类�
 ### 弱网与低延迟
 
 - 基于遥测的动态码率调整。
-- FPS 档位动态降级与恢复。
+- FPS 档位动态降级与恢复，目标范围 15–144 FPS，高刷阶梯为 144 → 120 → 90 → 60 → 45 → 30 → 24 → 15；硬件编码器不接受高刷初始化时自动尝试较低兼容档位。
 - 分辨率档位动态降级与恢复。
 - 网络路径变化后进行信令重连和 WebRTC ICE Restart。
 - 控制端实时显示：
@@ -77,7 +77,7 @@ DeskLink 的目标是实现接近向日葵远程控制与网易 UU 远程一类�
 
 - 鼠标和键盘 Win32 输入注入。
 - 指针移动与可靠控制消息拆分为独立 DataChannel。
-- 断线、窗口失焦及 Service 停止时自动释放卡住的按键和鼠标按钮。
+- 断线、PeerConnection 失败、输入 DataChannel 关闭、窗口失焦及 Service 停止时自动释放卡住的按键和鼠标按钮；释放失败的状态保留并可在后续 cleanup 重试。
 - 多显示器枚举与会话内切换。
 - 支持负坐标的 Windows 虚拟桌面坐标映射。
 - 浏览器 letterbox 场景下的正确鼠标坐标映射。
@@ -117,7 +117,7 @@ Windows 默认传输目录：
 ### 无人值守与安全
 
 - `desklink-service.exe` 作为 LocalSystem Windows Service。
-- Service 在活动登录会话中启动并维护 Agent。
+- Service 在活动交互会话中启动并维护 Agent：可用时优先 Console，否则支持选择真实 `WTSActive` RDP 会话。
 - 会话切换和崩溃后自动恢复，并带指数退避防止 crash loop。
 - 设备长期凭证和无人值守访问码使用机器范围 DPAPI 存储。
 - `%ProgramData%\DeskLink` 的敏感文件限制为 SYSTEM / Administrators 访问。
@@ -184,8 +184,10 @@ cmake --build build/windows-agent --config Release --parallel
 生成：
 
 ```text
+DeskLink.exe
 desklink-agent.exe
 desklink-service.exe
+desklink-media-probe.exe
 ```
 
 开发模式示例：
@@ -202,7 +204,7 @@ $env:DESKLINK_TURN_PASSWORD = "CHANGE_ME_NOW"
 .\build\windows-agent\Release\desklink-agent.exe
 ```
 
-性能参数：
+性能参数（`DESKLINK_FPS` 支持 15–144；60 为兼容默认值，高刷应结合显示器、GPU、网络与浏览器能力使用）：
 
 ```powershell
 $env:DESKLINK_FPS = "60"
@@ -266,11 +268,11 @@ VITE_TURN_RUNTIME_REQUIRED=1
 
 ## Release 与下载
 
-正式版本通过 GitHub Releases 发布。v1.0.0 包含：
+正式版本通过 GitHub Releases 发布。每个版本通常包含：
 
-- `desklink-windows-v1.0.0-x64.zip`：Windows Agent、Service、安装/卸载脚本。
-- `desklink-web-v1.0.0.tar.gz`：浏览器控制端发布包。
-- `desklink-signal-v1.0.0-linux-amd64`：Linux amd64 信令服务。
+- `desklink-windows-v<version>-x64.zip`：`DeskLink.exe`、Windows Agent/Service、媒体探针与安装/卸载脚本。
+- `desklink-web-v<version>.tar.gz`：浏览器控制端发布包。
+- `desklink-signal-v<version>-linux-amd64`：Linux amd64 信令服务。
 - `SHA256SUMS.txt`：发布资产 SHA-256 校验值。
 
 发布工作流会在构建前运行 Go 测试、Web 构建和 Windows native smoke tests，并验证 Windows 发布二进制的可移植依赖。
@@ -285,10 +287,10 @@ VITE_TURN_RUNTIME_REQUIRED=1
 docker pull ghcr.io/zerlinpi/desklink-signal:latest
 ```
 
-版本发布后也可使用版本标签，例如：
+版本发布后也可使用对应版本标签，例如：
 
 ```bash
-docker pull ghcr.io/zerlinpi/desklink-signal:1.0.0
+docker pull ghcr.io/zerlinpi/desklink-signal:1.0.4
 ```
 
 GitHub Actions 会负责构建并发布镜像，因此仓库首页的 **Packages** 区域会显示 DeskLink 的容器包。
