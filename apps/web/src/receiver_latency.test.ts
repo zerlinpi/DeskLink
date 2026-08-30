@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   INITIAL_VIDEO_JITTER_BUFFER_TARGET_MS,
+  JITTER_BUFFER_RECOVERY_STEP_MS,
+  JITTER_BUFFER_TARGET_DEADBAND_MS,
   MAX_VIDEO_JITTER_BUFFER_TARGET_MS,
   MIN_VIDEO_JITTER_BUFFER_TARGET_MS,
+  nextJitterBufferTargetMs,
   trySetJitterBufferTarget,
   videoJitterBufferTargetMs,
 } from "./receiver_latency";
@@ -29,10 +32,27 @@ describe("video jitter buffer policy", () => {
     expect(videoJitterBufferTargetMs(Number.POSITIVE_INFINITY, -10)).toBeGreaterThanOrEqual(MIN_VIDEO_JITTER_BUFFER_TARGET_MS);
   });
 
-  it("feature-detects receiver support and bounds assignments", () => {
+  it("raises buffering immediately but lowers it gradually", () => {
+    expect(nextJitterBufferTargetMs(30, 80)).toBe(80);
+    expect(nextJitterBufferTargetMs(100, 20)).toBe(100 - JITTER_BUFFER_RECOVERY_STEP_MS);
+    expect(nextJitterBufferTargetMs(40, 20)).toBe(20);
+  });
+
+  it("uses a small deadband to avoid one-second target churn", () => {
+    expect(nextJitterBufferTargetMs(40, 40 + JITTER_BUFFER_TARGET_DEADBAND_MS)).toBe(40);
+    expect(nextJitterBufferTargetMs(40, 40 - JITTER_BUFFER_TARGET_DEADBAND_MS)).toBe(40);
+    expect(nextJitterBufferTargetMs(null, 27)).toBe(27);
+    expect(nextJitterBufferTargetMs(Number.NaN, 27)).toBe(27);
+  });
+
+  it("feature-detects receiver support, bounds assignments, and applies recovery hysteresis", () => {
     const supported = { jitterBufferTarget: null as number | null };
     expect(trySetJitterBufferTarget(supported, 1)).toBe(true);
     expect(supported.jitterBufferTarget).toBe(MIN_VIDEO_JITTER_BUFFER_TARGET_MS);
+
+    supported.jitterBufferTarget = 100;
+    expect(trySetJitterBufferTarget(supported, 20)).toBe(true);
+    expect(supported.jitterBufferTarget).toBe(100 - JITTER_BUFFER_RECOVERY_STEP_MS);
 
     expect(trySetJitterBufferTarget({}, 30)).toBe(false);
 
