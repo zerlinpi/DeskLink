@@ -1,0 +1,61 @@
+name: One-shot H264 encoder activation fallback integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-h264-activation-fallback.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply H264 encoder activation fallback
+        run: |
+          python tools/ci/integrate-h264-activation-fallback.py
+          git diff --check
+
+      - name: Validate source invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file="apps/windows-agent/src/h264_encoder.cpp"
+          grep -q 'TryActivateHardwareEncoderCandidates' "$source_file"
+          grep -q 'capture-adapter.*candidate activation failed' "$source_file" || grep -q 'capture-adapter' "$source_file"
+          grep -q 'global.*candidate activation failed' "$source_file" || grep -q 'global' "$source_file"
+          grep -q 'no usable hardware H264 Media Foundation encoder found' "$source_file"
+          if grep -q 'activation.Attach(activations\[0\])' "$source_file"; then
+            echo "legacy first-candidate-only activation path is still present" >&2
+            exit 1
+          fi
+
+      - name: Ensure main has not advanced
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          remote="$(git rev-parse origin/main)"
+          test "$remote" = "$GITHUB_SHA" || {
+            echo "main advanced while integration was running; refusing stale write" >&2
+            exit 1
+          }
+
+      - name: Commit activation fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm tools/ci/integrate-h264-activation-fallback.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/windows-agent/src/h264_encoder.cpp tools/ci/integrate-h264-activation-fallback.py
+          git diff --cached --check
+          git commit -m "fix(windows): fallback across H264 encoder activation candidates"
+          git push origin HEAD:main
