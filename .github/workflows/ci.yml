@@ -222,7 +222,8 @@ jobs:
           $binaries = @(
             "build/windows-agent/Release/DeskLink.exe",
             "build/windows-agent/Release/desklink-agent.exe",
-            "build/windows-agent/Release/desklink-service.exe"
+            "build/windows-agent/Release/desklink-service.exe",
+            "build/windows-agent/Release/desklink-media-probe.exe"
           )
           foreach ($binary in $binaries) {
             if (-not (Test-Path $binary)) { throw "missing artifact binary: $binary" }
@@ -277,3 +278,4 @@ jobs:
             build/windows-agent/Release/DeskLink.exe
             build/windows-agent/Release/desklink-agent.exe
             build/windows-agent/Release/desklink-service.exe
+            build/windows-agent/Release/desklink-media-probe.exe
