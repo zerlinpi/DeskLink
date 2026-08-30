@@ -473,6 +473,7 @@ void WebRtcSession::Stop() {
   {
     std::scoped_lock lock(mutex_);
     control_.reset();
+    input_channel_authority_.InvalidateAll();
     file_transfer_receiver_.reset();
     video_track_.reset();
     video_timestamp_base100ns_ = 0;
@@ -590,6 +591,7 @@ void WebRtcSession::HandleSignal(const std::string& text) {
     {
       std::scoped_lock lock(mutex_);
       control_.reset();
+      input_channel_authority_.InvalidateAll();
       file_transfer_receiver_.reset();
       video_track_.reset();
       video_timestamp_base100ns_ = 0;
@@ -1016,6 +1018,7 @@ void WebRtcSession::CreatePeer(
     previous = std::move(peer_);
     peer_ = peer;
     control_.reset();
+    input_channel_authority_.InvalidateAll();
     file_transfer_receiver_.reset();
     video_track_ = video_track;
     video_timestamp_base100ns_ = 0;
@@ -1084,34 +1087,70 @@ void WebRtcSession::CreatePeer(
 }
 
 void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>& channel) {
-  if (channel->label() == "control") {
-    std::scoped_lock lock(mutex_);
-    control_ = channel;
-  }
+  if (!channel) return;
 
   const std::string label = channel->label();
-  std::weak_ptr<rtc::DataChannel> weak_channel = channel;
-  channel->onOpen([this, label]() {
+  InputChannelKind kind;
+  if (label == "control") {
+    kind = InputChannelKind::Control;
+  } else if (label == "pointer") {
+    kind = InputChannelKind::Pointer;
+  } else {
+    return;
+  }
+
+  InputChannelGeneration generation = 0;
+  {
+    std::scoped_lock lock(mutex_);
+    generation = input_channel_authority_.Activate(kind);
+    if (kind == InputChannelKind::Control) control_ = channel;
+  }
+
+  const std::weak_ptr<rtc::DataChannel> weak_channel = channel;
+  channel->onOpen([this, label, kind, generation, weak_channel]() {
+    auto opened = weak_channel.lock();
+    if (!opened) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (!input_channel_authority_.IsCurrent(kind, generation)) return;
+      if (kind == InputChannelKind::Control && control_ != opened) return;
+    }
+
     std::cout << label << " DataChannel open\n";
-    if (label == "control" && config_.on_monitor_state_requested) {
+    if (kind == InputChannelKind::Control && config_.on_monitor_state_requested) {
       config_.on_monitor_state_requested();
     }
   });
-  channel->onClosed([this, label, weak_channel]() {
-    if (label == "control" || label == "pointer") {
-      // Closing either input channel is a loss-of-authority boundary.
-      // Release injected state immediately rather than risking a stuck key/button.
-      input_.ReleaseAll();
-    }
-    if (label == "control") {
-      auto closed = weak_channel.lock();
+
+  channel->onClosed([this, label, kind, generation, weak_channel]() {
+    auto closed = weak_channel.lock();
+    bool was_current = false;
+    {
       std::scoped_lock lock(mutex_);
-      if (!closed || control_ == closed) control_.reset();
+      was_current = input_channel_authority_.RevokeIfCurrent(kind, generation);
+      if (!was_current) return;
+      if (kind == InputChannelKind::Control && (!closed || control_ == closed)) {
+        control_.reset();
+      }
     }
+
+    // Only the currently authoritative input channel is an authority-loss
+    // boundary. A predecessor that closes after its replacement is active must
+    // not release keys/buttons belonging to the replacement.
+    input_.ReleaseAll();
     std::cout << label << " DataChannel closed\n";
   });
-  channel->onMessage([this, label](rtc::message_variant data) {
-    if (label == "pointer") {
+
+  channel->onMessage([this, kind, generation, weak_channel](rtc::message_variant data) {
+    auto source = weak_channel.lock();
+    if (!source) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (!input_channel_authority_.IsCurrent(kind, generation)) return;
+      if (kind == InputChannelKind::Control && control_ != source) return;
+    }
+
+    if (kind == InputChannelKind::Pointer) {
       PointerWireEvent event;
       bool parsed = false;
       if (const auto* binary = std::get_if<rtc::binary>(&data)) {
@@ -1123,6 +1162,12 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
       }
       if (!parsed) return;
 
+      // Parsing can be non-trivial. Recheck immediately before injection so a
+      // concurrent replacement cannot keep a stale pointer callback authorized.
+      {
+        std::scoped_lock lock(mutex_);
+        if (!input_channel_authority_.IsCurrent(kind, generation)) return;
+      }
       if (event.kind == PointerWireKind::Move) {
         input_.PointerMove(event.x, event.y);
       } else if (event.kind == PointerWireKind::Wheel) {
@@ -1132,6 +1177,10 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
     }
 
     if (const auto* text = std::get_if<std::string>(&data)) {
+      {
+        std::scoped_lock lock(mutex_);
+        if (!input_channel_authority_.IsCurrent(kind, generation) || control_ != source) return;
+      }
       HandleControl(*text);
     }
   });
