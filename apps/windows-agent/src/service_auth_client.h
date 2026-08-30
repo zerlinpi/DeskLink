@@ -13,10 +13,26 @@ bool ServiceSignalTokenBrokerConfigured();
 bool ServiceAccessCodeBrokerConfigured();
 bool ServiceSecureAttentionBrokerConfigured();
 
+struct ServiceSecureAttentionStatus {
+  bool broker_configured{false};
+  bool api_available{false};
+  bool policy_allows_services{false};
+  bool available{false};
+  std::string policy{"unknown"};
+};
+
+// Queries the LocalSystem broker without changing Windows policy or sending SAS.
+bool FetchServiceSecureAttentionStatus(
+    ServiceSecureAttentionStatus* status,
+    std::string* error);
+
 // Requests Windows Ctrl+Alt+Del/SAS through the LocalSystem Service. The Service
 // validates the exact Agent PID/SID before temporarily impersonating that pipe
-// client and calling the supported Windows SendSAS API.
-bool RequestServiceSecureAttentionSequence(std::string* error);
+// client and calling the supported Windows SendSAS API. error_code receives a
+// stable protocol-safe reason such as policy-not-allowed or rate-limited.
+bool RequestServiceSecureAttentionSequence(
+    std::string* error,
+    std::string* error_code = nullptr);
 
 // Requests a fresh short-lived signal token from the LocalSystem DeskLink Service.
 // The long-lived device credential never enters this client path.
