@@ -8,6 +8,21 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def replace_in_section(
+    text: str,
+    start_anchor: str,
+    end_anchor: str,
+    old: str,
+    new: str,
+    label: str,
+) -> str:
+    start = text.index(start_anchor)
+    end = text.index(end_anchor, start)
+    section = text[start:end]
+    section = replace_once(section, old, new, label)
+    return text[:start] + section + text[end:]
+
+
 cmake_path = Path("apps/windows-agent/CMakeLists.txt")
 cmake = cmake_path.read_text(encoding="utf-8")
 cmake = replace_once(
@@ -58,9 +73,22 @@ session_reset_with_authority = (
     "    file_transfer_receiver_.reset();\n"
     "    video_track_.reset();\n"
 )
-if cpp.count(session_reset) != 2:
-    raise SystemExit(f"session reset anchor count={cpp.count(session_reset)}")
-cpp = cpp.replace(session_reset, session_reset_with_authority, 2)
+cpp = replace_in_section(
+    cpp,
+    "void WebRtcSession::Stop()",
+    "bool WebRtcSession::connected() const",
+    session_reset,
+    session_reset_with_authority,
+    "Stop authority invalidation",
+)
+cpp = replace_in_section(
+    cpp,
+    '  if (type == "device-revoked") {',
+    '  const std::string from = message.value("from", "");',
+    session_reset,
+    session_reset_with_authority,
+    "device-revoked authority invalidation",
+)
 
 cpp = replace_once(
     cpp,
