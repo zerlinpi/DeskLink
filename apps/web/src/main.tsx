@@ -16,6 +16,7 @@ import {
   signalReconnectDelayMs,
 } from "./session_recovery";
 import { shouldAcceptSignalMessage } from "./signal_scope";
+import { isActiveSessionResource } from "./session_resource_scope";
 import "./styles.css";
 
 type SignalMessage = {
@@ -574,11 +575,13 @@ function App() {
     pcRef.current = pc;
 
     pc.ontrack = (event) => {
+      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
       if (!videoRef.current) return;
       videoRef.current.srcObject = event.streams[0] ?? new MediaStream([event.track]);
       void videoRef.current.play().catch(() => undefined);
     };
     pc.onicecandidate = (event) => {
+      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
       if (!event.candidate) return;
       const candidate = event.candidate.toJSON();
       if (offerSentRef.current) {
@@ -588,6 +591,7 @@ function App() {
       }
     };
     pc.onconnectionstatechange = () => {
+      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;
       const state = pc.connectionState;
       if (state === "connected") {
         clearIceRestartTimer();
@@ -617,12 +621,18 @@ function App() {
     const control = pc.createDataChannel("control", { ordered: true });
     controlRef.current = control;
     control.onopen = () => {
+      if (!isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
+        return;
+      }
       setStatus(wsRef.current?.readyState === WebSocket.OPEN
         ? "control ready"
         : "control ready · signaling reconnecting");
       startTelemetry(pc);
     };
-    control.onclose = stopTelemetry;
+    control.onclose = () => {
+      if (controlRef.current === control) stopTelemetry();
+    };
 
     const pointer = pc.createDataChannel("pointer", {
       ordered: false,
