@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#080b12" />
+    <!-- Blocking by design: deployment endpoints must exist before Vite moves/evaluates module scripts. -->
+    <script src="./desklink-config.js"></script>
     <link rel="stylesheet" href="/src/workbench_extras.css" />
     <link rel="stylesheet" href="/src/home_ui.css" />
     <link rel="stylesheet" href="/src/connection_help.css" />
@@ -11,8 +13,6 @@
   </head>
   <body>
     <div id="root"></div>
-    <!-- Blocking by design: deployment endpoints must exist before Vite modules evaluate. -->
-    <script src="./desklink-config.js"></script>
     <script type="module" src="/src/low_latency_tuning.ts"></script>
     <script type="module" src="/src/control_channel_bus.ts"></script>
     <script type="module" src="/src/quality_profiles.ts"></script>
