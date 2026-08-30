@@ -8,6 +8,16 @@ export type IceRestartGate = {
   connectionState: PeerConnectionState;
 };
 
+export type SignalOpenGate = {
+  manualDisconnect: boolean;
+  openInFlight: boolean;
+  socketActive: boolean;
+};
+
+export type SignalReconnectGate = SignalOpenGate & {
+  timerScheduled: boolean;
+};
+
 const SIGNAL_RECONNECT_BASE_MS = 500;
 const SIGNAL_RECONNECT_MAX_MS = 10_000;
 const SIGNAL_RECONNECT_EXPONENT_CAP = 5;
@@ -21,6 +31,14 @@ export function signalReconnectDelayMs(attempt: number): number {
     SIGNAL_RECONNECT_MAX_MS,
     SIGNAL_RECONNECT_BASE_MS * (2 ** Math.min(normalizedAttempt, SIGNAL_RECONNECT_EXPONENT_CAP)),
   );
+}
+
+export function shouldBeginSignalOpen(gate: SignalOpenGate): boolean {
+  return !gate.manualDisconnect && !gate.openInFlight && !gate.socketActive;
+}
+
+export function shouldScheduleSignalReconnect(gate: SignalReconnectGate): boolean {
+  return shouldBeginSignalOpen(gate) && !gate.timerScheduled;
 }
 
 export function hostWaitRefreshDelayMs(expiresInMs: unknown): number | null {
