@@ -4,6 +4,8 @@ import { accessProofAlgorithm, createAccessProof } from "./access_proof";
 import { AsyncAttemptCoordinator } from "./async_attempt";
 import { resolveControllerSessionUrl } from "./controller_session";
 import { createControllerSessionTokenRequest } from "./controller_token_request";
+import { decodeControlChannelText } from "./control_channel_message";
+import type { HostCapabilitiesV1 } from "./host_capabilities";
 import { ControllerTokenCoordinator } from "./controller_token_coordinator";
 import {
   hostWaitRefreshDelayMs,
@@ -174,6 +176,7 @@ function App() {
   const [accessCode, setAccessCode] = useState("");
   const [status, setStatus] = useState("idle");
   const [networkView, setNetworkView] = useState<NetworkView>(EMPTY_NETWORK_VIEW);
+  const [hostCapabilities, setHostCapabilities] = useState<HostCapabilitiesV1 | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -607,6 +610,7 @@ function App() {
     negotiationPendingRef.current = false;
     pendingLocalIceRef.current = [];
     pendingRemoteIceRef.current = [];
+    setHostCapabilities(null);
 
     const pc = new RTCPeerConnection({
       iceServers,
@@ -671,8 +675,25 @@ function App() {
         : "control ready · signaling reconnecting");
       startTelemetry(pc);
     };
+    control.onmessage = (event) => {
+      if (!isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) ||
+          typeof event.data !== "string") {
+        return;
+      }
+
+      const decoded = decodeControlChannelText(event.data);
+      if (decoded.kind === "host-capabilities") {
+        setHostCapabilities(decoded.capabilities);
+      } else if (decoded.kind === "invalid" && event.data.includes('"t":"host-capabilities"')) {
+        console.debug("DeskLink rejected malformed host capabilities");
+      }
+    };
     control.onclose = () => {
-      if (controlRef.current === control) stopTelemetry();
+      if (controlRef.current === control) {
+        stopTelemetry();
+        setHostCapabilities(null);
+      }
     };
 
     const pointer = pc.createDataChannel("pointer", {
@@ -1063,6 +1084,7 @@ function App() {
     if (videoRef.current) videoRef.current.srcObject = null;
     sessionRef.current = crypto.randomUUID();
     setNetworkView(EMPTY_NETWORK_VIEW);
+    setHostCapabilities(null);
     clearRuntimeControllerSession();
     setStatus(nextStatus);
   };
@@ -1188,6 +1210,9 @@ function App() {
             <span>Jitter {networkView.jitterMs == null ? "-" : `${networkView.jitterMs.toFixed(1)} ms`}</span>
             <span>Decode {networkView.decodeFps.toFixed(0)} fps</span>
             <span>Avail {bitrateMbps} Mbps</span>
+            <span>{hostCapabilities
+              ? `Host ${hostCapabilities.maximumFps > 0 ? `${hostCapabilities.maximumFps} fps` : "caps ready"}`
+              : "Host caps pending"}</span>
           </div>
         )}
 
