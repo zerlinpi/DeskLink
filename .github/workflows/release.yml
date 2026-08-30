@@ -64,19 +64,31 @@ jobs:
           npm run build
           popd
 
-          stage="release/web-package"
-          mkdir -p "$stage/app/src"
-          cp apps/web/index.html "$stage/app/"
-          cp apps/web/package.json "$stage/app/"
-          cp apps/web/package-lock.json "$stage/app/"
-          cp apps/web/tsconfig.json "$stage/app/"
-          cp apps/web/vite.config.ts "$stage/app/"
-          cp apps/web/.env.restrictive.example "$stage/app/"
-          cp -R apps/web/src/. "$stage/app/src/"
-          cp packaging/web/README.txt "$stage/README.txt"
-          tar -czf "release/desklink-web-v${{ steps.version.outputs.version }}.tar.gz" \
-            -C "$stage" .
-          rm -rf "$stage"
+          version="${{ steps.version.outputs.version }}"
+
+          dist_stage="release/web-dist"
+          mkdir -p "$dist_stage"
+          cp -R apps/web/dist/. "$dist_stage/"
+          cp packaging/web/README.txt "$dist_stage/README.txt"
+          tar -czf "release/desklink-web-v${version}-dist.tar.gz" -C "$dist_stage" .
+
+          source_stage="release/web-source"
+          mkdir -p "$source_stage/app/src" "$source_stage/app/public" "$source_stage/app/scripts"
+          cp apps/web/index.html "$source_stage/app/"
+          cp apps/web/package.json "$source_stage/app/"
+          cp apps/web/package-lock.json "$source_stage/app/"
+          cp apps/web/tsconfig.json "$source_stage/app/"
+          cp apps/web/vite.config.ts "$source_stage/app/"
+          cp apps/web/.env.restrictive.example "$source_stage/app/"
+          cp apps/web/Dockerfile "$source_stage/app/"
+          cp apps/web/nginx.conf "$source_stage/app/"
+          cp -R apps/web/src/. "$source_stage/app/src/"
+          cp -R apps/web/public/. "$source_stage/app/public/"
+          cp -R apps/web/scripts/. "$source_stage/app/scripts/"
+          cp packaging/web/README.txt "$source_stage/README.txt"
+          tar -czf "release/desklink-web-v${version}-source.tar.gz" -C "$source_stage" .
+
+          rm -rf "$dist_stage" "$source_stage"
 
       - name: Create server/web checksums
         shell: bash
@@ -85,7 +97,8 @@ jobs:
           cd release
           sha256sum \
             "desklink-signal-v${{ steps.version.outputs.version }}-linux-amd64" \
-            "desklink-web-v${{ steps.version.outputs.version }}.tar.gz" \
+            "desklink-web-v${{ steps.version.outputs.version }}-dist.tar.gz" \
+            "desklink-web-v${{ steps.version.outputs.version }}-source.tar.gz" \
             > SHA256SUMS.server-web.txt
 
       - uses: actions/upload-artifact@v4
@@ -95,7 +108,8 @@ jobs:
           retention-days: 7
           path: |
             release/desklink-signal-v${{ steps.version.outputs.version }}-linux-amd64
-            release/desklink-web-v${{ steps.version.outputs.version }}.tar.gz
+            release/desklink-web-v${{ steps.version.outputs.version }}-dist.tar.gz
+            release/desklink-web-v${{ steps.version.outputs.version }}-source.tar.gz
             release/SHA256SUMS.server-web.txt
 
   windows:
