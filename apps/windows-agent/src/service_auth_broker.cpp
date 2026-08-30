@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <sddl.h>
 
+#include <chrono>
 #include <ctime>
 #include <mutex>
 #include <string>
@@ -12,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "secure_attention.h"
 #include "signal_token_client.h"
 
 namespace desklink {
@@ -20,6 +22,7 @@ namespace {
 constexpr DWORD kPipeBufferBytes = 16 * 1024;
 constexpr DWORD kMaxRequestBytes = 128;
 constexpr int64_t kTokenReuseSafetySeconds = 90;
+constexpr auto kSecureAttentionCooldown = std::chrono::seconds(2);
 
 std::mutex g_broker_mutex;
 std::jthread g_broker_thread;
@@ -277,11 +280,13 @@ void BrokerLoop(
     std::string endpoint,
     std::string device_id,
     std::string device_credential,
-    std::string access_code) {
+    std::string access_code,
+    bool secure_attention_sequence_enabled) {
   LocalHandle ready_pipe(initial_pipe);
   RuntimeSignalToken cached_token;
   const bool signal_enabled = !endpoint.empty() && !device_id.empty() && !device_credential.empty();
   const bool access_code_enabled = !access_code.empty();
+  std::chrono::steady_clock::time_point last_secure_attention{};
 
   while (!stop_token.stop_requested()) {
     LocalHandle pipe;
@@ -323,6 +328,38 @@ void BrokerLoop(
             nlohmann::json{{"ok", false}, {"error", "access-code capability is not enabled"}});
       } else {
         WriteAccessCodeResponse(pipe.get(), access_code);
+      }
+      FlushFileBuffers(pipe.get());
+      DisconnectNamedPipe(pipe.get());
+      continue;
+    }
+
+    if (command == "secure-attention-sequence") {
+      if (!secure_attention_sequence_enabled) {
+        WriteJsonResponse(
+            pipe.get(),
+            nlohmann::json{{"ok", false}, {"error", "secure-attention capability is not enabled"}});
+      } else {
+        const auto now = std::chrono::steady_clock::now();
+        const bool rate_limited = last_secure_attention.time_since_epoch().count() != 0 &&
+            now - last_secure_attention < kSecureAttentionCooldown;
+        if (rate_limited) {
+          WriteJsonResponse(
+              pipe.get(),
+              nlohmann::json{{"ok", false}, {"error", "secure-attention request rate limited"}});
+        } else {
+          std::wstring sas_error;
+          if (SendSecureAttentionSequenceForPipeClient(pipe.get(), &sas_error)) {
+            last_secure_attention = now;
+            WriteJsonResponse(
+                pipe.get(),
+                nlohmann::json{{"ok", true}, {"dispatched", true}});
+          } else {
+            WriteJsonResponse(
+                pipe.get(),
+                nlohmann::json{{"ok", false}, {"error", "Windows Secure Attention request failed"}});
+          }
+        }
       }
       FlushFileBuffers(pipe.get());
       DisconnectNamedPipe(pipe.get());
@@ -389,6 +426,7 @@ bool StartServiceAuthBroker(
     const std::string& device_id,
     std::string device_credential,
     std::string access_code,
+    bool secure_attention_sequence,
     std::wstring* error) {
   const bool any_signal_field = !signal_token_endpoint.empty() ||
                                 !device_id.empty() ||
@@ -400,7 +438,7 @@ bool StartServiceAuthBroker(
   if (pipe_name.rfind(L"\\\\.\\pipe\\DeskLink.Auth.", 0) != 0 ||
       expected_client_pid == 0 ||
       (any_signal_field && !signal_enabled) ||
-      (!signal_enabled && !access_code_enabled)) {
+      (!signal_enabled && !access_code_enabled && !secure_attention_sequence)) {
     SecureWipe(&device_credential);
     SecureWipe(&access_code);
     SetError(error, L"Invalid local authentication broker configuration");
@@ -436,7 +474,8 @@ bool StartServiceAuthBroker(
         signal_token_endpoint,
         device_id,
         std::move(device_credential),
-        std::move(access_code));
+        std::move(access_code),
+        secure_attention_sequence);
   } catch (...) {
     CloseHandle(first_pipe_handle);
     SecureWipe(&device_credential);
