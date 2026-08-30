@@ -5,6 +5,8 @@ import {
   type JitterBufferIntervalMetrics,
 } from "./jitter_buffer_stats";
 
+export const MIN_VIDEO_TELEMETRY_INTERVAL_MS = 250;
+
 export type VideoTelemetryBaseline = {
   atMs: number;
   packetsReceived: number;
@@ -45,7 +47,7 @@ export function videoTelemetryInterval(
   current: VideoTelemetryBaseline,
 ): VideoTelemetryInterval | null {
   const elapsedMs = current.atMs - previous.atMs;
-  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return null;
+  if (!Number.isFinite(elapsedMs) || elapsedMs < MIN_VIDEO_TELEMETRY_INTERVAL_MS) return null;
 
   // All of these RTCInboundRtpStreamStats fields are cumulative. A decrease
   // means the receiver/track/stat object changed, so use the new sample as the
@@ -57,7 +59,7 @@ export function videoTelemetryInterval(
     return null;
   }
 
-  const elapsedSeconds = Math.max(0.25, elapsedMs / 1000);
+  const elapsedSeconds = elapsedMs / 1000;
   const receivedDelta = current.packetsReceived - previous.packetsReceived;
   const lostDelta = current.packetsLost - previous.packetsLost;
   const packetDelta = receivedDelta + lostDelta;
