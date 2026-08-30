@@ -155,7 +155,7 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests
-        run: npm test -- --passWithNoTests
+        run: npm test
       - name: Production build
         run: npm run build
 
