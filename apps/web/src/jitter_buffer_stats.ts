@@ -33,8 +33,17 @@ export function jitterBufferIntervalMetrics(
   const emitted = current.emittedCount - previous.emittedCount;
   if (!Number.isFinite(emitted) || emitted <= 0) return null;
 
+  // WebRTC cumulative stats can reset when a receiver/track is replaced. Never
+  // turn that reset into an artificial 0 ms latency sample; wait for the next
+  // monotonic interval instead.
+  if (current.delaySeconds < previous.delaySeconds ||
+      current.targetDelaySeconds < previous.targetDelaySeconds ||
+      current.minimumDelaySeconds < previous.minimumDelaySeconds) {
+    return null;
+  }
+
   const averageMs = (currentValue: number, previousValue: number) =>
-    Math.max(0, ((currentValue - previousValue) / emitted) * 1000);
+    ((currentValue - previousValue) / emitted) * 1000;
 
   return {
     actualMs: averageMs(current.delaySeconds, previous.delaySeconds),
