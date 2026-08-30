@@ -81,12 +81,15 @@ cpp = replace_in_section(
     session_reset_with_authority,
     "Stop authority invalidation",
 )
+
+device_reset = session_reset.replace("    ", "      ")
+device_reset_with_authority = session_reset_with_authority.replace("    ", "      ")
 cpp = replace_in_section(
     cpp,
     '  if (type == "device-revoked") {',
     '  const std::string from = message.value("from", "");',
-    session_reset,
-    session_reset_with_authority,
+    device_reset,
+    device_reset_with_authority,
     "device-revoked authority invalidation",
 )
 
