@@ -1,5 +1,16 @@
 type ViewMode = "fit" | "fill" | "actual";
 
+type HostCapabilities = {
+  version: number;
+  secureAttentionAvailable: boolean;
+  secureAttentionReason: string;
+  secureAttentionPolicy: string;
+  clipboardAvailable: boolean;
+  fileTransferAvailable: boolean;
+  audioAvailable: boolean;
+  protectedDesktopAvailable: boolean;
+};
+
 const VIEW_LABELS: Record<ViewMode, string> = {
   fit: "适应",
   fill: "铺满",
@@ -13,6 +24,8 @@ const STATUS_SELECTOR = ".status";
 const CONNECT_BUTTON_SELECTOR = ".connect-card button";
 const VIDEO_SELECTOR = ".stage video";
 const NETWORK_SELECTOR = ".network-hud";
+const SAS_OPERATION = "secure-attention-sequence";
+const SAS_TIMEOUT_MS = 6000;
 
 let viewMode: ViewMode = "fit";
 let networkExpanded = false;
@@ -23,8 +36,14 @@ let stageResizeObserver: ResizeObserver | null = null;
 let fullscreenButton: HTMLButtonElement | null = null;
 let displayButton: HTMLButtonElement | null = null;
 let networkButton: HTMLButtonElement | null = null;
+let secureAttentionButton: HTMLButtonElement | null = null;
 let statusText: HTMLSpanElement | null = null;
 let toolbar: HTMLDivElement | null = null;
+let controlChannel: RTCDataChannel | null = null;
+let hostCapabilities: HostCapabilities | null = null;
+let secureAttentionRequestId = "";
+let secureAttentionTimer: number | null = null;
+let secureAttentionResetTimer: number | null = null;
 
 function query<T extends Element>(selector: string): T | null {
   return document.querySelector<T>(selector);
@@ -75,6 +94,157 @@ function compactNetworkLabel() {
 
 function setText(element: HTMLElement | null, value: string) {
   if (element && element.textContent !== value) element.textContent = value;
+}
+
+function readBoolean(message: Record<string, unknown>, key: string) {
+  return message[key] === true;
+}
+
+function parseHostCapabilities(message: Record<string, unknown>): HostCapabilities | null {
+  if (message.t !== "host-capabilities") return null;
+  const version = typeof message.version === "number" ? message.version : 0;
+  if (version < 1) return null;
+  return {
+    version,
+    secureAttentionAvailable: readBoolean(message, "secureAttentionAvailable"),
+    secureAttentionReason: typeof message.secureAttentionReason === "string" ? message.secureAttentionReason : "",
+    secureAttentionPolicy: typeof message.secureAttentionPolicy === "string" ? message.secureAttentionPolicy : "unknown",
+    clipboardAvailable: readBoolean(message, "clipboardAvailable"),
+    fileTransferAvailable: readBoolean(message, "fileTransferAvailable"),
+    audioAvailable: readBoolean(message, "audioAvailable"),
+    protectedDesktopAvailable: readBoolean(message, "protectedDesktopAvailable"),
+  };
+}
+
+function secureAttentionUnavailableLabel() {
+  const reason = hostCapabilities?.secureAttentionReason || "";
+  if (reason === "service-broker-unavailable") return "Service 不支持";
+  if (reason === "policy-not-allowed") return "策略未允许";
+  if (reason === "api-unavailable") return "系统不支持";
+  if (reason === "policy-read-error") return "策略不可读";
+  return "Ctrl+Alt+Del";
+}
+
+function secureAttentionUnavailableTitle() {
+  if (!hostCapabilities) return "等待远端上报系统操作能力";
+  switch (hostCapabilities.secureAttentionReason) {
+    case "service-broker-unavailable":
+      return "被控端 Service 未启用 Secure Attention Broker";
+    case "policy-not-allowed":
+      return `Windows 本地策略未允许 Services 发送软件安全注意序列（${hostCapabilities.secureAttentionPolicy}）`;
+    case "api-unavailable":
+      return "被控端 Windows Secure Attention Sequence API 不可用";
+    case "policy-read-error":
+      return "被控端无法读取 SoftwareSASGeneration 策略，已安全禁用该操作";
+    default:
+      return "被控端未提供 Ctrl+Alt+Del 能力";
+  }
+}
+
+function refreshSecureAttentionButton() {
+  if (!secureAttentionButton) return;
+  const available = hostCapabilities?.secureAttentionAvailable === true;
+  const channelReady = controlChannel?.readyState === "open";
+  secureAttentionButton.disabled = !sessionActive() || !channelReady || !available || Boolean(secureAttentionRequestId);
+  if (!secureAttentionRequestId) {
+    setText(secureAttentionButton, available ? "Ctrl+Alt+Del" : secureAttentionUnavailableLabel());
+  }
+  secureAttentionButton.title = available
+    ? "向被控端 Windows Service 请求安全注意序列 Ctrl+Alt+Del"
+    : secureAttentionUnavailableTitle();
+}
+
+function resetSecureAttentionLabel(delayMs = 0) {
+  if (secureAttentionResetTimer !== null) window.clearTimeout(secureAttentionResetTimer);
+  secureAttentionResetTimer = null;
+  const reset = () => {
+    secureAttentionResetTimer = null;
+    refreshSecureAttentionButton();
+  };
+  if (delayMs > 0) {
+    secureAttentionResetTimer = window.setTimeout(reset, delayMs);
+  } else {
+    reset();
+  }
+}
+
+function finishSecureAttention(label: string) {
+  secureAttentionRequestId = "";
+  if (secureAttentionTimer !== null) window.clearTimeout(secureAttentionTimer);
+  secureAttentionTimer = null;
+  setText(secureAttentionButton, label);
+  if (secureAttentionButton) secureAttentionButton.disabled = true;
+  resetSecureAttentionLabel(2200);
+}
+
+function clearSecureAttentionState(clearCapability = false) {
+  secureAttentionRequestId = "";
+  if (secureAttentionTimer !== null) window.clearTimeout(secureAttentionTimer);
+  if (secureAttentionResetTimer !== null) window.clearTimeout(secureAttentionResetTimer);
+  secureAttentionTimer = null;
+  secureAttentionResetTimer = null;
+  if (clearCapability) hostCapabilities = null;
+  refreshSecureAttentionButton();
+}
+
+function requestSecureAttention() {
+  if (!sessionActive() ||
+      controlChannel?.readyState !== "open" ||
+      hostCapabilities?.secureAttentionAvailable !== true ||
+      secureAttentionRequestId) {
+    return;
+  }
+
+  if (secureAttentionResetTimer !== null) window.clearTimeout(secureAttentionResetTimer);
+  secureAttentionResetTimer = null;
+  const requestId = `sas-${crypto.randomUUID()}`;
+  secureAttentionRequestId = requestId;
+  setText(secureAttentionButton, "请求中…");
+  refreshSecureAttentionButton();
+
+  try {
+    controlChannel.send(JSON.stringify({
+      t: "system-operation",
+      operation: SAS_OPERATION,
+      requestId,
+    }));
+  } catch (error) {
+    console.debug("DeskLink Secure Attention request failed", error);
+    finishSecureAttention("发送失败");
+    return;
+  }
+
+  secureAttentionTimer = window.setTimeout(() => {
+    if (secureAttentionRequestId === requestId) finishSecureAttention("请求超时");
+  }, SAS_TIMEOUT_MS);
+}
+
+function handleSystemOperationResult(message: Record<string, unknown>) {
+  if (message.t !== "system-operation-result" ||
+      message.operation !== SAS_OPERATION ||
+      message.requestId !== secureAttentionRequestId) {
+    return;
+  }
+
+  if (message.ok === true) {
+    finishSecureAttention("已发送");
+    return;
+  }
+
+  const errorCode = typeof message.errorCode === "string" ? message.errorCode : "";
+  const errorText = typeof message.error === "string" ? message.error.toLowerCase() : "";
+  if (errorCode === "service-broker-unavailable" || errorText.includes("broker is not enabled")) {
+    finishSecureAttention("Service 不支持");
+  } else if (errorCode === "policy-not-allowed" || errorText.includes("policy does not allow services")) {
+    finishSecureAttention("策略未允许");
+  } else if (errorCode === "api-unavailable" || errorText.includes("api is unavailable")) {
+    finishSecureAttention("系统不支持");
+  } else if (errorCode === "rate-limited" || errorText.includes("rate limited")) {
+    finishSecureAttention("操作过快");
+  } else {
+    console.debug("DeskLink Secure Attention unavailable", message.error ?? "unknown error");
+    finishSecureAttention("当前不可用");
+  }
 }
 
 function makeButton(label: string, className = "workbench-button") {
@@ -176,7 +346,9 @@ function createWorkbench(stage: HTMLElement) {
     statusText = existing.querySelector<HTMLSpanElement>(".workbench-status");
     displayButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='display']");
     networkButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='network']");
+    secureAttentionButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='secure-attention']");
     fullscreenButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='fullscreen']");
+    refreshSecureAttentionButton();
     return existing;
   }
 
@@ -218,6 +390,15 @@ function createWorkbench(stage: HTMLElement) {
     revealToolbar();
   });
 
+  secureAttentionButton = makeButton("Ctrl+Alt+Del");
+  secureAttentionButton.dataset.workbenchAction = "secure-attention";
+  secureAttentionButton.setAttribute("aria-label", "向远程 Windows 请求 Ctrl+Alt+Del");
+  secureAttentionButton.addEventListener("click", () => {
+    requestSecureAttention();
+    revealToolbar();
+  });
+  refreshSecureAttentionButton();
+
   fullscreenButton = makeButton("全屏");
   fullscreenButton.dataset.workbenchAction = "fullscreen";
   fullscreenButton.addEventListener("click", async () => {
@@ -242,7 +423,7 @@ function createWorkbench(stage: HTMLElement) {
 
   const actions = document.createElement("div");
   actions.className = "workbench-actions";
-  actions.append(displayButton, networkButton, focusButton, fullscreenButton, disconnectButton);
+  actions.append(displayButton, networkButton, focusButton, secureAttentionButton, fullscreenButton, disconnectButton);
   bar.append(brand, actions);
   stage.append(bar);
   toolbar = bar;
@@ -262,6 +443,8 @@ function syncWorkbench() {
   bar.toggleAttribute("hidden", !active);
 
   if (!active) {
+    clearSecureAttentionState(true);
+    controlChannel = null;
     networkExpanded = false;
     stage.classList.remove("network-expanded");
     networkButton?.classList.remove("is-active");
@@ -278,6 +461,7 @@ function syncWorkbench() {
     if (statusText.dataset.state !== state) statusText.dataset.state = state;
   }
   setText(networkButton, compactNetworkLabel());
+  refreshSecureAttentionButton();
   applyViewMode(stage);
   syncFullscreenButton();
   if (active) revealToolbar();
@@ -305,6 +489,48 @@ function start() {
   });
 
   document.addEventListener("fullscreenchange", syncFullscreenButton);
+  window.addEventListener("desklink:control-channel", (event) => {
+    const detail = (event as CustomEvent<{ channel: RTCDataChannel }>).detail;
+    const nextChannel = detail?.channel ?? null;
+    if (nextChannel !== controlChannel) {
+      clearSecureAttentionState(true);
+      controlChannel = nextChannel;
+    }
+    if (controlChannel) {
+      controlChannel.addEventListener("open", refreshSecureAttentionButton, { once: true });
+    }
+    refreshSecureAttentionButton();
+  });
+  window.addEventListener("desklink:control-channel-closed", (event) => {
+    const detail = (event as CustomEvent<{ channel: RTCDataChannel }>).detail;
+    if (detail?.channel && detail.channel !== controlChannel) return;
+    controlChannel = null;
+    hostCapabilities = null;
+    if (secureAttentionRequestId) {
+      finishSecureAttention("连接已断开");
+    } else {
+      clearSecureAttentionState(true);
+    }
+  });
+  window.addEventListener("desklink:control-message", (event) => {
+    const detail = (event as CustomEvent<{
+      channel: RTCDataChannel;
+      message: Record<string, unknown>;
+    }>).detail;
+    if (!detail?.message || detail.channel !== controlChannel) return;
+
+    const capabilities = parseHostCapabilities(detail.message);
+    if (capabilities) {
+      hostCapabilities = capabilities;
+      if (!capabilities.secureAttentionAvailable && secureAttentionRequestId) {
+        finishSecureAttention(secureAttentionUnavailableLabel());
+      } else {
+        refreshSecureAttentionButton();
+      }
+      return;
+    }
+    handleSystemOperationResult(detail.message);
+  });
   window.addEventListener("keydown", (event) => {
     if (!sessionActive()) return;
     if (event.key === "Escape" && networkExpanded && !document.fullscreenElement) {
