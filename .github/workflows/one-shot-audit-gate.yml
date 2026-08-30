@@ -31,29 +31,16 @@ jobs:
 
           ci_path = Path('.github/workflows/ci.yml')
           ci = ci_path.read_text(encoding='utf-8')
-          old = '''      - name: Install locked Web dependencies
-        run: npm ci
-      - name: Typecheck
-'''
-          new = '''      - name: Install locked Web dependencies
-        run: npm ci
-      - name: Audit Web dependencies
-        run: npm audit --audit-level=moderate
-      - name: Typecheck
-'''
+          old = "      - name: Install locked Web dependencies\n        run: npm ci\n      - name: Typecheck\n"
+          new = "      - name: Install locked Web dependencies\n        run: npm ci\n      - name: Audit Web dependencies\n        run: npm audit --audit-level=moderate\n      - name: Typecheck\n"
           if ci.count(old) != 1:
               raise SystemExit(f'CI audit insertion anchor count={ci.count(old)}')
           ci_path.write_text(ci.replace(old, new, 1), encoding='utf-8')
 
           release_path = Path('.github/workflows/release.yml')
           release = release_path.read_text(encoding='utf-8')
-          old = '''          npm ci
-          npm run typecheck
-'''
-          new = '''          npm ci
-          npm audit --audit-level=moderate
-          npm run typecheck
-'''
+          old = "          npm ci\n          npm run typecheck\n"
+          new = "          npm ci\n          npm audit --audit-level=moderate\n          npm run typecheck\n"
           if release.count(old) != 1:
               raise SystemExit(f'Release audit insertion anchor count={release.count(old)}')
           release_path.write_text(release.replace(old, new, 1), encoding='utf-8')
