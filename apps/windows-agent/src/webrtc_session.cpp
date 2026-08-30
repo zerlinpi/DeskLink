@@ -22,6 +22,7 @@
 
 #include "clipboard_win32.h"
 #include "file_transfer_receiver.h"
+#include "pointer_wire.h"
 #include "service_auth_client.h"
 #include "signal_token_client.h"
 #include "turn_credential_client.h"
@@ -1109,7 +1110,27 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
     }
     std::cout << label << " DataChannel closed\n";
   });
-  channel->onMessage([this](rtc::message_variant data) {
+  channel->onMessage([this, label](rtc::message_variant data) {
+    if (label == "pointer") {
+      PointerWireEvent event;
+      bool parsed = false;
+      if (const auto* binary = std::get_if<rtc::binary>(&data)) {
+        parsed = ParsePointerWire(
+            std::span<const std::byte>(binary->data(), binary->size()),
+            &event);
+      } else if (const auto* text = std::get_if<std::string>(&data)) {
+        parsed = ParseLegacyPointerJson(*text, &event);
+      }
+      if (!parsed) return;
+
+      if (event.kind == PointerWireKind::Move) {
+        input_.PointerMove(event.x, event.y);
+      } else if (event.kind == PointerWireKind::Wheel) {
+        input_.PointerWheel(event.wheel_delta);
+      }
+      return;
+    }
+
     if (const auto* text = std::get_if<std::string>(&data)) {
       HandleControl(*text);
     }

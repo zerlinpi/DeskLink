@@ -17,6 +17,7 @@ import {
 } from "./session_recovery";
 import { shouldAcceptSignalMessage } from "./signal_scope";
 import { isActiveSessionResource } from "./session_resource_scope";
+import { encodePointerMove, encodePointerWheel } from "./pointer_wire";
 import "./styles.css";
 
 type SignalMessage = {
@@ -242,9 +243,9 @@ function App() {
     if (channel?.readyState === "open") channel.send(JSON.stringify(payload));
   };
 
-  const sendPointerFast = (payload: object) => {
+  const sendPointerFast = (payload: ArrayBuffer) => {
     const channel = pointerRef.current;
-    if (channel?.readyState === "open") channel.send(JSON.stringify(payload));
+    if (channel?.readyState === "open") channel.send(payload);
   };
 
   const clearIceRestartTimer = () => {
@@ -475,7 +476,7 @@ function App() {
       pointerRafRef.current = null;
       const latest = pendingMoveRef.current;
       pendingMoveRef.current = null;
-      if (latest) sendPointerFast(latest);
+      if (latest) sendPointerFast(encodePointerMove(latest.x, latest.y));
     });
   };
 
@@ -1122,7 +1123,7 @@ function App() {
           onWheel={(e) => {
             e.preventDefault();
             const magnitude = Math.max(1, Math.min(5, Math.round(Math.abs(e.deltaY) / 100)));
-            sendPointerFast({ t: "wheel", delta: (e.deltaY < 0 ? 120 : -120) * magnitude });
+            sendPointerFast(encodePointerWheel((e.deltaY < 0 ? 120 : -120) * magnitude));
           }}
           onKeyDown={(e) => {
             if (controlRef.current?.readyState === "open") {

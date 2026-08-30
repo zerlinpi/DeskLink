@@ -110,6 +110,8 @@ add_executable(desklink-agent
   src/host_capabilities_publisher.cpp
   src/input_injector.cpp
   src/input_injector.h
+  src/pointer_wire.cpp
+  src/pointer_wire.h
   src/performance_tuning.cpp
   src/service_auth_client.cpp
   src/service_auth_client.h
@@ -290,6 +292,15 @@ add_executable(desklink-video-policy-smoke
 )
 target_compile_definitions(desklink-video-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)
+
+add_executable(desklink-pointer-wire-smoke
+  src/pointer_wire_smoke.cpp
+  src/pointer_wire.cpp
+  src/pointer_wire.h
+)
+target_compile_definitions(desklink-pointer-wire-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-pointer-wire-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(desklink-pointer-wire-smoke PRIVATE nlohmann_json::nlohmann_json)
 
 add_executable(desklink-active-session-smoke
   src/active_session_smoke.cpp
