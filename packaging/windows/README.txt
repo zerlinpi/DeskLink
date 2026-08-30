@@ -4,7 +4,7 @@ DeskLink Windows 被控端
 推荐方式：双击 DeskLink.exe
 -------------------------
 
-v1.0.1 起，Windows 发布包提供原生 DeskLink.exe 设置管理器。
+Windows 发布包提供原生 DeskLink.exe 设置管理器，不需要手工创建环境变量。
 
 1. 解压完整的 Windows ZIP，不要只单独复制某一个 exe。
 2. 双击 DeskLink.exe，并允许 Windows 的管理员/UAC 提示。
@@ -14,9 +14,26 @@ v1.0.1 起，Windows 发布包提供原生 DeskLink.exe 设置管理器。
    - 访问码：首次安装必填，之后更新时可留空保留原值
    - STUN/TURN：公网远控建议填写你自己的 TURN 服务
    - 信令令牌接口 / TURN 凭证接口 / dc2 设备凭证：生产鉴权部署时填写
+   - 目标帧率 FPS：默认 60，可填写 15-144；高刷设备可尝试 90 / 120 / 144
 4. 点击“安装 / 更新并启动”。
 5. 服务状态显示“运行中”后，点击“连接诊断”。
 6. 诊断没有 [失败] 项后，再在 Web 控制端输入设备 ID 和访问码连接。
+
+高刷新率说明
+------------
+
+目标 FPS 支持 15-144，但 144 FPS 是目标能力，不代表所有电脑都一定能稳定输出。
+实际可用帧率取决于：
+
+  - 被控显示器刷新率；
+  - Intel / NVIDIA / AMD 显卡和驱动；
+  - Media Foundation 硬件 H.264 Encoder 能力；
+  - 网络带宽、RTT、丢包和抖动；
+  - 浏览器硬件解码和显示能力。
+
+高刷视频策略使用 144 -> 120 -> 90 -> 60 -> 45 -> 30 -> 24 -> 15 的稳定档位。
+如果硬件视频管线无法在请求的高 FPS 初始化，Agent 会尝试较低兼容高刷档位，
+而不是直接失去画面。网络拥堵时仍然优先保护输入延迟，不会为了保持高 FPS 无限排队。
 
 连接诊断
 --------
@@ -44,7 +61,7 @@ v1.0.1 起，Windows 发布包提供原生 DeskLink.exe 设置管理器。
 GPU / 画面媒体自检
 ------------------
 
-新版 Windows 发布包还包含：
+Windows 发布包包含：
 
   desklink-media-probe.exe
 
@@ -75,6 +92,28 @@ GPU / 画面媒体自检
 
 如果 Web 能连接并控制鼠标键盘、但始终没有画面，优先运行此探针。
 
+锁屏 / 用户切换 / RDP
+---------------------
+
+DeskLink Service 会监督当前活动交互用户会话。可用时优先 Console；没有可用活动
+Console 用户时，会选择真实 WTSActive RDP 会话，因此 Windows Server / RDP-only
+主机不再只依赖物理控制台。
+
+锁屏、Fast User Switching、显示模式变化等情况可能让 DXGI Desktop Duplication
+返回 DXGI_ERROR_ACCESS_LOST。DeskLink 会在后台节流重试重建 Desktop Duplication；
+回到正常可访问桌面后，画面应自动恢复，不需要因为一次重建失败就手工重启 Service。
+
+注意：这不等于已经支持 Windows 登录界面或 UAC Secure Desktop。当前版本不会通过
+关闭 UAC 或降低 Windows 安全策略来实现这类控制。
+
+输入断线保护
+------------
+
+浏览器失焦、页面隐藏、手动断开、输入 DataChannel 关闭、WebRTC 连接断开/失败和
+Service/Agent 停止都会触发远端输入释放。Host 会跟踪已注入的键和鼠标按钮；如果
+某次 KEYUP/MOUSEUP 因临时桌面权限边界失败，该状态不会被提前忘记，后续 cleanup
+仍可再次尝试释放，降低 Ctrl/Alt/Shift/Win 或鼠标键“粘住”的概率。
+
 访问码和设备凭证不会写进命令行或普通环境变量，而是通过 Windows
 machine-scope DPAPI 加密保存在 %ProgramData%\DeskLink。
 
@@ -103,11 +142,16 @@ machine-scope DPAPI 加密保存在 %ProgramData%\DeskLink。
     -SignalTokenUrl "https://control.example.com/api/v1/signal-token" `
     -StunUrl "stun:turn.example.com:3478" `
     -TurnHost "turn.example.com" `
-    -TurnCredentialsUrl "https://control.example.com/api/v1/turn-credentials"
+    -TurnCredentialsUrl "https://control.example.com/api/v1/turn-credentials" `
+    -Fps 60
 
-v1.0.1 起，非敏感配置写入 DeskLink Windows Service 自己的 Environment
-注册表值，并在服务重启时立即生效，不再依赖可能需要重启 Windows 才刷新的
-Machine Environment Variables。
+可选：
+
+  -Fps 120
+  -BitrateBps 20000000
+
+非敏感配置写入 DeskLink Windows Service 自己的 Environment 注册表值，并在服务
+重启时立即生效，不再依赖可能需要重启 Windows 才刷新的 Machine Environment Variables。
 
 如启用了 SignalTokenUrl，请配置服务器生成的 dc2 设备凭证：
 
@@ -135,8 +179,8 @@ Windows “未知发布者 / Windows 已保护你的电脑”提示
   3. 使用可信时间戳服务；
   4. 保持稳定发布者身份逐步建立 SmartScreen reputation。
 
-仓库的发布流程会提供可选 Authenticode 签名钩子；没有配置证书 Secret 时仍可
-生成开发/测试包，但 Windows 可能继续显示未知发布者提示。
+仓库的发布流程提供可选 Authenticode 签名钩子；没有配置证书 Secret 时仍可生成
+开发/测试包，但 Windows 可能继续显示未知发布者提示。
 
 卸载
 ----
