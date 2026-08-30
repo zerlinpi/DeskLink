@@ -145,11 +145,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
       - name: Validate Access Code proof vector
         run: node ../../tools/auth/verify-access-proof-vector.mjs
-      - run: npm install
-      - run: npm run build
+      - name: Install locked Web dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test -- --passWithNoTests
+      - name: Production build
+        run: npm run build
 
   repo-checks:
     needs: changes
@@ -254,6 +262,18 @@ jobs:
           $smoke = Resolve-Path "build/windows-agent/Release/desklink-active-session-smoke.exe"
           & $smoke
           if ($LASTEXITCODE -ne 0) { throw "Active session smoke failed with exit code $LASTEXITCODE" }
+      - name: Validate Device ID derivation
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-device-identity-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Device identity smoke failed with exit code $LASTEXITCODE" }
+      - name: Validate Secure Attention API fail-closed behavior
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-secure-attention-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Secure Attention smoke failed with exit code $LASTEXITCODE" }
       - name: Validate Access Code proof vector
         shell: pwsh
         run: |
