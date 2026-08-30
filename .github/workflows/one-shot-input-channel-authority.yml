@@ -1,5 +1,6 @@
 name: One-shot Windows input channel authority integration
 
+# Temporary validation workflow; removed after the native integration passes.
 on:
   push:
     branches: [main]
