@@ -1022,7 +1022,23 @@ void WebRtcSession::CreatePeer(
   }
   if (previous) previous->close();
 
-  peer->onStateChange([](rtc::PeerConnection::State state) {
+  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
+  peer->onStateChange([this, weak_peer](rtc::PeerConnection::State state) {
+    auto owner = weak_peer.lock();
+    if (!owner) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (peer_ != owner) return;
+    }
+
+    if (state == rtc::PeerConnection::State::Disconnected ||
+        state == rtc::PeerConnection::State::Failed ||
+        state == rtc::PeerConnection::State::Closed) {
+      // Do not wait for DataChannel close callbacks: during Wi-Fi/IP/NAT
+      // transitions SCTP can remain half-open long enough to leave a
+      // modifier or mouse button logically pressed on Windows.
+      input_.ReleaseAll();
+    }
     std::cout << "WebRTC state: " << state << "\n";
   });
   peer->onIceStateChange([](rtc::PeerConnection::IceState state) {
@@ -1039,7 +1055,6 @@ void WebRtcSession::CreatePeer(
         json{{"candidate", std::string(candidate)}, {"sdpMid", candidate.mid()}});
   });
 
-  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
   peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {
     auto owner = weak_peer.lock();
     if (!owner || !channel) return;
@@ -1081,8 +1096,12 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
     }
   });
   channel->onClosed([this, label, weak_channel]() {
-    if (label == "control") {
+    if (label == "control" || label == "pointer") {
+      // Closing either input channel is a loss-of-authority boundary.
+      // Release injected state immediately rather than risking a stuck key/button.
       input_.ReleaseAll();
+    }
+    if (label == "control") {
       auto closed = weak_channel.lock();
       std::scoped_lock lock(mutex_);
       if (!closed || control_ == closed) control_.reset();
