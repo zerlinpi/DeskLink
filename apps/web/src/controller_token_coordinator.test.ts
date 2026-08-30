@@ -43,8 +43,10 @@ describe("ControllerTokenCoordinator", () => {
     const coordinator = new ControllerTokenCoordinator();
     const pending = deferred<{ token: string; expiresAt: number }>();
     let requests = 0;
-    const request = () => {
+    let firstSignal: AbortSignal | null = null;
+    const request = (signal: AbortSignal) => {
       requests += 1;
+      firstSignal = signal;
       return pending.promise;
     };
 
@@ -60,36 +62,40 @@ describe("ControllerTokenCoordinator", () => {
     });
 
     expect(requests).toBe(1);
+    expect(firstSignal?.aborted).toBe(false);
     pending.resolve({ token: "token-a", expiresAt: nowSeconds + 600 });
     await expect(first).resolves.toBe("token-a");
     await expect(second).resolves.toBe("token-a");
   });
 
-  it("does not reuse an in-flight token request for a different target", async () => {
+  it("cancels an in-flight token request when the target changes", async () => {
     const coordinator = new ControllerTokenCoordinator();
     const oldTarget = deferred<{ token: string; expiresAt: number }>();
     const newTarget = deferred<{ token: string; expiresAt: number }>();
-    let oldRequests = 0;
+    let oldSignal: AbortSignal | null = null;
+    let newSignal: AbortSignal | null = null;
     let newRequests = 0;
 
     const oldPromise = coordinator.getToken("host-a", {
       nowSeconds,
       refreshMarginSeconds,
-      request: () => {
-        oldRequests += 1;
+      request: (signal) => {
+        oldSignal = signal;
         return oldTarget.promise;
       },
     });
     const newPromise = coordinator.getToken("host-b", {
       nowSeconds,
       refreshMarginSeconds,
-      request: () => {
+      request: (signal) => {
+        newSignal = signal;
         newRequests += 1;
         return newTarget.promise;
       },
     });
 
-    expect(oldRequests).toBe(1);
+    expect(oldSignal?.aborted).toBe(true);
+    expect(newSignal?.aborted).toBe(false);
     expect(newRequests).toBe(1);
 
     newTarget.resolve({ token: "token-b", expiresAt: nowSeconds + 600 });
@@ -108,16 +114,21 @@ describe("ControllerTokenCoordinator", () => {
     expect(newRequests).toBe(1);
   });
 
-  it("prevents a cleared stale request from repopulating the cache", async () => {
+  it("cancels and invalidates a request when the controller session is cleared", async () => {
     const coordinator = new ControllerTokenCoordinator();
     const stale = deferred<{ token: string; expiresAt: number }>();
+    let staleSignal: AbortSignal | null = null;
 
     const stalePromise = coordinator.getToken("host-a", {
       nowSeconds,
       refreshMarginSeconds,
-      request: () => stale.promise,
+      request: (signal) => {
+        staleSignal = signal;
+        return stale.promise;
+      },
     });
     coordinator.clear();
+    expect(staleSignal?.aborted).toBe(true);
 
     stale.resolve({ token: "stale-token", expiresAt: nowSeconds + 600 });
     await expect(stalePromise).resolves.toBe("stale-token");
@@ -132,6 +143,23 @@ describe("ControllerTokenCoordinator", () => {
       },
     })).resolves.toBe("fresh-token");
     expect(freshRequests).toBe(1);
+  });
+
+  it("clears failed requests so the same target can retry", async () => {
+    const coordinator = new ControllerTokenCoordinator();
+    await expect(coordinator.getToken("host-a", {
+      nowSeconds,
+      refreshMarginSeconds,
+      request: async () => {
+        throw new Error("temporary auth outage");
+      },
+    })).rejects.toThrow("temporary auth outage");
+
+    await expect(coordinator.getToken("host-a", {
+      nowSeconds: nowSeconds + 1,
+      refreshMarginSeconds,
+      request: async () => ({ token: "recovered", expiresAt: nowSeconds + 600 }),
+    })).resolves.toBe("recovered");
   });
 
   it("refreshes expired or explicitly refreshed tokens", async () => {
