@@ -1,0 +1,98 @@
+name: One-shot session resource ownership
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-session-resource-ownership.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Guard peer and DataChannel callbacks by resource ownership
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  'import { shouldAcceptSignalMessage } from "./signal_scope";\n',
+                  'import { shouldAcceptSignalMessage } from "./signal_scope";\nimport { isActiveSessionResource } from "./session_resource_scope";\n',
+              ),
+              (
+                  '    pc.ontrack = (event) => {\n      if (!videoRef.current) return;\n',
+                  '    pc.ontrack = (event) => {\n      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;\n      if (!videoRef.current) return;\n',
+              ),
+              (
+                  '    pc.onicecandidate = (event) => {\n      if (!event.candidate) return;\n',
+                  '    pc.onicecandidate = (event) => {\n      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;\n      if (!event.candidate) return;\n',
+              ),
+              (
+                  '    pc.onconnectionstatechange = () => {\n      const state = pc.connectionState;\n',
+                  '    pc.onconnectionstatechange = () => {\n      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;\n      const state = pc.connectionState;\n',
+              ),
+              (
+                  '    control.onopen = () => {\n      setStatus(wsRef.current?.readyState === WebSocket.OPEN\n',
+                  '    control.onopen = () => {\n      if (!isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) ||\n          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {\n        return;\n      }\n      setStatus(wsRef.current?.readyState === WebSocket.OPEN\n',
+              ),
+              (
+                  '    control.onclose = stopTelemetry;\n',
+                  '    control.onclose = () => {\n      if (controlRef.current === control) stopTelemetry();\n    };\n',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one ownership integration anchor, got {count}: {old[:120]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+      - name: Typecheck Web controller
+        working-directory: apps/web
+        run: npm run typecheck
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): ignore stale peer resource callbacks"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
