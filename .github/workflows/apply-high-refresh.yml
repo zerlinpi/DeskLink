@@ -1,0 +1,154 @@
+name: Apply High Refresh Wiring
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-high-refresh.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build-commit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply exact high-refresh wiring patch
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str, expected: int = 1):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} matches, found {count} for {old[:80]!r}")
+              p.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+
+          main = "apps/windows-agent/src/main.cpp"
+          replace_exact(
+              main,
+              '#include "service_auth_client.h"\n#include "webrtc_session.h"',
+              '#include "service_auth_client.h"\n#include "video_policy.h"\n#include "webrtc_session.h"',
+          )
+          replace_exact(
+              main,
+              '''uint32_t LowerFpsTier(uint32_t current, uint32_t target) {
+            if (target <= 15 || current <= 15) return std::min(current, target);
+            if (current > 45 && target > 45) return 45;
+            if (current > 30 && target > 30) return 30;
+            if (current > 24 && target > 24) return 24;
+            return std::max<uint32_t>(15, std::min(current, target));
+          }
+
+          uint32_t RaiseFpsTier(uint32_t current, uint32_t target) {
+            if (current >= target) return target;
+            if (current < 30 && target > current) return std::min<uint32_t>(target, 30);
+            if (current < 45 && target > current) return std::min<uint32_t>(target, 45);
+            return target;
+          }
+
+          ''',
+              '',
+          )
+          replace_exact(
+              main,
+              '''  const uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 60);
+            const uint32_t target_bitrate = EnvUIntOr(
+                "DESKLINK_BITRATE_BPS",
+                12'000'000,
+                1'000'000,
+                50'000'000);''',
+              '''  const uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 144);
+            const uint32_t target_bitrate = EnvUIntOr(
+                "DESKLINK_BITRATE_BPS",
+                desklink::DefaultBitrateForFps(target_fps),
+                1'000'000,
+                60'000'000);''',
+          )
+          replace_exact(
+              main,
+              '  session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);',
+              '  session_config.turn_password = EnvOr("DESKLINK_TURN_PASSWORD", session_config.turn_password);\n  session_config.media_pacing_bitrate_bps = desklink::PacingBitrateForMedia(target_bitrate);\n  session_config.media_pacing_interval_ms = desklink::PacingIntervalMsForFps(target_fps);',
+          )
+          replace_exact(main, 'LowerFpsTier(current_fps, fps_ceiling)', 'desklink::LowerFpsTier(current_fps, fps_ceiling)')
+          replace_exact(main, 'RaiseFpsTier(current_fps, fps_ceiling)', 'desklink::RaiseFpsTier(current_fps, fps_ceiling)')
+          replace_exact(
+              main,
+              '    auto frame = capture.Acquire(16);',
+              '    auto frame = capture.Acquire(desklink::CaptureTimeoutMsForFps(active_fps));',
+          )
+
+          cmake = "apps/windows-agent/CMakeLists.txt"
+          replace_exact(
+              cmake,
+              '  src/turn_credential_client.cpp\n  src/turn_credential_client.h\n  src/webrtc_session.cpp',
+              '  src/turn_credential_client.cpp\n  src/turn_credential_client.h\n  src/video_policy.cpp\n  src/video_policy.h\n  src/webrtc_session.cpp',
+          )
+          p = Path(cmake)
+          text = p.read_text(encoding="utf-8")
+          marker = 'target_compile_options(desklink-h264-annexb-smoke PRIVATE /W4 /permissive-)'
+          if text.count(marker) != 1:
+              raise SystemExit(f"{cmake}: h264 smoke marker mismatch")
+          addition = '''\n\nadd_executable(desklink-video-policy-smoke
+            src/video_policy_smoke.cpp
+            src/video_policy.cpp
+            src/video_policy.h
+          )
+          target_compile_definitions(desklink-video-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+          target_compile_options(desklink-video-policy-smoke PRIVATE /W4 /permissive-)'''
+          p.write_text(text.replace(marker, marker + addition), encoding="utf-8", newline="\n")
+
+          ci = ".github/workflows/ci.yml"
+          replace_exact(
+              ci,
+              '''      - name: Validate Access Code proof vector
+                shell: pwsh''',
+              '''      - name: Validate high-refresh video policy
+                shell: pwsh
+                run: |
+                  $smoke = Resolve-Path "build/windows-agent/Release/desklink-video-policy-smoke.exe"
+                  & $smoke
+                  if ($LASTEXITCODE -ne 0) { throw "High-refresh video policy smoke failed with exit code $LASTEXITCODE" }
+              - name: Validate Access Code proof vector
+                shell: pwsh''',
+          )
+
+          release = ".github/workflows/release.yml"
+          replace_exact(
+              release,
+              '''            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
+                      "build/windows-agent/Release/desklink-access-proof-smoke.exe",''',
+              '''            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
+                      "build/windows-agent/Release/desklink-video-policy-smoke.exe",
+                      "build/windows-agent/Release/desklink-access-proof-smoke.exe",''',
+          )
+          '@ | python -
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+
+      - name: Build Windows host and policy smoke
+        run: cmake --build build/windows-agent --config Release --parallel
+
+      - name: Validate high-refresh policy
+        shell: pwsh
+        run: |
+          & "build/windows-agent/Release/desklink-video-policy-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "High-refresh policy smoke failed with exit code $LASTEXITCODE" }
+
+      - name: Commit validated wiring to main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/windows-agent/src/main.cpp apps/windows-agent/CMakeLists.txt .github/workflows/ci.yml .github/workflows/release.yml
+          if (git diff --cached --quiet) { throw "High-refresh wiring produced no changes" }
+          git commit -m "feat(windows): wire high-refresh streaming policy"
+          git push origin HEAD:main
