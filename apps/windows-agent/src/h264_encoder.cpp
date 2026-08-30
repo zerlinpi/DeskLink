@@ -4,13 +4,18 @@
 #include <mferror.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
+#include <thread>
 
 #include "h264_annexb.h"
 
 namespace desklink {
 namespace {
+
+constexpr auto kEncoderEventTimeout = std::chrono::milliseconds(750);
+constexpr auto kEncoderEventPollInterval = std::chrono::milliseconds(1);
 
 bool SetCodecUInt32(ICodecAPI* codec, const GUID& key, uint32_t value) {
   if (!codec) return false;
@@ -289,9 +294,19 @@ bool H264Encoder::WaitForEvent(MediaEventType wanted) {
     return true;
   }
 
+  const auto deadline = std::chrono::steady_clock::now() + kEncoderEventTimeout;
   for (;;) {
     Microsoft::WRL::ComPtr<IMFMediaEvent> event;
-    HRESULT hr = event_generator_->GetEvent(0, &event);
+    const HRESULT hr = event_generator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &event);
+    if (hr == MF_E_NO_EVENTS_AVAILABLE) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        std::wcerr << L"H264Encoder: timed out waiting for Media Foundation event "
+                   << static_cast<unsigned long>(wanted) << L"\n";
+        return false;
+      }
+      std::this_thread::sleep_for(kEncoderEventPollInterval);
+      continue;
+    }
     if (FAILED(hr)) {
       std::wcerr << L"H264Encoder: GetEvent failed: 0x" << std::hex << hr << L"\n";
       return false;
@@ -454,10 +469,37 @@ bool H264Encoder::Encode(
     uint64_t timestamp100ns,
     EncodedH264Frame* output) {
   if (!ready() || !output || !nv12_texture) return false;
-  if (!WaitForEvent(METransformNeedInput)) return false;
-  if (!SubmitInput(nv12_texture, timestamp100ns)) return false;
-  if (!WaitForEvent(METransformHaveOutput)) return false;
-  return ReadOutput(output);
+
+  auto recover_stream = [this]() {
+    if (!transform_) return;
+    transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    need_input_pending_ = false;
+    have_output_pending_ = false;
+    const HRESULT restart = transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    if (FAILED(restart)) {
+      std::wcerr << L"H264Encoder: failed to restart stream after encoder stall: 0x"
+                 << std::hex << restart << L"\n";
+    }
+    RequestKeyframe();
+  };
+
+  if (!WaitForEvent(METransformNeedInput)) {
+    recover_stream();
+    return false;
+  }
+  if (!SubmitInput(nv12_texture, timestamp100ns)) {
+    recover_stream();
+    return false;
+  }
+  if (!WaitForEvent(METransformHaveOutput)) {
+    recover_stream();
+    return false;
+  }
+  if (!ReadOutput(output)) {
+    recover_stream();
+    return false;
+  }
+  return true;
 }
 
 bool H264Encoder::RequestKeyframe() {
