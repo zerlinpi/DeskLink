@@ -4,12 +4,14 @@ on:
   push:
     branches: [main]
     paths:
+      - apps/signal/**
       - apps/web/**
       - infra/production/**
       - .github/workflows/deployment-smoke.yml
   pull_request:
     branches: [main]
     paths:
+      - apps/signal/**
       - apps/web/**
       - infra/production/**
       - .github/workflows/deployment-smoke.yml
@@ -34,15 +36,9 @@ jobs:
             -f infra/production/docker-compose.yml \
             config >/dev/null
 
-      - name: Build production Web container
+      - name: Build production Signal and Web containers
         run: |
-          docker build \
-            --build-arg VITE_SIGNAL_URL=/ws \
-            --build-arg VITE_CONTROLLER_SESSION_URL=/api/v1/controller-session \
-            --build-arg VITE_CONTROLLER_AUTH_REQUIRED=1 \
-            --build-arg VITE_STUN_URL=stun:turn.example.com:3478 \
-            --build-arg VITE_TURN_URL=turn:turn.example.com:3478 \
-            --build-arg VITE_TURN_CREDENTIALS_URL=/api/v1/turn-credentials \
-            --build-arg VITE_TURN_RUNTIME_REQUIRED=1 \
-            -t desklink-web:ci \
-            apps/web
+          docker compose \
+            --env-file infra/production/.env.example \
+            -f infra/production/docker-compose.yml \
+            build signal web
