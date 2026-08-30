@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,8 +13,10 @@
 namespace desklink {
 namespace {
 
+constexpr uint32_t kExtendedKeyMarker = 1u << 16;
+
 std::mutex g_pressed_mutex;
-std::unordered_set<unsigned short> g_pressed_keys;
+std::unordered_set<uint32_t> g_pressed_keys;
 std::unordered_set<int> g_pressed_buttons;
 
 bool Send(INPUT& input) {
@@ -75,6 +78,17 @@ bool IsExtendedKey(unsigned short vk) {
   }
 }
 
+bool IsExtendedCode(const std::string& code, unsigned short vk) {
+  // Numpad Enter shares VK_RETURN with the main Enter key, but Windows
+  // distinguishes it through KEYEVENTF_EXTENDEDKEY. Keep the browser physical
+  // code in this decision so both keys can be pressed/released independently.
+  return code == "NumpadEnter" || IsExtendedKey(vk);
+}
+
+uint32_t PressedKeyToken(unsigned short vk, bool extended) {
+  return static_cast<uint32_t>(vk) | (extended ? kExtendedKeyMarker : 0u);
+}
+
 LONG NormalizeVirtualCoordinate(double pixel, LONG origin, LONG extent) {
   if (extent <= 1) return 0;
   const double normalized = (pixel - static_cast<double>(origin)) /
@@ -85,7 +99,7 @@ LONG NormalizeVirtualCoordinate(double pixel, LONG origin, LONG extent) {
 }  // namespace
 
 bool ReleaseAllInjectedInput() {
-  std::vector<unsigned short> keys;
+  std::vector<uint32_t> keys;
   std::vector<int> buttons;
   {
     std::scoped_lock lock(g_pressed_mutex);
@@ -96,12 +110,13 @@ bool ReleaseAllInjectedInput() {
   }
 
   bool all_released = true;
-  for (const unsigned short vk : keys) {
+  for (const uint32_t token : keys) {
+    const unsigned short vk = static_cast<unsigned short>(token & 0xFFFFu);
+    const bool extended = (token & kExtendedKeyMarker) != 0;
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = vk;
-    input.ki.dwFlags = KEYEVENTF_KEYUP;
-    if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    input.ki.dwFlags = KEYEVENTF_KEYUP | (extended ? KEYEVENTF_EXTENDEDKEY : 0);
     all_released = Send(input) && all_released;
   }
 
@@ -237,19 +252,21 @@ unsigned short InputInjector::VirtualKeyFromCode(const std::string& code) {
 bool InputInjector::Key(const std::string& code, bool down) const {
   const unsigned short vk = VirtualKeyFromCode(code);
   if (vk == 0) return false;
+  const bool extended = IsExtendedCode(code, vk);
+  const uint32_t pressed_token = PressedKeyToken(vk, extended);
 
   INPUT input{};
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = vk;
   input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
-  if (IsExtendedKey(vk)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+  if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (!Send(input)) return false;
 
   std::scoped_lock lock(g_pressed_mutex);
   if (down) {
-    g_pressed_keys.insert(vk);
+    g_pressed_keys.insert(pressed_token);
   } else {
-    g_pressed_keys.erase(vk);
+    g_pressed_keys.erase(pressed_token);
   }
   return true;
 }
