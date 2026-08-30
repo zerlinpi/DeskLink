@@ -1,0 +1,80 @@
+name: Apply README Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-readme-sync.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch README
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('README.md')
+          text = p.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '- Windows DXGI Desktop Duplication 屏幕采集。',
+                  '- Windows DXGI Desktop Duplication 屏幕采集；锁屏/用户切换/桌面模式变化导致 `DXGI_ERROR_ACCESS_LOST` 后会节流重试重建，回到正常桌面后无需手动重启 Agent。',
+              ),
+              (
+                  '- FPS 档位动态降级与恢复。',
+                  '- FPS 档位动态降级与恢复，目标范围 15–144 FPS，高刷阶梯为 144 → 120 → 90 → 60 → 45 → 30 → 24 → 15；硬件编码器不接受高刷初始化时自动尝试较低兼容档位。',
+              ),
+              (
+                  '- 断线、窗口失焦及 Service 停止时自动释放卡住的按键和鼠标按钮。',
+                  '- 断线、PeerConnection 失败、输入 DataChannel 关闭、窗口失焦及 Service 停止时自动释放卡住的按键和鼠标按钮；释放失败的状态保留并可在后续 cleanup 重试。',
+              ),
+              (
+                  '- Service 在活动登录会话中启动并维护 Agent。',
+                  '- Service 在活动交互会话中启动并维护 Agent：可用时优先 Console，否则支持选择真实 `WTSActive` RDP 会话。',
+              ),
+              (
+                  '生成：\n\n```text\ndesklink-agent.exe\ndesklink-service.exe\n```',
+                  '生成：\n\n```text\nDeskLink.exe\ndesklink-agent.exe\ndesklink-service.exe\ndesklink-media-probe.exe\n```',
+              ),
+              (
+                  '性能参数：\n\n```powershell\n$env:DESKLINK_FPS = "60"',
+                  '性能参数（`DESKLINK_FPS` 支持 15–144；60 为兼容默认值，高刷应结合显示器、GPU、网络与浏览器能力使用）：\n\n```powershell\n$env:DESKLINK_FPS = "60"',
+              ),
+              (
+                  '正式版本通过 GitHub Releases 发布。v1.0.0 包含：\n\n- `desklink-windows-v1.0.0-x64.zip`：Windows Agent、Service、安装/卸载脚本。\n- `desklink-web-v1.0.0.tar.gz`：浏览器控制端发布包。\n- `desklink-signal-v1.0.0-linux-amd64`：Linux amd64 信令服务。\n- `SHA256SUMS.txt`：发布资产 SHA-256 校验值。',
+                  '正式版本通过 GitHub Releases 发布。每个版本通常包含：\n\n- `desklink-windows-v<version>-x64.zip`：`DeskLink.exe`、Windows Agent/Service、媒体探针与安装/卸载脚本。\n- `desklink-web-v<version>.tar.gz`：浏览器控制端发布包。\n- `desklink-signal-v<version>-linux-amd64`：Linux amd64 信令服务。\n- `SHA256SUMS.txt`：发布资产 SHA-256 校验值。',
+              ),
+              (
+                  '版本发布后也可使用版本标签，例如：\n\n```bash\ndocker pull ghcr.io/zerlinpi/desklink-signal:1.0.0\n```',
+                  '版本发布后也可使用对应版本标签，例如：\n\n```bash\ndocker pull ghcr.io/zerlinpi/desklink-signal:1.0.4\n```',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'README anchor mismatch ({count}): {old[:90]!r}')
+              text = text.replace(old, new)
+
+          p.write_text(text, encoding='utf-8', newline='\n')
+          PY
+
+      - name: Commit README sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --check
+          git commit -m "docs: sync README with current remote host behavior"
+          git pull --rebase origin main
+          git push origin HEAD:main
