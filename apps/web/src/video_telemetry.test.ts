@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MIN_VIDEO_TELEMETRY_INTERVAL_MS,
   readVideoTelemetryBaseline,
   videoTelemetryInterval,
 } from "./video_telemetry";
@@ -76,16 +77,19 @@ describe("videoTelemetryInterval", () => {
     expect(interval?.jitterBuffer?.minimumMs).toBeCloseTo(20, 6);
   });
 
-  it("uses a minimum elapsed interval to avoid unstable very-short-rate spikes", () => {
+  it("rejects undersized intervals instead of distorting the elapsed time", () => {
     const previous = readVideoTelemetryBaseline(sample(), 1_000);
-    const current = readVideoTelemetryBaseline(sample({
-      framesDecoded: 610,
-      jitterBufferEmittedCount: 610,
-      jitterBufferDelay: 12.3,
-      jitterBufferTargetDelay: 18.4,
-      jitterBufferMinimumDelay: 9.2,
-    }), 1_100);
-    expect(videoTelemetryInterval(previous, current)?.decodeFps).toBe(40);
+    const shortInterval = readVideoTelemetryBaseline(sample({ framesDecoded: 610 }), 1_100);
+    expect(videoTelemetryInterval(previous, shortInterval)).toBeNull();
+
+    const boundary = readVideoTelemetryBaseline(sample({
+      framesDecoded: 615,
+      jitterBufferEmittedCount: 615,
+      jitterBufferDelay: 12.45,
+      jitterBufferTargetDelay: 18.6,
+      jitterBufferMinimumDelay: 9.3,
+    }), 1_000 + MIN_VIDEO_TELEMETRY_INTERVAL_MS);
+    expect(videoTelemetryInterval(previous, boundary)?.decodeFps).toBe(60);
   });
 
   it("fails closed when RTP or frame counters reset", () => {
