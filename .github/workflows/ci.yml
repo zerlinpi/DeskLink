@@ -11,6 +11,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  repository-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate repository version invariants
+        run: python tools/version/check-version.py
+
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -56,10 +66,28 @@ jobs:
           repo=false
           windows=false
 
-          affected '^(apps/signal/|tools/auth/|packages/protocol/|infra/docker-compose\.yml$|\.github/workflows/ci\.yml$)' && signal=true
-          affected '^(apps/web/|tools/auth/verify-access-proof-vector\.mjs$|packages/protocol/|\.github/workflows/ci\.yml$)' && web=true
-          affected '^(tools/network/|infra/|\.github/workflows/ci\.yml$)' && repo=true
-          affected '^(apps/windows-agent/|packaging/windows/|tools/auth/verify-access-proof-vector\.mjs$|packages/protocol/|\.github/workflows/ci\.yml$)' && windows=true
+          # Repository-wide invariants affect version/protocol/release semantics.
+          # They intentionally trigger every primary implementation so CI cannot
+          # report green while all real builds are skipped.
+          if affected '^(VERSION$|tools/version/|packages/protocol/|\.github/workflows/)'; then
+            signal=true
+            web=true
+            repo=true
+            windows=true
+          fi
+
+          affected '^(apps/signal/|tools/auth/|infra/docker-compose\.yml$)' && signal=true
+          affected '^(apps/web/|tools/auth/verify-access-proof-vector\.mjs$)' && web=true
+          affected '^(tools/network/|infra/)' && repo=true
+          affected '^(apps/windows-agent/|packaging/windows/|tools/auth/verify-access-proof-vector\.mjs$)' && windows=true
+
+          # Packaging changes can alter deployable artifacts even when product
+          # source did not move. Validate both browser and Windows packaging.
+          if affected '^packaging/'; then
+            web=true
+            repo=true
+            windows=true
+          fi
 
           echo "signal=$signal" >> "$GITHUB_OUTPUT"
           echo "web=$web" >> "$GITHUB_OUTPUT"
@@ -70,7 +98,7 @@ jobs:
           printf 'Affected: signal=%s web=%s repo=%s windows=%s\n' "$signal" "$web" "$repo" "$windows"
 
   signal:
-    needs: changes
+    needs: [repository-invariants, changes]
     if: needs.changes.outputs.signal == 'true'
     runs-on: ubuntu-latest
     defaults:
@@ -83,7 +111,12 @@ jobs:
           go-version: "1.23.x"
       - run: go mod download
       - run: go test ./...
-      - run: go build ./...
+      - name: Build with project version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < ../../VERSION)"
+          go build -ldflags="-X main.buildVersion=$version" ./...
       - name: Validate legacy device credential provisioning tool
         env:
           DESKLINK_DEVICE_AUTH_SECRET: ci-device-auth-secret
@@ -135,7 +168,7 @@ jobs:
           fi
 
   web:
-    needs: changes
+    needs: [repository-invariants, changes]
     if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     defaults:
@@ -160,7 +193,7 @@ jobs:
         run: npm run build
 
   repo-checks:
-    needs: changes
+    needs: [repository-invariants, changes]
     if: needs.changes.outputs.repo == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -173,7 +206,7 @@ jobs:
         run: docker compose -f infra/docker-compose.yml config >/dev/null
 
   windows-agent:
-    needs: changes
+    needs: [repository-invariants, changes]
     if: needs.changes.outputs.windows == 'true'
     runs-on: windows-latest
     steps:
@@ -182,7 +215,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/windows-agent
-          key: desklink-windows-${{ runner.os }}-${{ hashFiles('apps/windows-agent/CMakeLists.txt') }}
+          key: desklink-windows-${{ runner.os }}-${{ hashFiles('VERSION', 'apps/windows-agent/CMakeLists.txt', 'packages/protocol/**') }}
       - name: Validate packaging PowerShell syntax
         shell: pwsh
         run: |
