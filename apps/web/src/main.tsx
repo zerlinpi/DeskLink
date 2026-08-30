@@ -24,6 +24,11 @@ import {
   POINTER_MOVE_BUFFER_BUDGET_BYTES,
   shouldDeferPointerMove,
 } from "./pointer_transport";
+import {
+  INITIAL_VIDEO_JITTER_BUFFER_TARGET_MS,
+  trySetJitterBufferTarget,
+  videoJitterBufferTargetMs,
+} from "./receiver_latency";
 import "./styles.css";
 
 type SignalMessage = {
@@ -407,6 +412,14 @@ function App() {
         ? Number(selectedPair.availableIncomingBitrate)
         : null;
 
+      const videoReceiver = pc.getReceivers().find((receiver) => receiver.track.kind === "video");
+      if (videoReceiver) {
+        trySetJitterBufferTarget(
+          videoReceiver,
+          videoJitterBufferTargetMs(jitterMs, lossPct),
+        );
+      }
+
       setNetworkView({
         route,
         protocol,
@@ -754,6 +767,10 @@ function App() {
 
       const pc = createPeer(iceServers);
       const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+      trySetJitterBufferTarget(
+        transceiver.receiver,
+        INITIAL_VIDEO_JITTER_BUFFER_TARGET_MS,
+      );
       const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
       const h264Codecs = videoCapabilities?.codecs.filter(
         (codec) => codec.mimeType.toLowerCase() === "video/h264",
