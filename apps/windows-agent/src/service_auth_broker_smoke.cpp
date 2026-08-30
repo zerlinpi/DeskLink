@@ -235,7 +235,8 @@ int AuthorizedChild(const std::wstring& pipe_name) {
   }
 
   if (!desklink::ServiceSignalTokenBrokerConfigured() ||
-      !desklink::ServiceAccessCodeBrokerConfigured()) {
+    !desklink::ServiceAccessCodeBrokerConfigured() ||
+    !desklink::ServiceSecureAttentionBrokerConfigured()) {
     std::cerr << "Expected broker capabilities were not enabled\n";
     return 10;
   }
@@ -378,7 +379,7 @@ int wmain(int argc, wchar_t** argv) {
   PROCESS_INFORMATION authorized{};
   if (!RunChildProcess(
           L"--authorized-child \"" + pipe_name + L"\" --service-auth-pipe=\"" +
-              pipe_name + L"\" --service-signal-token-broker --service-access-code-broker",
+              pipe_name + L"\" --service-signal-token-broker --service-access-code-broker --service-sas-broker",
           CREATE_NO_WINDOW | CREATE_SUSPENDED,
           &authorized)) {
     std::wcerr << L"Unable to create authorized broker child\n";
@@ -393,6 +394,7 @@ int wmain(int argc, wchar_t** argv) {
           kDeviceId,
           kDeviceCredential,
           kExpectedAccessCode,
+          true,
           &broker_error)) {
     TerminateProcess(authorized.hProcess, 3);
     CloseHandle(authorized.hThread);
@@ -429,6 +431,6 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   desklink::StopServiceAuthBroker();
-  std::cout << "Service auth broker Signal Token + access-code smoke test passed\n";
+  std::cout << "Service auth broker Signal Token + access-code + SAS capability smoke test passed\n";
   return 0;
 }

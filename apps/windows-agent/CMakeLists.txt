@@ -157,6 +157,8 @@ add_executable(desklink-service
   src/service_auth_broker.h
   src/service_auth_client.cpp
   src/service_auth_client.h
+  src/secure_attention.cpp
+  src/secure_attention.h
   src/signal_token_client.cpp
   src/signal_token_client.h
   "${CMAKE_CURRENT_BINARY_DIR}/desklink-service-version.rc"
@@ -243,6 +245,8 @@ add_executable(desklink-service-auth-smoke
   src/service_auth_broker.h
   src/service_auth_client.cpp
   src/service_auth_client.h
+  src/secure_attention.cpp
+  src/secure_attention.h
   src/signal_token_client.cpp
   src/signal_token_client.h
 )
@@ -298,3 +302,12 @@ add_executable(desklink-device-identity-smoke
 target_compile_definitions(desklink-device-identity-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-device-identity-smoke PRIVATE /W4 /permissive-)
 target_link_libraries(desklink-device-identity-smoke PRIVATE advapi32 bcrypt)
+
+add_executable(desklink-secure-attention-smoke
+  src/secure_attention_smoke.cpp
+  src/secure_attention.cpp
+  src/secure_attention.h
+)
+target_compile_definitions(desklink-secure-attention-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-secure-attention-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(desklink-secure-attention-smoke PRIVATE advapi32)

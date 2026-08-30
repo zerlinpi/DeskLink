@@ -22,6 +22,7 @@
 
 #include "clipboard_win32.h"
 #include "file_transfer_receiver.h"
+#include "service_auth_client.h"
 #include "signal_token_client.h"
 #include "turn_credential_client.h"
 
@@ -1122,6 +1123,35 @@ void WebRtcSession::HandleControl(const std::string& text) {
   const std::string type = event.value("t", "");
   if (type == "release-all") {
     input_.ReleaseAll();
+    return;
+  }
+
+  if (type == "system-operation") {
+    const std::string request_id = event.value("requestId", "");
+    const std::string operation = event.value("operation", "");
+    if (!ValidRequestId(request_id)) return;
+
+    json response = {
+        {"t", "system-operation-result"},
+        {"requestId", request_id},
+        {"operation", operation},
+        {"ok", false},
+    };
+    if (operation == "secure-attention-sequence") {
+      input_.ReleaseAll();
+      std::string sas_error;
+      const bool ok = ServiceSecureAttentionBrokerConfigured() &&
+          RequestServiceSecureAttentionSequence(&sas_error);
+      response["ok"] = ok;
+      if (!ok) {
+        response["error"] = sas_error.empty()
+            ? "Secure Attention Sequence is unavailable on this host"
+            : sas_error;
+      }
+    } else {
+      response["error"] = "unsupported system operation";
+    }
+    SendControlMessage(response.dump());
     return;
   }
 

@@ -477,8 +477,10 @@ bool LaunchAgent(DWORD session_id) {
 
   const bool signal_broker = credential_status == desklink::ProtectedCredentialStatus::Loaded;
   const bool access_code_broker = access_code_status == desklink::ProtectedCredentialStatus::Loaded;
-  const bool broker_mode = signal_broker || access_code_broker;
-  if (broker_mode && !has_environment) {
+  const bool secure_attention_broker = true;
+  const bool protected_secret_broker = signal_broker || access_code_broker;
+  const bool broker_mode = protected_secret_broker || secure_attention_broker;
+  if (protected_secret_broker && !has_environment) {
     SecureWipe(&protected_credential);
     SecureWipe(&protected_access_code);
     CloseHandle(user_token);
@@ -497,12 +499,14 @@ bool LaunchAgent(DWORD session_id) {
   std::wstring auth_pipe_name;
 
   if (broker_mode) {
+    auth_pipe_name = NewServiceAuthPipeName(session_id);
+  }
+  if (protected_secret_broker) {
     protected_environment = BuildEnvironmentWithoutProtectedSecrets(
         environment,
         signal_broker,
         access_code_broker);
     child_environment = protected_environment.data();
-    auth_pipe_name = NewServiceAuthPipeName(session_id);
   }
 
   if (signal_broker) {
@@ -557,6 +561,7 @@ bool LaunchAgent(DWORD session_id) {
     command += L" --service-auth-pipe=\"" + auth_pipe_name + L"\"";
     if (signal_broker) command += L" --service-signal-token-broker";
     if (access_code_broker) command += L" --service-access-code-broker";
+    if (secure_attention_broker) command += L" --service-sas-broker";
   }
   std::vector<wchar_t> command_line(command.begin(), command.end());
   command_line.push_back(L'\0');
@@ -627,6 +632,7 @@ bool LaunchAgent(DWORD session_id) {
         broker_device_id,
         std::move(broker_credential),
         std::move(broker_access_code),
+        secure_attention_broker,
         &broker_error);
   }
 
@@ -681,6 +687,7 @@ bool LaunchAgent(DWORD session_id) {
   std::wstring security_mode;
   if (signal_broker) security_mode += L" signal-token";
   if (access_code_broker) security_mode += L" access-code";
+  if (secure_attention_broker) security_mode += L" secure-attention";
   LogEvent(
       EVENTLOG_INFORMATION_TYPE,
       L"Started desklink-agent.exe in session " + std::to_wstring(session_id) +
