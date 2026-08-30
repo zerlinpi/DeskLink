@@ -1,0 +1,62 @@
+name: Pointer wire contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/web/src/pointer_wire.ts
+      - apps/web/src/pointer_wire.test.ts
+      - apps/windows-agent/src/pointer_wire.cpp
+      - apps/windows-agent/src/pointer_wire.h
+      - apps/windows-agent/src/pointer_wire_smoke.cpp
+      - apps/windows-agent/CMakeLists.txt
+      - .github/workflows/pointer-wire-contract.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - apps/web/src/pointer_wire.ts
+      - apps/web/src/pointer_wire.test.ts
+      - apps/windows-agent/src/pointer_wire.cpp
+      - apps/windows-agent/src/pointer_wire.h
+      - apps/windows-agent/src/pointer_wire_smoke.cpp
+      - apps/windows-agent/CMakeLists.txt
+      - .github/workflows/pointer-wire-contract.yml
+
+concurrency:
+  group: desklink-pointer-wire-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  web-pointer-wire:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install locked Web dependencies
+        run: npm ci
+      - name: Validate binary pointer encoder vectors
+        run: npx vitest run src/pointer_wire.test.ts
+
+  windows-pointer-wire:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure pointer wire smoke
+        run: cmake -S apps/windows-agent -B build/windows-pointer-wire -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+      - name: Build pointer wire smoke
+        run: cmake --build build/windows-pointer-wire --config Release --target desklink-pointer-wire-smoke --parallel
+      - name: Validate binary pointer parser vectors
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-pointer-wire/Release/desklink-pointer-wire-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pointer wire smoke failed with exit code $LASTEXITCODE"
+          }
