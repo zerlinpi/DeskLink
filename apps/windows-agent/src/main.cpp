@@ -269,7 +269,7 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
 
-  const uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 144);
+  uint32_t target_fps = EnvUIntOr("DESKLINK_FPS", 60, 15, 144);
   const uint32_t target_bitrate = EnvUIntOr(
       "DESKLINK_BITRATE_BPS",
       desklink::DefaultBitrateForFps(target_fps),
@@ -293,21 +293,43 @@ int wmain(int argc, wchar_t** argv) {
   long controlled_height = static_cast<long>(capture.height());
 
   desklink::GpuColorConverter converter;
-  bool converter_ready = converter.Initialize(
-      device.Get(),
-      source_width,
-      source_height,
-      encode_size.width,
-      encode_size.height,
-      target_fps);
-
   desklink::H264Encoder encoder;
-  bool encoder_ready = converter_ready && encoder.Initialize(
-      device.Get(),
-      encode_size.width,
-      encode_size.height,
-      target_fps,
-      target_bitrate);
+  bool converter_ready = false;
+  bool encoder_ready = false;
+
+  auto initialize_video_pipeline_at_fps = [&](uint32_t fps) {
+    encoder.Reset();
+    converter.Reset();
+    converter_ready = converter.Initialize(
+        device.Get(),
+        source_width,
+        source_height,
+        encode_size.width,
+        encode_size.height,
+        fps);
+    encoder_ready = converter_ready && encoder.Initialize(
+        device.Get(),
+        encode_size.width,
+        encode_size.height,
+        fps,
+        target_bitrate);
+    return encoder_ready;
+  };
+
+  const uint32_t requested_target_fps = target_fps;
+  initialize_video_pipeline_at_fps(target_fps);
+  while (!encoder_ready && target_fps > 60) {
+    const uint32_t fallback_fps = desklink::LowerFpsTier(target_fps, target_fps);
+    if (fallback_fps >= target_fps) break;
+    std::wcerr << L"Video pipeline unavailable at " << target_fps
+               << L" fps; retrying " << fallback_fps << L" fps.\n";
+    target_fps = fallback_fps;
+    initialize_video_pipeline_at_fps(target_fps);
+  }
+  if (encoder_ready && target_fps != requested_target_fps) {
+    std::wcout << L"High-refresh compatibility fallback selected " << target_fps
+               << L" fps instead of requested " << requested_target_fps << L" fps.\n";
+  }
 
   if (!converter_ready) {
     std::wcerr << L"GPU BGRA->NV12 conversion unavailable; remote input remains available but video is disabled.\n";
