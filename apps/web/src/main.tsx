@@ -2,6 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { accessProofAlgorithm, createAccessProof } from "./access_proof";
 import { AsyncAttemptCoordinator } from "./async_attempt";
+import {
+  dataChannelRecoveryDelayMs,
+  resetDataChannelRecoveryAttempt,
+  shouldScheduleDataChannelRecovery,
+  type RecoverableChannelKind,
+} from "./data_channel_recovery";
 import { resolveControllerSessionUrl } from "./controller_session";
 import { createControllerSessionTokenRequest } from "./controller_token_request";
 import { decodeControlChannelText } from "./control_channel_message";
@@ -187,6 +193,14 @@ function App() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const controlRef = useRef<RTCDataChannel | null>(null);
   const pointerRef = useRef<RTCDataChannel | null>(null);
+  const dataChannelRecoveryTimerRef = useRef<Record<RecoverableChannelKind, number | null>>({
+    control: null,
+    pointer: null,
+  });
+  const dataChannelRecoveryAttemptRef = useRef<Record<RecoverableChannelKind, number>>({
+    control: 0,
+    pointer: 0,
+  });
   const sessionRef = useRef(crypto.randomUUID());
   const pendingMoveRef = useRef<PointerPayload | null>(null);
   const pointerRafRef = useRef<number | null>(null);
@@ -282,6 +296,18 @@ function App() {
     hostWaitRefreshTimerRef.current = null;
   };
 
+  const clearDataChannelRecoveryTimer = (kind: RecoverableChannelKind) => {
+    const timer = dataChannelRecoveryTimerRef.current[kind];
+    if (timer !== null) window.clearTimeout(timer);
+    dataChannelRecoveryTimerRef.current[kind] = null;
+  };
+
+  const resetDataChannelRecoveryState = () => {
+    clearDataChannelRecoveryTimer("control");
+    clearDataChannelRecoveryTimer("pointer");
+    dataChannelRecoveryAttemptRef.current = { control: 0, pointer: 0 };
+  };
+
   const scheduleHostWaitRefresh = (expiresInMs: unknown) => {
     clearHostWaitRefreshTimer();
     const delay = hostWaitRefreshDelayMs(expiresInMs);
@@ -321,6 +347,7 @@ function App() {
       clearIceRestartWatchdog();
       clearSignalReconnectTimer();
       clearHostWaitRefreshTimer();
+      resetDataChannelRecoveryState();
       clearRuntimeControllerSession();
     };
   }, []);
@@ -617,12 +644,144 @@ function App() {
     }
   };
 
+  const scheduleDataChannelRecovery = (
+    pc: RTCPeerConnection,
+    kind: RecoverableChannelKind,
+    channel: RTCDataChannel,
+  ) => {
+    const currentChannel = kind === "control" ? controlRef.current : pointerRef.current;
+    if (!shouldScheduleDataChannelRecovery({
+      manualDisconnect: manualDisconnectRef.current,
+      currentPeer: pcRef.current === pc,
+      peerState: pc.connectionState,
+      channelCurrent: currentChannel === channel,
+      channelState: channel.readyState,
+      replacementScheduled: dataChannelRecoveryTimerRef.current[kind] !== null,
+    })) return;
+
+    const attempt = dataChannelRecoveryAttemptRef.current[kind];
+    dataChannelRecoveryTimerRef.current[kind] = window.setTimeout(() => {
+      dataChannelRecoveryTimerRef.current[kind] = null;
+      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) ||
+          pc.connectionState !== "connected") {
+        return;
+      }
+      const activeChannel = kind === "control" ? controlRef.current : pointerRef.current;
+      if (activeChannel !== channel || channel.readyState !== "closed") return;
+
+      dataChannelRecoveryAttemptRef.current = {
+        ...dataChannelRecoveryAttemptRef.current,
+        [kind]: attempt + 1,
+      };
+      try {
+        createRecoverableDataChannel(pc, kind);
+      } catch (error) {
+        console.debug(`DeskLink ${kind} DataChannel replacement failed`, error);
+        scheduleDataChannelRecovery(pc, kind, channel);
+      }
+    }, dataChannelRecoveryDelayMs(attempt));
+  };
+
+  const attachControlChannel = (pc: RTCPeerConnection, control: RTCDataChannel) => {
+    controlRef.current = control;
+    control.onopen = () => {
+      if (!isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
+        return;
+      }
+      clearDataChannelRecoveryTimer("control");
+      dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(
+        "control",
+        dataChannelRecoveryAttemptRef.current,
+      );
+      setStatus(wsRef.current?.readyState === WebSocket.OPEN
+        ? "control ready"
+        : "control ready · signaling reconnecting");
+      startTelemetry(pc);
+    };
+    control.onmessage = (event) => {
+      if (!isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) ||
+          typeof event.data !== "string") {
+        return;
+      }
+
+      const decoded = decodeControlChannelText(event.data);
+      if (decoded.kind === "host-capabilities") {
+        setHostCapabilities(decoded.capabilities);
+      } else if (decoded.kind === "invalid" && event.data.includes('"t":"host-capabilities"')) {
+        console.debug("DeskLink rejected malformed host capabilities");
+      }
+    };
+    control.onclose = () => {
+      if (controlRef.current !== control) return;
+      stopTelemetry();
+      setHostCapabilities(null);
+      if (isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) &&
+          pc.connectionState === "connected") {
+        setStatus("recovering control channel");
+      }
+      scheduleDataChannelRecovery(pc, "control", control);
+    };
+  };
+
+  const attachPointerChannel = (pc: RTCPeerConnection, pointer: RTCDataChannel) => {
+    pointer.bufferedAmountLowThreshold = POINTER_MOVE_BUFFER_BUDGET_BYTES;
+    pointerRef.current = pointer;
+    pointer.onopen = () => {
+      if (!isActiveSessionResource(pointerRef.current, pointer, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
+        return;
+      }
+      clearDataChannelRecoveryTimer("pointer");
+      dataChannelRecoveryAttemptRef.current = resetDataChannelRecoveryAttempt(
+        "pointer",
+        dataChannelRecoveryAttemptRef.current,
+      );
+      flushPendingPointerMove();
+    };
+    pointer.onbufferedamountlow = () => {
+      if (!isActiveSessionResource(pointerRef.current, pointer, manualDisconnectRef.current) ||
+          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
+        return;
+      }
+      flushPendingPointerMove();
+    };
+    pointer.onclose = () => {
+      if (pointerRef.current !== pointer) return;
+      if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
+      pointerRafRef.current = null;
+      scheduleDataChannelRecovery(pc, "pointer", pointer);
+    };
+  };
+
+  const createRecoverableDataChannel = (
+    pc: RTCPeerConnection,
+    kind: RecoverableChannelKind,
+  ) => {
+    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) ||
+        pc.connectionState === "closed") {
+      return;
+    }
+
+    if (kind === "control") {
+      attachControlChannel(pc, pc.createDataChannel("control", { ordered: true }));
+      return;
+    }
+
+    attachPointerChannel(pc, pc.createDataChannel("pointer", {
+      ordered: false,
+      maxRetransmits: 0,
+    }));
+  };
+
   const createPeer = (iceServers: RTCIceServer[]) => {
     clearHostWaitRefreshTimer();
     offerSentRef.current = false;
     negotiationPendingRef.current = false;
     pendingLocalIceRef.current = [];
     pendingRemoteIceRef.current = [];
+    resetDataChannelRecoveryState();
     setHostCapabilities(null);
 
     const pc = new RTCPeerConnection({
@@ -659,83 +818,37 @@ function App() {
           ? "control ready"
           : "control ready · signaling reconnecting");
         if (controlRef.current?.readyState === "open") startTelemetry(pc);
+        if (controlRef.current?.readyState === "closed") {
+          scheduleDataChannelRecovery(pc, "control", controlRef.current);
+        }
+        if (pointerRef.current?.readyState === "closed") {
+          scheduleDataChannelRecovery(pc, "pointer", pointerRef.current);
+        }
       } else if (state === "disconnected") {
+        clearDataChannelRecoveryTimer("control");
+        clearDataChannelRecoveryTimer("pointer");
         setStatus("reconnecting network");
         scheduleIceRestart(pc, false);
       } else if (state === "failed") {
         stopTelemetry();
+        clearDataChannelRecoveryTimer("control");
+        clearDataChannelRecoveryTimer("pointer");
         setStatus("reconnecting network");
         scheduleIceRestart(pc, true);
       } else if (state === "closed") {
         stopTelemetry();
         clearIceRestartTimer();
         clearIceRestartWatchdog();
+        clearDataChannelRecoveryTimer("control");
+        clearDataChannelRecoveryTimer("pointer");
         iceRestartInFlightRef.current = false;
       } else {
         setStatus(state);
       }
     };
 
-    const control = pc.createDataChannel("control", { ordered: true });
-    controlRef.current = control;
-    control.onopen = () => {
-      if (!isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) ||
-          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
-        return;
-      }
-      setStatus(wsRef.current?.readyState === WebSocket.OPEN
-        ? "control ready"
-        : "control ready · signaling reconnecting");
-      startTelemetry(pc);
-    };
-    control.onmessage = (event) => {
-      if (!isActiveSessionResource(controlRef.current, control, manualDisconnectRef.current) ||
-          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) ||
-          typeof event.data !== "string") {
-        return;
-      }
-
-      const decoded = decodeControlChannelText(event.data);
-      if (decoded.kind === "host-capabilities") {
-        setHostCapabilities(decoded.capabilities);
-      } else if (decoded.kind === "invalid" && event.data.includes('"t":"host-capabilities"')) {
-        console.debug("DeskLink rejected malformed host capabilities");
-      }
-    };
-    control.onclose = () => {
-      if (controlRef.current === control) {
-        stopTelemetry();
-        setHostCapabilities(null);
-      }
-    };
-
-    const pointer = pc.createDataChannel("pointer", {
-      ordered: false,
-      maxRetransmits: 0,
-    });
-    pointer.bufferedAmountLowThreshold = POINTER_MOVE_BUFFER_BUDGET_BYTES;
-    pointerRef.current = pointer;
-    pointer.onopen = () => {
-      if (!isActiveSessionResource(pointerRef.current, pointer, manualDisconnectRef.current) ||
-          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
-        return;
-      }
-      flushPendingPointerMove();
-    };
-    pointer.onbufferedamountlow = () => {
-      if (!isActiveSessionResource(pointerRef.current, pointer, manualDisconnectRef.current) ||
-          !isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) {
-        return;
-      }
-      flushPendingPointerMove();
-    };
-    pointer.onclose = () => {
-      if (pointerRef.current !== pointer) return;
-      pendingMoveRef.current = null;
-      if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
-      pointerRafRef.current = null;
-      pointerRef.current = null;
-    };
+    createRecoverableDataChannel(pc, "control");
+    createRecoverableDataChannel(pc, "pointer");
 
     return pc;
   };
@@ -1079,6 +1192,7 @@ function App() {
     clearIceRestartWatchdog();
     clearSignalReconnectTimer();
     clearHostWaitRefreshTimer();
+    resetDataChannelRecoveryState();
     iceRestartInFlightRef.current = false;
     negotiationPendingRef.current = false;
     signalReconnectAttemptRef.current = 0;
