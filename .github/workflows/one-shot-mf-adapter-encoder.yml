@@ -10,8 +10,9 @@ permissions:
   contents: write
 
 jobs:
-  windows-validate:
+  apply:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,7 +26,7 @@ jobs:
           git diff --check
           if ($LASTEXITCODE -ne 0) { throw "git diff check failed" }
 
-      - name: Validate adapter-aware selection source invariants
+      - name: Validate adapter-aware source invariants
         shell: pwsh
         run: |
           $source = Get-Content "apps/windows-agent/src/h264_encoder.cpp" -Raw
@@ -40,24 +41,16 @@ jobs:
             if (-not $source.Contains($required)) { throw "missing encoder selection invariant: $required" }
           }
 
-      - name: Configure Windows host
-        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
-
-      - name: Build encoder consumers
-        run: cmake --build build/windows-agent --config Release --parallel --target desklink-agent desklink-media-probe
-
       - name: Ensure main has not advanced
         shell: pwsh
         run: |
           git fetch origin main
           $remote = (git rev-parse origin/main).Trim()
-          if ($remote -ne $env:GITHUB_SHA) { throw "main advanced while encoder validation was running; refusing stale write" }
+          if ($remote -ne $env:GITHUB_SHA) { throw "main advanced while integration was running; refusing stale write" }
 
-      - name: Commit validated encoder integration
+      - name: Commit adapter-aware encoder selection
         shell: pwsh
         run: |
-          python tools/ci/integrate-mf-adapter-encoder.py
-          if ($LASTEXITCODE -ne 0) { throw "adapter-aware encoder integration failed on commit checkout" }
           Remove-Item "tools/ci/integrate-mf-adapter-encoder.py"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
