@@ -1,0 +1,97 @@
+name: One-shot stale controller auth failure guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-stale-auth-error-guard.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Guard stale async authorization failures
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+          old = '''      try {
+        authToken = await ensureSignalAuthToken(false);
+      } catch (error) {
+        console.debug("DeskLink controller authorization failed", error);
+        clearHostWaitRefreshTimer();
+        setStatus(error instanceof Error ? error.message : "controller authorization failed");
+        manualDisconnectRef.current = true;
+        return;
+      }
+
+      staleAfterAuthorization = !isSignalOpenScopeCurrent({
+'''
+          new = '''      try {
+        authToken = await ensureSignalAuthToken(false);
+      } catch (error) {
+        staleAfterAuthorization = !isSignalOpenScopeCurrent({
+          manualDisconnect: manualDisconnectRef.current,
+          expectedSession,
+          currentSession: sessionRef.current,
+          expectedTarget,
+          currentTarget: targetId.trim(),
+        });
+        if (staleAfterAuthorization) return;
+
+        console.debug("DeskLink controller authorization failed", error);
+        clearHostWaitRefreshTimer();
+        setStatus(error instanceof Error ? error.message : "controller authorization failed");
+        manualDisconnectRef.current = true;
+        return;
+      }
+
+      staleAfterAuthorization = !isSignalOpenScopeCurrent({
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one stale-auth guard anchor, got {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+      - name: Typecheck Web controller
+        working-directory: apps/web
+        run: npm run typecheck
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit source guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): ignore stale controller auth failures"
+          git push origin HEAD:main
