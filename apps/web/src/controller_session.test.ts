@@ -31,20 +31,21 @@ describe("controller session authentication", () => {
       .toBe("https://desklink.example/auth/controller");
   });
 
-  it("sends credentials only in the POST body and accepts a healthy short-lived token", async () => {
+  it("sends credentials only in the POST body and forwards cancellation", async () => {
     const fetchMock = vi.fn().mockResolvedValue(response(200, {
       token: "ct1.short-lived-token",
       expiresAt: 10_000,
     }));
     vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const controller = new AbortController();
 
     const session = await requestControllerSession("https://signal.example/api/v1/controller-session", {
       accountId: "controller-account",
       controllerId: "web-controller",
       targetDeviceId: "office-pc",
       accessKey: "secret-controller-key",
-    });
+    }, controller.signal);
 
     expect(session).toEqual({ token: "ct1.short-lived-token", expiresAt: 10_000 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -53,6 +54,7 @@ describe("controller session authentication", () => {
     expect(init.method).toBe("POST");
     expect(init.cache).toBe("no-store");
     expect(init.credentials).toBe("omit");
+    expect(init.signal).toBe(controller.signal);
     expect(String(init.body)).toContain("secret-controller-key");
     expect(url).not.toContain("secret-controller-key");
   });
