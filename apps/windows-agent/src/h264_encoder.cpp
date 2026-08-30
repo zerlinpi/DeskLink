@@ -92,6 +92,10 @@ HRESULT EnumerateAdapterHardwareH264Encoders(
 
 struct ActivatedEncoderCandidate {
   Microsoft::WRL::ComPtr<IMFTransform> transform;
+  Microsoft::WRL::ComPtr<IMFMediaEventGenerator> event_generator;
+  Microsoft::WRL::ComPtr<ICodecAPI> codec_api;
+  DWORD input_stream_id{0};
+  DWORD output_stream_id{0};
   std::wstring name;
   bool adapter_matched{false};
 };
@@ -116,28 +120,98 @@ std::wstring ReadActivationName(IMFActivate* activation) {
 bool TryActivateHardwareEncoderCandidates(
     IMFActivate** activations,
     UINT32 activation_count,
+    IMFDXGIDeviceManager* device_manager,
     bool adapter_matched,
     ActivatedEncoderCandidate* selected) {
-  if (!activations || activation_count == 0 || !selected) return false;
+  if (!activations || activation_count == 0 || !device_manager || !selected) return false;
 
   for (UINT32 i = 0; i < activation_count; ++i) {
     IMFActivate* activation = activations[i];
     if (!activation) continue;
 
     const std::wstring name = ReadActivationName(activation);
+    const wchar_t* source = adapter_matched ? L"capture-adapter" : L"global";
     Microsoft::WRL::ComPtr<IMFTransform> transform;
-    const HRESULT hr = activation->ActivateObject(IID_PPV_ARGS(&transform));
+    HRESULT hr = activation->ActivateObject(IID_PPV_ARGS(&transform));
     if (FAILED(hr) || !transform) {
-      std::wcerr << L"H264Encoder: "
-                 << (adapter_matched ? L"capture-adapter" : L"global")
+      std::wcerr << L"H264Encoder: " << source
                  << L" candidate activation failed"
-                 << (name.empty() ? L"" : L" for ")
-                 << name
+                 << (name.empty() ? L"" : L" for ") << name
                  << L": 0x" << std::hex << hr << L"\n";
       continue;
     }
 
+    auto reject = [&](const wchar_t* stage, HRESULT failure) {
+      std::wcerr << L"H264Encoder: " << source
+                 << L" candidate preflight failed at " << stage
+                 << (name.empty() ? L"" : L" for ") << name
+                 << L": 0x" << std::hex << failure << L"\n";
+      activation->ShutdownObject();
+    };
+
+    Microsoft::WRL::ComPtr<IMFAttributes> attributes;
+    hr = transform->GetAttributes(&attributes);
+    if (FAILED(hr) || !attributes) {
+      reject(L"GetAttributes", hr);
+      continue;
+    }
+
+    UINT32 is_async = FALSE;
+    if (SUCCEEDED(attributes->GetUINT32(MF_TRANSFORM_ASYNC, &is_async)) && is_async) {
+      hr = attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+      if (FAILED(hr)) {
+        reject(L"async unlock", hr);
+        continue;
+      }
+    }
+    attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
+
+    Microsoft::WRL::ComPtr<IMFMediaEventGenerator> event_generator;
+    hr = transform.As(&event_generator);
+    if (FAILED(hr) || !event_generator) {
+      reject(L"async event generator", FAILED(hr) ? hr : E_NOINTERFACE);
+      continue;
+    }
+
+    DWORD input_stream_id = 0;
+    DWORD output_stream_id = 0;
+    hr = transform->GetStreamIDs(1, &input_stream_id, 1, &output_stream_id);
+    if (hr == E_NOTIMPL) {
+      input_stream_id = 0;
+      output_stream_id = 0;
+      hr = S_OK;
+    }
+    if (FAILED(hr)) {
+      reject(L"GetStreamIDs", hr);
+      continue;
+    }
+
+    UINT32 d3d11_aware = FALSE;
+    hr = attributes->GetUINT32(MF_SA_D3D11_AWARE, &d3d11_aware);
+    if (FAILED(hr) || !d3d11_aware) {
+      std::wcerr << L"H264Encoder: " << source
+                 << L" candidate is not D3D11-aware; skipping zero-copy path"
+                 << (name.empty() ? L"" : L" for ") << name << L"\n";
+      activation->ShutdownObject();
+      continue;
+    }
+
+    hr = transform->ProcessMessage(
+        MFT_MESSAGE_SET_D3D_MANAGER,
+        reinterpret_cast<ULONG_PTR>(device_manager));
+    if (FAILED(hr)) {
+      reject(L"D3D manager", hr);
+      continue;
+    }
+
+    Microsoft::WRL::ComPtr<ICodecAPI> codec_api;
+    transform.As(&codec_api);
+
     selected->transform = transform;
+    selected->event_generator = event_generator;
+    selected->codec_api = codec_api;
+    selected->input_stream_id = input_stream_id;
+    selected->output_stream_id = output_stream_id;
     selected->name = name;
     selected->adapter_matched = adapter_matched;
     return true;
@@ -186,6 +260,7 @@ bool H264Encoder::Initialize(
       selected_encoder_ready = TryActivateHardwareEncoderCandidates(
           adapter_activations,
           adapter_activation_count,
+          device_manager_.Get(),
           true,
           &selected_encoder);
     }
@@ -206,6 +281,7 @@ bool H264Encoder::Initialize(
       selected_encoder_ready = TryActivateHardwareEncoderCandidates(
           global_activations,
           global_activation_count,
+          device_manager_.Get(),
           false,
           &selected_encoder);
     }
@@ -219,58 +295,13 @@ bool H264Encoder::Initialize(
   }
 
   transform_ = selected_encoder.transform;
+  event_generator_ = selected_encoder.event_generator;
+  codec_api_ = selected_encoder.codec_api;
+  input_stream_id_ = selected_encoder.input_stream_id;
+  output_stream_id_ = selected_encoder.output_stream_id;
   encoder_name_ = selected_encoder.name;
   const bool adapter_matched_encoder = selected_encoder.adapter_matched;
 
-  Microsoft::WRL::ComPtr<IMFAttributes> attributes;
-  hr = transform_->GetAttributes(&attributes);
-  if (FAILED(hr)) {
-    std::wcerr << L"H264Encoder: GetAttributes failed: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
-
-  // Hardware encoder MFTs are normally asynchronous and must be explicitly unlocked.
-  UINT32 is_async = FALSE;
-  if (SUCCEEDED(attributes->GetUINT32(MF_TRANSFORM_ASYNC, &is_async)) && is_async) {
-    hr = attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
-    if (FAILED(hr)) {
-      std::wcerr << L"H264Encoder: async unlock failed: 0x" << std::hex << hr << L"\n";
-      Reset();
-      return false;
-    }
-  }
-  attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
-
-  hr = transform_.As(&event_generator_);
-  if (FAILED(hr) || !event_generator_) {
-    std::wcerr << L"H264Encoder: selected hardware encoder has no async event generator\n";
-    Reset();
-    return false;
-  }
-
-  hr = transform_->GetStreamIDs(1, &input_stream_id_, 1, &output_stream_id_);
-  if (hr == E_NOTIMPL) {
-    input_stream_id_ = 0;
-    output_stream_id_ = 0;
-    hr = S_OK;
-  }
-  if (FAILED(hr)) {
-    std::wcerr << L"H264Encoder: GetStreamIDs failed: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
-
-  hr = transform_->ProcessMessage(
-      MFT_MESSAGE_SET_D3D_MANAGER,
-      reinterpret_cast<ULONG_PTR>(device_manager_.Get()));
-  if (FAILED(hr) && hr != E_NOTIMPL) {
-    std::wcerr << L"H264Encoder: D3D manager rejected: 0x" << std::hex << hr << L"\n";
-    Reset();
-    return false;
-  }
-
-  transform_.As(&codec_api_);
   width_ = width;
   height_ = height;
   fps_ = fps;
