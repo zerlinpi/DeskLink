@@ -1,0 +1,88 @@
+name: One-shot negotiation ownership
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-negotiation-ownership.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Prevent stale negotiation attempts from mutating active state
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '  const sendOffer = async (pc: RTCPeerConnection, iceRestart = false) => {\n    if (pcRef.current !== pc) return false;\n    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;\n',
+                  '  const sendOffer = async (pc: RTCPeerConnection, iceRestart = false) => {\n    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return false;\n    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;\n',
+              ),
+              (
+                  '    const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);\n    if (pcRef.current !== pc) return false;\n    await pc.setLocalDescription(offer);\n    if (pcRef.current !== pc || wsRef.current?.readyState !== WebSocket.OPEN) {\n      negotiationPendingRef.current = false;\n      return false;\n    }\n',
+                  '    const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);\n    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return false;\n    await pc.setLocalDescription(offer);\n    if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return false;\n    if (wsRef.current?.readyState !== WebSocket.OPEN) {\n      negotiationPendingRef.current = false;\n      return false;\n    }\n',
+              ),
+              (
+                  '      const sent = await sendOffer(pc, true);\n      if (!sent) {\n        iceRestartInFlightRef.current = false;\n        scheduleSignalReconnect();\n        return;\n      }\n',
+                  '      const sent = await sendOffer(pc, true);\n      if (!sent) {\n        if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;\n        iceRestartInFlightRef.current = false;\n        scheduleSignalReconnect();\n        return;\n      }\n',
+              ),
+              (
+                  '      iceRestartWatchdogRef.current = window.setTimeout(() => {\n        iceRestartWatchdogRef.current = null;\n        if (pcRef.current !== pc || pc.connectionState === "connected") {\n          iceRestartInFlightRef.current = false;\n          return;\n        }\n        iceRestartInFlightRef.current = false;\n        scheduleIceRestart(pc, false);\n      }, 8000);\n    } catch (error) {\n      console.debug("DeskLink ICE restart failed", error);\n      iceRestartInFlightRef.current = false;\n      scheduleIceRestart(pc, false);\n    }\n',
+                  '      iceRestartWatchdogRef.current = window.setTimeout(() => {\n        iceRestartWatchdogRef.current = null;\n        if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;\n        if (pc.connectionState === "connected") {\n          iceRestartInFlightRef.current = false;\n          return;\n        }\n        iceRestartInFlightRef.current = false;\n        scheduleIceRestart(pc, false);\n      }, 8000);\n    } catch (error) {\n      if (!isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current)) return;\n      console.debug("DeskLink ICE restart failed", error);\n      iceRestartInFlightRef.current = false;\n      scheduleIceRestart(pc, false);\n    }\n',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one negotiation ownership anchor, got {count}: {old[:120]!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Validate Web controller
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm audit --audit-level=moderate
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Commit source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): keep negotiation state scoped to active peer"
+          git fetch origin main
+          git rebase origin/main
+          pushd apps/web
+          npm audit --audit-level=moderate
+          npm run typecheck
+          npm test
+          npm run build
+          popd
+          git push origin HEAD:main
