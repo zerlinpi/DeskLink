@@ -6,7 +6,8 @@ namespace desklink {
 
 // Supported adaptive frame-rate ladder. The configured target may be any value
 // from 15..144; transitions use these stable tiers and clamp back to the exact
-// configured ceiling when it lies between two tiers.
+// configured ceiling when it lies between two tiers. DeskLink keeps 60 fps as
+// the compatibility default; 90/120/144 fps are opt-in through DESKLINK_FPS.
 uint32_t LowerFpsTier(uint32_t current, uint32_t ceiling);
 uint32_t RaiseFpsTier(uint32_t current, uint32_t ceiling);
 
