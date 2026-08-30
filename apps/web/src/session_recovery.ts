@@ -26,6 +26,10 @@ export type SignalOpenScope = {
   currentTarget: string;
 };
 
+export type SignalCallbackScope = SignalOpenScope & {
+  sourceSocketCurrent: boolean;
+};
+
 const SIGNAL_RECONNECT_BASE_MS = 500;
 const SIGNAL_RECONNECT_MAX_MS = 10_000;
 const SIGNAL_RECONNECT_EXPONENT_CAP = 5;
@@ -49,6 +53,10 @@ export function isSignalOpenScopeCurrent(scope: SignalOpenScope): boolean {
   return !scope.manualDisconnect &&
     scope.expectedSession === scope.currentSession &&
     scope.expectedTarget === scope.currentTarget;
+}
+
+export function isSignalCallbackScopeCurrent(scope: SignalCallbackScope): boolean {
+  return scope.sourceSocketCurrent && isSignalOpenScopeCurrent(scope);
 }
 
 export function shouldScheduleSignalReconnect(gate: SignalReconnectGate): boolean {

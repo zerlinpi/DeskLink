@@ -3,6 +3,7 @@ import {
   HOST_WAIT_REFRESH_MAX_MS,
   hostWaitRefreshDelayMs,
   iceRestartDelayMs,
+  isSignalCallbackScopeCurrent,
   isSignalOpenScopeCurrent,
   shouldBeginSignalOpen,
   shouldScheduleIceRestart,
@@ -57,6 +58,22 @@ describe("signal open/reconnect gates", () => {
     expect(isSignalOpenScopeCurrent({ ...current, manualDisconnect: true })).toBe(false);
     expect(isSignalOpenScopeCurrent({ ...current, currentSession: "session-b" })).toBe(false);
     expect(isSignalOpenScopeCurrent({ ...current, currentTarget: "host-b" })).toBe(false);
+  });
+
+  it("rejects async signal callbacks after their source socket is replaced", () => {
+    const current = {
+      manualDisconnect: false,
+      expectedSession: "session-a",
+      currentSession: "session-a",
+      expectedTarget: "host-a",
+      currentTarget: "host-a",
+      sourceSocketCurrent: true,
+    } as const;
+    expect(isSignalCallbackScopeCurrent(current)).toBe(true);
+    expect(isSignalCallbackScopeCurrent({ ...current, sourceSocketCurrent: false })).toBe(false);
+    expect(isSignalCallbackScopeCurrent({ ...current, currentSession: "session-b" })).toBe(false);
+    expect(isSignalCallbackScopeCurrent({ ...current, currentTarget: "host-b" })).toBe(false);
+    expect(isSignalCallbackScopeCurrent({ ...current, manualDisconnect: true })).toBe(false);
   });
 
   it("does not schedule a second reconnect while opening or while a timer/socket is active", () => {

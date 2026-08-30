@@ -7,6 +7,7 @@ import { ControllerTokenCoordinator } from "./controller_token_coordinator";
 import {
   hostWaitRefreshDelayMs,
   iceRestartDelayMs,
+  isSignalCallbackScopeCurrent,
   isSignalOpenScopeCurrent,
   shouldBeginSignalOpen,
   shouldScheduleIceRestart,
@@ -657,7 +658,19 @@ function App() {
     }
   };
 
-  const handleSignalMessage = async (event: MessageEvent) => {
+  const handleSignalMessage = async (event: MessageEvent, sourceSocket: WebSocket) => {
+    const expectedSession = sessionRef.current;
+    const expectedTarget = targetId.trim();
+    const callbackScopeCurrent = () => isSignalCallbackScopeCurrent({
+      manualDisconnect: manualDisconnectRef.current,
+      sourceSocketCurrent: wsRef.current === sourceSocket,
+      expectedSession,
+      currentSession: sessionRef.current,
+      expectedTarget,
+      currentTarget: targetId.trim(),
+    });
+    if (!callbackScopeCurrent()) return;
+
     let msg: SignalMessage;
     try {
       msg = JSON.parse(event.data);
@@ -686,15 +699,16 @@ function App() {
         const proof = await createAccessProof(
           accessCode,
           localId,
-          targetId.trim(),
-          sessionRef.current,
+          expectedTarget,
+          expectedSession,
           nonce,
         );
-        if (manualDisconnectRef.current) return;
+        if (!callbackScopeCurrent()) return;
         if (!sendSignal("auth-proof", { algorithm, proof })) {
           disconnect("host authentication signaling failed");
         }
       } catch (error) {
+        if (!callbackScopeCurrent()) return;
         console.debug("DeskLink host access proof failed", error);
         disconnect("host access authentication failed");
       }
@@ -868,7 +882,7 @@ function App() {
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
-      void handleSignalMessage(event);
+      void handleSignalMessage(event, ws);
     };
 
     ws.onopen = () => {
