@@ -25,6 +25,7 @@ export function resolveControllerSessionUrl(signalUrl: string, configuredUrl: st
 export async function requestControllerSession(
   endpoint: string,
   request: ControllerSessionRequest,
+  signal?: AbortSignal,
 ): Promise<ControllerSession> {
   const response = await fetch(endpoint, {
     method: "POST",
@@ -35,6 +36,7 @@ export async function requestControllerSession(
     body: JSON.stringify(request),
     cache: "no-store",
     credentials: "omit",
+    signal,
   });
   if (!response.ok) {
     if (response.status === 401) throw new Error("controller key rejected");
