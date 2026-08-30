@@ -830,6 +830,15 @@ function App() {
       try {
         authToken = await ensureSignalAuthToken(false);
       } catch (error) {
+        staleAfterAuthorization = !isSignalOpenScopeCurrent({
+          manualDisconnect: manualDisconnectRef.current,
+          expectedSession,
+          currentSession: sessionRef.current,
+          expectedTarget,
+          currentTarget: targetId.trim(),
+        });
+        if (staleAfterAuthorization) return;
+
         console.debug("DeskLink controller authorization failed", error);
         clearHostWaitRefreshTimer();
         setStatus(error instanceof Error ? error.message : "controller authorization failed");
