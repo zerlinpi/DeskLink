@@ -1,0 +1,123 @@
+name: Apply Input Disconnect Failsafe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-input-failsafe.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build-commit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch authoritative input cleanup
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          path = Path("apps/windows-agent/src/webrtc_session.cpp")
+          text = path.read_text(encoding="utf-8")
+
+          old = '''  peer->onStateChange([](rtc::PeerConnection::State state) {
+            std::cout << "WebRTC state: " << state << "\\n";
+          });
+          peer->onIceStateChange([](rtc::PeerConnection::IceState state) {
+            std::cout << "ICE state: " << state << "\\n";
+          });'''
+          new = '''  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
+          peer->onStateChange([this, weak_peer](rtc::PeerConnection::State state) {
+            auto owner = weak_peer.lock();
+            if (!owner) return;
+            {
+              std::scoped_lock lock(mutex_);
+              if (peer_ != owner) return;
+            }
+
+            if (state == rtc::PeerConnection::State::Disconnected ||
+                state == rtc::PeerConnection::State::Failed ||
+                state == rtc::PeerConnection::State::Closed) {
+              // Do not wait for DataChannel close callbacks: during Wi-Fi/IP/NAT
+              // transitions SCTP can remain half-open long enough to leave a
+              // modifier or mouse button logically pressed on Windows.
+              input_.ReleaseAll();
+            }
+            std::cout << "WebRTC state: " << state << "\\n";
+          });
+          peer->onIceStateChange([](rtc::PeerConnection::IceState state) {
+            std::cout << "ICE state: " << state << "\\n";
+          });'''
+          if text.count(old) != 1:
+              raise SystemExit(f"state callback anchor mismatch: {text.count(old)}")
+          text = text.replace(old, new)
+
+          old = '''  const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
+          peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {'''
+          new = '''  peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {'''
+          if text.count(old) != 1:
+              raise SystemExit(f"weak peer anchor mismatch: {text.count(old)}")
+          text = text.replace(old, new)
+
+          old = '''  channel->onClosed([this, label, weak_channel]() {
+            if (label == "control") {
+              input_.ReleaseAll();
+              auto closed = weak_channel.lock();
+              std::scoped_lock lock(mutex_);
+              if (!closed || control_ == closed) control_.reset();
+            }
+            std::cout << label << " DataChannel closed\\n";
+          });'''
+          new = '''  channel->onClosed([this, label, weak_channel]() {
+            if (label == "control" || label == "pointer") {
+              // Both channels can carry user input in current/future controllers.
+              // Closing either one is a loss-of-authority boundary: release any
+              // injected state immediately rather than risking a stuck key/button.
+              input_.ReleaseAll();
+            }
+            if (label == "control") {
+              auto closed = weak_channel.lock();
+              std::scoped_lock lock(mutex_);
+              if (!closed || control_ == closed) control_.reset();
+            }
+            std::cout << label << " DataChannel closed\\n";
+          });'''
+          if text.count(old) != 1:
+              raise SystemExit(f"channel close anchor mismatch: {text.count(old)}")
+          text = text.replace(old, new)
+
+          path.write_text(text, encoding="utf-8", newline="\n")
+          '@ | python -
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+
+      - name: Build Windows host
+        run: cmake --build build/windows-agent --config Release --parallel
+
+      - name: Run native smokes
+        shell: pwsh
+        run: |
+          & "build/windows-agent/Release/desklink-video-policy-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "video policy smoke failed" }
+          & "build/windows-agent/Release/desklink-active-session-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "active session smoke failed" }
+          & "build/windows-agent/Release/desklink-h264-annexb-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "H264 smoke failed" }
+
+      - name: Commit validated failsafe to main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/windows-agent/src/webrtc_session.cpp
+          if (git diff --cached --quiet) { throw "Input failsafe patch produced no changes" }
+          git commit -m "fix(windows): release injected input on transport loss"
+          git pull --rebase origin main
+          git push origin HEAD:main
