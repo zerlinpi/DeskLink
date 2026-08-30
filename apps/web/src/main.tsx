@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { accessProofAlgorithm, createAccessProof } from "./access_proof";
+import { AsyncAttemptCoordinator } from "./async_attempt";
 import { resolveControllerSessionUrl } from "./controller_session";
 import { createControllerSessionTokenRequest } from "./controller_token_request";
 import { ControllerTokenCoordinator } from "./controller_token_coordinator";
@@ -189,7 +190,7 @@ function App() {
   const signalOpenInFlightRef = useRef(false);
   const hostWaitRefreshTimerRef = useRef<number | null>(null);
   const manualDisconnectRef = useRef(false);
-  const initialPeerStartingRef = useRef(false);
+  const initialPeerAttemptRef = useRef(new AsyncAttemptCoordinator());
   const controllerTokenCoordinatorRef = useRef(new ControllerTokenCoordinator());
 
   const runtimeControllerAuthEnabled = Boolean(CONTROLLER_SESSION_URL);
@@ -632,14 +633,30 @@ function App() {
     return pc;
   };
 
-  const startInitialPeer = async () => {
-    if (initialPeerStartingRef.current || pcRef.current || manualDisconnectRef.current) return;
-    initialPeerStartingRef.current = true;
+  const startInitialPeer = async (sourceSocket: WebSocket) => {
+    if (pcRef.current || manualDisconnectRef.current) return;
+    const attempt = initialPeerAttemptRef.current.begin("initial-peer");
+    if (!attempt) return;
+
+    const expectedSession = sessionRef.current;
+    const expectedTarget = targetId.trim();
+    const startupScopeCurrent = () =>
+      initialPeerAttemptRef.current.isCurrent(attempt) &&
+      isSignalCallbackScopeCurrent({
+        manualDisconnect: manualDisconnectRef.current,
+        sourceSocketCurrent: wsRef.current === sourceSocket,
+        expectedSession,
+        currentSession: sessionRef.current,
+        expectedTarget,
+        currentTarget: targetId.trim(),
+      });
+
     setStatus("negotiating WebRTC");
     try {
       const authToken = await ensureSignalAuthToken(false);
+      if (!startupScopeCurrent()) return;
       const iceServers = await resolveIceServers(localId, authToken);
-      if (manualDisconnectRef.current || pcRef.current) return;
+      if (!startupScopeCurrent() || pcRef.current) return;
 
       const pc = createPeer(iceServers);
       const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
@@ -649,12 +666,15 @@ function App() {
       );
       if (h264Codecs?.length) transceiver.setCodecPreferences(h264Codecs);
 
-      if (!await sendOffer(pc, false)) setStatus("signal error");
+      const offerSent = await sendOffer(pc, false);
+      if (!startupScopeCurrent()) return;
+      if (!offerSent) setStatus("signal error");
     } catch (error) {
+      if (!startupScopeCurrent()) return;
       console.debug("DeskLink initial connection setup failed", error);
       disconnect(TURN_RUNTIME_REQUIRED ? "TURN credential error" : "signal error");
     } finally {
-      initialPeerStartingRef.current = false;
+      initialPeerAttemptRef.current.finish(attempt);
     }
   };
 
@@ -717,7 +737,7 @@ function App() {
 
     if (msg.type === "auth-accepted") {
       clearHostWaitRefreshTimer();
-      await startInitialPeer();
+      await startInitialPeer(sourceSocket);
       return;
     }
 
@@ -951,7 +971,7 @@ function App() {
     iceRestartInFlightRef.current = false;
     negotiationPendingRef.current = false;
     signalReconnectAttemptRef.current = 0;
-    initialPeerStartingRef.current = false;
+    initialPeerAttemptRef.current.invalidate();
 
     if (pointerRafRef.current !== null) cancelAnimationFrame(pointerRafRef.current);
     pointerRafRef.current = null;
