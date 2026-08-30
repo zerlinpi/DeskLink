@@ -18,12 +18,17 @@ services:
       DESKLINK_TURN_AUTH_SECRET: ${DESKLINK_TURN_AUTH_SECRET}
       DESKLINK_TURN_CREDENTIAL_TTL_SECONDS: ${DESKLINK_TURN_CREDENTIAL_TTL_SECONDS:-43200}
       DESKLINK_REVOKED_DEVICE_IDS_FILE: /run/desklink-secrets/revoked-devices.txt
+      DESKLINK_REQUIRE_AUTH_READY: "1"
+      DESKLINK_REQUIRE_TURN_READY: "1"
     volumes:
       - ./secrets:/run/desklink-secrets:ro
     expose:
       - "8080"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      # /healthz only proves the Go process is alive. /readyz additionally reads
+      # credential registries, revocation state and required production secrets,
+      # preventing a broken auth mount from being advertised as healthy.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
       interval: 30s
       timeout: 3s
       start_period: 5s
