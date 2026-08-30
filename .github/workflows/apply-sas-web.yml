@@ -1,0 +1,222 @@
+name: Apply SAS Web Workbench
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-sas-web.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add Ctrl Alt Del workbench action
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('apps/web/src/remote_workbench.ts')
+          text = p.read_text(encoding='utf-8')
+
+          def one(old, new):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected 1 match, found {count}: {old[:120]!r}')
+              text = text.replace(old, new)
+
+          one(
+          '''let statusText: HTMLSpanElement | null = null;
+          let toolbar: HTMLDivElement | null = null;''',
+          '''let statusText: HTMLSpanElement | null = null;
+          let toolbar: HTMLDivElement | null = null;
+          let controlChannel: RTCDataChannel | null = null;
+          let secureAttentionButton: HTMLButtonElement | null = null;
+          let secureAttentionRequestId = "";
+          let secureAttentionTimer: number | null = null;
+          let secureAttentionResetTimer: number | null = null;''')
+
+          one(
+          '''function setText(element: HTMLElement | null, value: string) {
+            if (element && element.textContent !== value) element.textContent = value;
+          }
+
+          function makeButton''',
+          '''function setText(element: HTMLElement | null, value: string) {
+            if (element && element.textContent !== value) element.textContent = value;
+          }
+
+          function refreshSecureAttentionButton() {
+            if (!secureAttentionButton) return;
+            secureAttentionButton.disabled = !sessionActive() ||
+              controlChannel?.readyState !== "open" || Boolean(secureAttentionRequestId);
+          }
+
+          function resetSecureAttentionLabel(delayMs = 0) {
+            if (secureAttentionResetTimer !== null) window.clearTimeout(secureAttentionResetTimer);
+            secureAttentionResetTimer = null;
+            const reset = () => {
+              secureAttentionResetTimer = null;
+              setText(secureAttentionButton, "Ctrl+Alt+Del");
+              refreshSecureAttentionButton();
+            };
+            if (delayMs > 0) {
+              secureAttentionResetTimer = window.setTimeout(reset, delayMs);
+            } else {
+              reset();
+            }
+          }
+
+          function finishSecureAttention(label: string) {
+            secureAttentionRequestId = "";
+            if (secureAttentionTimer !== null) window.clearTimeout(secureAttentionTimer);
+            secureAttentionTimer = null;
+            setText(secureAttentionButton, label);
+            refreshSecureAttentionButton();
+            resetSecureAttentionLabel(2200);
+          }
+
+          function clearSecureAttentionState() {
+            secureAttentionRequestId = "";
+            if (secureAttentionTimer !== null) window.clearTimeout(secureAttentionTimer);
+            if (secureAttentionResetTimer !== null) window.clearTimeout(secureAttentionResetTimer);
+            secureAttentionTimer = null;
+            secureAttentionResetTimer = null;
+            resetSecureAttentionLabel();
+          }
+
+          function requestSecureAttention() {
+            if (!sessionActive() || !controlChannel || controlChannel.readyState !== "open" || secureAttentionRequestId) {
+              return;
+            }
+            if (secureAttentionResetTimer !== null) window.clearTimeout(secureAttentionResetTimer);
+            secureAttentionResetTimer = null;
+            const requestId = `sas-${crypto.randomUUID()}`;
+            secureAttentionRequestId = requestId;
+            setText(secureAttentionButton, "发送中…");
+            refreshSecureAttentionButton();
+            try {
+              controlChannel.send(JSON.stringify({
+                t: "system-operation",
+                operation: "secure-attention-sequence",
+                requestId,
+              }));
+            } catch (error) {
+              console.debug("DeskLink Secure Attention request failed", error);
+              finishSecureAttention("发送失败");
+              return;
+            }
+            secureAttentionTimer = window.setTimeout(() => {
+              if (secureAttentionRequestId === requestId) finishSecureAttention("无响应");
+            }, 6000);
+          }
+
+          function makeButton''')
+
+          one(
+          '''    fullscreenButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='fullscreen']");
+              return existing;''',
+          '''    fullscreenButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='fullscreen']");
+              secureAttentionButton = existing.querySelector<HTMLButtonElement>("[data-workbench-action='secure-attention']");
+              refreshSecureAttentionButton();
+              return existing;''')
+
+          one(
+          '''  fullscreenButton = makeButton("全屏");
+            fullscreenButton.dataset.workbenchAction = "fullscreen";''',
+          '''  secureAttentionButton = makeButton("Ctrl+Alt+Del");
+            secureAttentionButton.dataset.workbenchAction = "secure-attention";
+            secureAttentionButton.title = "请求被控端 Windows Service 发送安全注意序列；需 Windows 本地策略允许 Services";
+            secureAttentionButton.setAttribute("aria-label", "向远程 Windows 发送 Ctrl+Alt+Del");
+            secureAttentionButton.addEventListener("click", () => {
+              requestSecureAttention();
+              revealToolbar();
+            });
+            refreshSecureAttentionButton();
+
+            fullscreenButton = makeButton("全屏");
+            fullscreenButton.dataset.workbenchAction = "fullscreen";''')
+
+          one(
+              '  actions.append(displayButton, networkButton, focusButton, fullscreenButton, disconnectButton);',
+              '  actions.append(displayButton, networkButton, focusButton, secureAttentionButton, fullscreenButton, disconnectButton);')
+
+          one(
+          '''  if (!active) {
+              networkExpanded = false;''',
+          '''  if (!active) {
+              clearSecureAttentionState();
+              networkExpanded = false;''')
+
+          one(
+          '''  setText(networkButton, compactNetworkLabel());
+            applyViewMode(stage);''',
+          '''  setText(networkButton, compactNetworkLabel());
+            refreshSecureAttentionButton();
+            applyViewMode(stage);''')
+
+          one(
+          '''  document.addEventListener("fullscreenchange", syncFullscreenButton);
+            window.addEventListener("keydown", (event) => {''',
+          '''  document.addEventListener("fullscreenchange", syncFullscreenButton);
+            window.addEventListener("desklink:control-channel", (event) => {
+              const detail = (event as CustomEvent<{ channel: RTCDataChannel }>).detail;
+              controlChannel = detail?.channel ?? null;
+              controlChannel?.addEventListener("open", refreshSecureAttentionButton, { once: true });
+              refreshSecureAttentionButton();
+            });
+            window.addEventListener("desklink:control-channel-closed", (event) => {
+              const detail = (event as CustomEvent<{ channel: RTCDataChannel }>).detail;
+              if (!detail?.channel || detail.channel === controlChannel) controlChannel = null;
+              if (secureAttentionRequestId) {
+                finishSecureAttention("连接已断开");
+              } else {
+                refreshSecureAttentionButton();
+              }
+            });
+            window.addEventListener("desklink:control-message", (event) => {
+              const detail = (event as CustomEvent<{ message: Record<string, unknown> }>).detail;
+              const message = detail?.message;
+              if (!message || message.t !== "system-operation-result" ||
+                  message.operation !== "secure-attention-sequence" ||
+                  message.requestId !== secureAttentionRequestId) return;
+              if (message.ok === true) {
+                finishSecureAttention("已发送");
+              } else {
+                console.debug("DeskLink Secure Attention unavailable", message.error ?? "unknown error");
+                finishSecureAttention("当前不可用");
+              }
+            });
+            window.addEventListener("keydown", (event) => {''')
+
+          p.write_text(text, encoding='utf-8', newline='\n')
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Build browser controller
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit validated workbench action
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-sas-web.yml
+          git add apps/web/src/remote_workbench.ts
+          git commit -m "feat(web): add Ctrl+Alt+Del remote system action"
+          git pull --rebase origin main
+          git push origin HEAD:main
