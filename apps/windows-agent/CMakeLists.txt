@@ -105,6 +105,9 @@ add_executable(desklink-agent
   src/h264_annexb.h
   src/h264_encoder.cpp
   src/h264_encoder.h
+  src/host_capabilities.cpp
+  src/host_capabilities.h
+  src/host_capabilities_publisher.cpp
   src/input_injector.cpp
   src/input_injector.h
   src/performance_tuning.cpp
@@ -314,3 +317,20 @@ add_executable(desklink-secure-attention-smoke
 target_compile_definitions(desklink-secure-attention-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-secure-attention-smoke PRIVATE /W4 /permissive-)
 target_link_libraries(desklink-secure-attention-smoke PRIVATE advapi32)
+
+add_executable(desklink-host-capabilities-smoke
+  src/host_capabilities_smoke.cpp
+  src/host_capabilities.cpp
+  src/host_capabilities.h
+)
+target_compile_definitions(
+  desklink-host-capabilities-smoke
+  PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    DESKLINK_HOST_CAPABILITIES_FIXTURE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../apps/web/src/fixtures/host-capabilities-v1.windows.json"
+)
+target_compile_options(desklink-host-capabilities-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(desklink-host-capabilities-smoke PRIVATE nlohmann_json::nlohmann_json)
