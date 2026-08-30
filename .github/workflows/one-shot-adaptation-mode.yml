@@ -1,0 +1,88 @@
+name: One-shot desktop-game adaptation integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-adaptation-mode.yml
+
+permissions:
+  contents: write
+
+jobs:
+  web-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Apply adaptation-mode integration
+        run: |
+          python tools/ci/integrate-adaptation-mode.py
+          git diff --check
+      - name: Validate Web controller
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm audit --audit-level=moderate
+          npm run typecheck
+          npm test
+          npm run build
+
+  windows-validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply adaptation-mode integration
+        shell: pwsh
+        run: |
+          python tools/ci/integrate-adaptation-mode.py
+          if ($LASTEXITCODE -ne 0) { throw "adaptation integration failed" }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw "git diff check failed" }
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+      - name: Build Windows host and policy smoke
+        run: cmake --build build/windows-agent --config Release --parallel
+      - name: Validate desktop/game adaptation policy
+        shell: pwsh
+        run: |
+          & "build/windows-agent/Release/desklink-video-policy-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "video policy smoke failed with exit code $LASTEXITCODE" }
+
+  commit:
+    needs: [web-validate, windows-validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure main has not advanced
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA" || {
+            echo "main advanced while adaptation validation was running; refusing stale write" >&2
+            exit 1
+          }
+      - name: Apply validated integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/ci/integrate-adaptation-mode.py
+          rm tools/ci/integrate-adaptation-mode.py
+          git diff --check
+      - name: Commit validated source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md apps/web apps/windows-agent tools/ci/integrate-adaptation-mode.py
+          git diff --cached --check
+          git commit -m "feat: add desktop and game adaptation modes"
+          git push origin HEAD:main
