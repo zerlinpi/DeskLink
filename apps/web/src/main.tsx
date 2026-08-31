@@ -18,6 +18,7 @@ import { resolveControlRttAck, shouldIssueControlRttProbe, type PendingControlRt
 import {
   LAN_FIRST_RELAY_FALLBACK_MS,
   directFirstIceServers,
+  shouldCommitLanFirstRelayEscalation,
   shouldEscalateLanFirstToRelay,
   shouldUseLanFirstIce,
 } from "./ice_startup_policy";
@@ -668,7 +669,15 @@ function App() {
       if (USE_LAN_FIRST_ICE && !relayEscalatedRef.current) {
         const authToken = await ensureSignalAuthToken(false);
         const iceServers = await resolveIceServers(localId, authToken);
-        if (pcRef.current !== pc || manualDisconnectRef.current) return;
+        if (!shouldCommitLanFirstRelayEscalation({
+          manualDisconnect: manualDisconnectRef.current,
+          currentPeer: pcRef.current === pc,
+          connectionState: pc.connectionState,
+          relayEscalated: relayEscalatedRef.current,
+        })) {
+          iceRestartInFlightRef.current = false;
+          return;
+        }
         pc.setConfiguration({
           ...pc.getConfiguration(),
           iceServers,
