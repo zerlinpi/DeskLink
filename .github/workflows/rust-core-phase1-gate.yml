@@ -1,0 +1,277 @@
+name: Rust Core Phase 1 Gate
+
+on:
+  push:
+    branches:
+      - prototype/rust-core
+    paths:
+      - .github/workflows/rust-core-phase1-gate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal --component rustfmt,clippy
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Strict clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: All Rust tests
+        run: cargo test --locked --workspace --all-targets
+      - name: Release property test - 10,000 cases
+        env:
+          PROPTEST_CASES: "10000"
+        run: cargo test --locked --release -p desklink-session --test property_stress stale_generations_never_replace_authority -- --exact
+      - name: Release million-event stress
+        shell: bash
+        run: |
+          set -euo pipefail
+          TIMEFORMAT='desklink_release_stress_elapsed=%3R seconds'
+          time cargo test --locked --release -p desklink-session --test property_stress million_event_stale_race_stress_preserves_authority -- --exact
+      - name: Session benchmark
+        run: cargo bench --locked -p desklink-session --bench session_bench -- --warm-up-time 1 --measurement-time 2
+      - name: FFI benchmark
+        run: cargo bench --locked -p desklink-core-ffi --bench ffi_bench -- --warm-up-time 1 --measurement-time 2
+      - name: Release FFI build
+        run: cargo build --locked -p desklink-core-ffi --release
+
+  repository-and-deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate repository version invariants
+        run: python tools/version/check-version.py
+      - name: Install pinned protocol schema validator
+        run: python -m pip install --disable-pip-version-check -r tools/protocol/requirements.txt
+      - name: Validate HostCapabilitiesV1 contract fixture
+        run: python tools/protocol/validate-host-capabilities.py
+      - name: Validate network and production shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n tools/network/shape-linux.sh tools/network/reset-linux.sh tools/network/check-turn-tls.sh
+          sh -n infra/production/bootstrap.sh
+      - name: Validate development and production Compose configs
+        shell: bash
+        env:
+          DESKLINK_SIGNAL_AUTH_SECRET: ci-signal-secret
+          DESKLINK_TURN_AUTH_SECRET: ci-turn-secret
+          DESKLINK_DOMAIN: localhost
+          DESKLINK_PUBLIC_IP: 127.0.0.1
+          DESKLINK_TURN_HOST: localhost
+        run: |
+          set -euo pipefail
+          docker compose -f infra/docker-compose.yml config >/dev/null
+          docker compose -f infra/production/docker-compose.yml config >/dev/null
+      - name: Bootstrap isolated production deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./infra/production/bootstrap.sh localhost 127.0.0.1 ci-windows-host ci-controller >/dev/null
+      - name: Build and start production Signal Web TURN
+        working-directory: infra/production
+        shell: bash
+        run: docker compose up -d --build signal web turn
+      - name: Verify production deployment health
+        working-directory: infra/production
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if docker compose exec -T signal wget -q -O /dev/null http://127.0.0.1:8080/readyz; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose ps
+              docker compose logs signal
+              exit 1
+            fi
+            sleep 2
+          done
+          docker compose exec -T web wget -q -O /dev/null http://127.0.0.1/
+          docker compose ps --status running --services | grep -qx signal
+          docker compose ps --status running --services | grep -qx web
+          docker compose ps --status running --services | grep -qx turn
+          timeout 3 bash -c '</dev/tcp/127.0.0.1/3478'
+      - name: Production deployment logs on failure
+        if: failure()
+        working-directory: infra/production
+        run: docker compose logs --no-color
+      - name: Stop production deployment
+        if: always()
+        working-directory: infra/production
+        run: docker compose down -v --remove-orphans
+
+  signal:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/signal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Download dependencies
+        run: go mod download
+      - name: Signal tests
+        run: go test ./...
+      - name: Build with project version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < ../../VERSION)"
+          go build -ldflags="-X main.buildVersion=$version" ./...
+      - name: Validate legacy device credential provisioning tool
+        env:
+          DESKLINK_DEVICE_AUTH_SECRET: ci-device-auth-secret
+        run: go run ../../tools/auth/mint-device-credential.go ci-windows-host >/dev/null
+      - name: Validate independent device credential rotation tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="$(mktemp -u)/devices.json"
+          first="$(go run ../../tools/auth/rotate-device-registry-credential.go "$registry" ci-windows-host)"
+          second="$(go run ../../tools/auth/rotate-device-registry-credential.go "$registry" ci-windows-host)"
+          test -n "$first"
+          test -n "$second"
+          test "$first" != "$second"
+          grep -q '"version": 1' "$registry"
+          grep -q '"ci-windows-host"' "$registry"
+          if grep -q "$first" "$registry"; then
+            echo "registry must contain only the credential hash, not plaintext" >&2
+            exit 1
+          fi
+      - name: Validate controller registry provisioning tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="$(mktemp -u)/controllers.json"
+          first="$(go run ../../tools/auth/set-controller-registry-key.go "$registry" ci-controller ci-windows-host ci-laptop)"
+          second="$(go run ../../tools/auth/set-controller-registry-key.go "$registry" ci-controller ci-windows-host)"
+          test -n "$first"
+          test -n "$second"
+          test "$first" != "$second"
+          grep -q '"version": 1' "$registry"
+          grep -q '"ci-controller"' "$registry"
+          grep -q '"ci-windows-host"' "$registry"
+          if grep -q "$second" "$registry"; then
+            echo "controller registry must contain only the key hash, not plaintext" >&2
+            exit 1
+          fi
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Validate Access Code proof vector
+        run: node ../../tools/auth/verify-access-proof-vector.mjs
+      - name: Install locked Web dependencies
+        run: npm ci
+      - name: Audit Web dependencies
+        run: npm audit --audit-level=moderate
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate packaging PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($script in @(
+            "packaging/windows/install-service.ps1",
+            "packaging/windows/uninstall-service.ps1",
+            "packaging/windows/sign-binaries.ps1",
+            "tools/windows/run-native-smokes.ps1"
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $messages = ($errors | ForEach-Object { $_.Message }) -join "; "
+              throw "$script has PowerShell syntax errors: $messages"
+            }
+          }
+      - name: Configure
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+      - name: Validate static OpenSSL selection
+        shell: pwsh
+        run: |
+          $cache = Get-Content "build/windows-agent/CMakeCache.txt" -Raw
+          if ($cache -match '(?im)^OPENSSL_(CRYPTO|SSL)_LIBRARY[^=]*=.*[\\/]MDd?[\\/]') {
+            throw "CMake selected an OpenSSL /MD library instead of /MT/static"
+          }
+      - name: Build Release
+        run: cmake --build build/windows-agent --config Release --parallel
+      - name: Validate portable Windows dependencies
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe was not found" }
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $install) { throw "Visual C++ build tools installation was not found" }
+          $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if (-not $dumpbin) { throw "dumpbin.exe was not found" }
+
+          $forbidden = '(?im)^\s*(VCRUNTIME[^\s]*\.dll|MSVCP[^\s]*\.dll|libcrypto[^\s]*\.dll|libssl[^\s]*\.dll|datachannel[^\s]*\.dll)\s*$'
+          $binaries = @(
+            "build/windows-agent/Release/DeskLink.exe",
+            "build/windows-agent/Release/desklink-agent.exe",
+            "build/windows-agent/Release/desklink-service.exe",
+            "build/windows-agent/Release/desklink-media-probe.exe"
+          )
+          foreach ($binary in $binaries) {
+            if (-not (Test-Path $binary)) { throw "missing artifact binary: $binary" }
+            $dependencies = & $dumpbin.FullName /DEPENDENTS $binary
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $binary" }
+            $dependencyText = $dependencies -join "`n"
+            if ($dependencyText -match $forbidden) {
+              throw "$binary has a forbidden external runtime dependency"
+            }
+          }
+      - name: Run every discovered native smoke
+        shell: pwsh
+        run: ./tools/windows/run-native-smokes.ps1 -BuildDirectory "build/windows-agent" -Configuration "Release"
+      - name: Validate DPAPI protected secrets
+        shell: pwsh
+        run: |
+          $service = Resolve-Path "build/windows-agent/Release/desklink-service.exe"
+          "dc1.CI_DPAPI_LEGACY_SMOKE_0123456789" | & $service --store-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI legacy dc1 store failed with exit code $LASTEXITCODE" }
+          "dc2.CI_DPAPI_REGISTRY_SMOKE_0123456789" | & $service --store-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI registry dc2 store failed with exit code $LASTEXITCODE" }
+          "CI-Access-Code-Smoke-0123456789!" | & $service --store-access-code
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI access-code store failed with exit code $LASTEXITCODE" }
+          & $service --clear-access-code
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI access-code cleanup failed with exit code $LASTEXITCODE" }
+          & $service --clear-device-credential
+          if ($LASTEXITCODE -ne 0) { throw "DPAPI device credential cleanup failed with exit code $LASTEXITCODE" }
