@@ -9,7 +9,9 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - crates/**
+      - tools/rust-core/**
       - .github/workflows/rust-core-prototype.yml
+      - .github/workflows/rust-core-benchmark.yml
   pull_request:
     branches:
       - prototype/rust-core
@@ -18,7 +20,9 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - crates/**
+      - tools/rust-core/**
       - .github/workflows/rust-core-prototype.yml
+      - .github/workflows/rust-core-benchmark.yml
 
 permissions:
   contents: read
