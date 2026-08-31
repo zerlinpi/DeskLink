@@ -34,9 +34,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "control RTT source patch failed" }
           git diff --check
           if ($LASTEXITCODE -ne 0) { throw "patched source failed git diff --check" }
-          git diff --quiet -- apps/windows-agent/src/webrtc_session.cpp
-          if ($LASTEXITCODE -eq 0) { throw "control RTT source patch produced no change" }
-          if ($LASTEXITCODE -ne 1) { throw "unable to verify control RTT source diff" }
+          $changed = git diff --name-only -- apps/windows-agent/src/webrtc_session.cpp
+          if ($LASTEXITCODE -ne 0 -or -not $changed) { throw "control RTT source patch produced no change" }
           $ack = Select-String -Path apps/windows-agent/src/webrtc_session.cpp -Pattern 'control-rtt-ack' -SimpleMatch
           if (-not $ack) { throw "control RTT acknowledgement was not present after patch" }
 
@@ -53,9 +52,8 @@ jobs:
           git add apps/windows-agent/src/webrtc_session.cpp
           git diff --cached --check
           if ($LASTEXITCODE -ne 0) { throw "staged control RTT patch failed git diff --check" }
-          git diff --cached --quiet
-          if ($LASTEXITCODE -eq 0) { throw "validated control RTT patch was not staged" }
-          if ($LASTEXITCODE -ne 1) { throw "unable to verify staged control RTT diff" }
+          $staged = git diff --cached --name-only -- apps/windows-agent/src/webrtc_session.cpp
+          if ($LASTEXITCODE -ne 0 -or -not $staged) { throw "validated control RTT patch was not staged" }
           git commit -m "feat(windows): echo control channel RTT probes"
           if ($LASTEXITCODE -ne 0) { throw "control RTT commit failed" }
           git push origin HEAD:main
