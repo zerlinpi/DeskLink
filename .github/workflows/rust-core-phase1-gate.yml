@@ -76,7 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./infra/production/bootstrap.sh localhost 127.0.0.1 ci-windows-host ci-controller >/dev/null
+          sh ./infra/production/bootstrap.sh localhost 127.0.0.1 ci-windows-host ci-controller >/dev/null
       - name: Build and start production Signal Web TURN
         working-directory: infra/production
         shell: bash
