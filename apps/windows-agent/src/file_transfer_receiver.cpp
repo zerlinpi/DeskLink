@@ -1,5 +1,6 @@
 #include "file_transfer_receiver.h"
 #include "file_transfer_chunk_policy.h"
+#include "file_transfer_download_policy.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -585,13 +586,13 @@ struct FileTransferReceiver::Impl {
     HANDLE file = CreateFileW(
         source.c_str(),
         GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        kDownloadFileShareMode,
         nullptr,
         OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
         nullptr);
     if (file == INVALID_HANDLE_VALUE) {
-      SendDownloadError(id, "open-file-failed");
+      SendDownloadError(id, DownloadOpenErrorReason(GetLastError()));
       return;
     }
 

@@ -100,6 +100,7 @@ add_executable(desklink-agent
   src/file_transfer_receiver.cpp
   src/file_transfer_receiver.h
   src/file_transfer_chunk_policy.h
+  src/file_transfer_download_policy.h
   src/gpu_color_converter.cpp
   src/gpu_color_converter.h
   src/h264_annexb.cpp
@@ -311,6 +312,12 @@ add_executable(desklink-input-channel-authority-smoke
 target_compile_definitions(desklink-input-channel-authority-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-input-channel-authority-smoke PRIVATE /W4 /permissive-)
 
+add_executable(desklink-file-transfer-download-policy-smoke
+  src/file_transfer_download_policy_smoke.cpp
+  src/file_transfer_download_policy.h
+)
+target_compile_definitions(desklink-file-transfer-download-policy-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-file-transfer-download-policy-smoke PRIVATE /W4 /permissive-)
 add_executable(desklink-file-transfer-chunk-policy-smoke
   src/file_transfer_chunk_policy_smoke.cpp
   src/file_transfer_chunk_policy.h
