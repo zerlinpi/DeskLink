@@ -9,6 +9,7 @@ desklink-protocol = { path = "../desklink-protocol" }
 
 [dev-dependencies]
 criterion = "=0.5.1"
+proptest = "=1.11.0"
 
 [[bench]]
 name = "session_bench"
