@@ -183,8 +183,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "video policy smoke failed" }
           $web = Get-Content "apps/web/src/main.tsx" -Raw
           if ($web -notmatch 'controlRttMs: controlRttMsRef\.current') { throw "Web telemetry does not publish control RTT" }
-          $host = Get-Content "apps/windows-agent/src/webrtc_session.cpp" -Raw
-          if ($host -notmatch 'control_rtt_ms') { throw "Windows host does not parse control RTT" }
+          $hostSource = Get-Content "apps/windows-agent/src/webrtc_session.cpp" -Raw
+          if ($hostSource -notmatch 'control_rtt_ms') { throw "Windows host does not parse control RTT" }
 
       - name: Commit validated implementation
         shell: pwsh
