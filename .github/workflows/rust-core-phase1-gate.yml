@@ -1,9 +1,9 @@
-name: Rust Core Phase 1 Gate
+name: Rust Core Full Regression Gate
 
 on:
   push:
     branches:
-      - prototype/rust-core
+      - main
     paths:
       - .github/workflows/rust-core-phase1-gate.yml
   workflow_dispatch:
