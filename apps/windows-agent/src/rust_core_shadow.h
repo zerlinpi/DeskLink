@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 
 namespace desklink {
 
@@ -10,6 +11,9 @@ namespace desklink {
 // lifecycle decision that C++ already made and returns false only when the Rust
 // status/command differs from the expected C++ decision. The caller may log or
 // count that mismatch, but must never change production behavior because of it.
+//
+// libdatachannel may deliver peer/DataChannel callbacks on different threads.
+// Observe* calls therefore serialize access to the single opaque Rust handle.
 class RustCoreShadow {
  public:
   RustCoreShadow();
@@ -21,6 +25,7 @@ class RustCoreShadow {
   RustCoreShadow& operator=(RustCoreShadow&&) = delete;
 
   bool available() const noexcept;
+  std::uint64_t mismatch_count() const;
 
   bool ObserveStart(std::uint64_t session);
   bool ObserveStaleStart(std::uint64_t session);
@@ -69,7 +74,9 @@ class RustCoreShadow {
       std::int32_t expected_status,
       std::uint32_t expected_command);
 
+  mutable std::mutex mutex_;
   void* handle_{nullptr};
+  std::uint64_t mismatch_count_{0};
 };
 
 }  // namespace desklink
