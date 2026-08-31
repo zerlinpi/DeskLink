@@ -19,6 +19,7 @@
 #include "host_capabilities.h"
 #include "input_channel_authority.h"
 #include "input_injector.h"
+#include "rust_core_shadow.h"
 #include "video_policy.h"
 
 namespace desklink {
@@ -136,6 +137,10 @@ class WebRtcSession {
   std::condition_variable reconnect_cv_;
   bool reconnect_requested_{false};
   std::jthread reconnect_thread_;
+
+  // Prototype-only observer. C++ remains authoritative; this member never changes
+  // session, peer, channel or input decisions.
+  RustCoreShadowLifecycle rust_core_shadow_lifecycle_;
 
   // Keep this member last: its worker may call connected()/SendControlMessage(),
   // so every session synchronization primitive must already be constructed.
