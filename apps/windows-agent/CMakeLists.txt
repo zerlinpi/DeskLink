@@ -125,6 +125,7 @@ add_executable(desklink-agent
   src/performance_tuning.cpp
   src/rust_core_shadow.cpp
   src/rust_core_shadow.h
+  src/rust_core_shadow_event_bridge.cpp
   src/service_auth_client.cpp
   src/service_auth_client.h
   src/secure_attention.cpp
@@ -426,6 +427,7 @@ if(DESKLINK_ENABLE_RUST_CORE_SHADOW)
     src/rust_core_shadow_smoke.cpp
     src/rust_core_shadow.cpp
     src/rust_core_shadow.h
+    src/rust_core_shadow_event_bridge.cpp
   )
   add_dependencies(desklink-rust-core-shadow-smoke desklink-rust-core-staticlib)
   target_include_directories(
