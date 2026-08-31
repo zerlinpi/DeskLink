@@ -65,7 +65,10 @@ fn run_valid_lifecycle(events: usize) {
 
 fn run_stale_events(events: usize) {
     let (mut machine, session1, _) = connected_machine();
-    apply(&mut machine, SessionEvent::CloseRequested { session: session1 });
+    apply(
+        &mut machine,
+        SessionEvent::CloseRequested { session: session1 },
+    );
     apply(&mut machine, SessionEvent::Closed { session: session1 });
     let session2 = session1.next().expect("next session");
     apply(&mut machine, SessionEvent::Start { session: session2 });
@@ -127,15 +130,27 @@ fn session_benchmarks(c: &mut Criterion) {
 
     for events in EVENT_COUNTS {
         group.throughput(Throughput::Elements(events as u64));
-        group.bench_with_input(BenchmarkId::new("valid_lifecycle", events), &events, |b, &n| {
-            b.iter(|| run_valid_lifecycle(black_box(n)));
-        });
-        group.bench_with_input(BenchmarkId::new("stale_events", events), &events, |b, &n| {
-            b.iter(|| run_stale_events(black_box(n)));
-        });
-        group.bench_with_input(BenchmarkId::new("peer_replacement", events), &events, |b, &n| {
-            b.iter(|| run_peer_replacements(black_box(n)));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("valid_lifecycle", events),
+            &events,
+            |b, &n| {
+                b.iter(|| run_valid_lifecycle(black_box(n)));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("stale_events", events),
+            &events,
+            |b, &n| {
+                b.iter(|| run_stale_events(black_box(n)));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("peer_replacement", events),
+            &events,
+            |b, &n| {
+                b.iter(|| run_peer_replacements(black_box(n)));
+            },
+        );
         group.bench_with_input(
             BenchmarkId::new("control_replacement", events),
             &events,
