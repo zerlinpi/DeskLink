@@ -1,3 +1,6 @@
 [workspace]
-members = ["crates/desklink-protocol"]
+members = [
+    "crates/desklink-protocol",
+    "crates/desklink-session",
+]
 resolver = "2"
