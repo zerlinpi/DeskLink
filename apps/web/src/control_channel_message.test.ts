@@ -37,6 +37,24 @@ describe("control channel message decoding", () => {
     expect(result.capabilities.secureAttention.reason).toBe("policy-not-allowed");
   });
 
+  it("extracts a bounded control RTT acknowledgement", () => {
+    expect(decodeControlChannelText(JSON.stringify({
+      t: "control-rtt-ack",
+      requestId: "probe-1",
+    }))).toEqual({ kind: "control-rtt-ack", requestId: "probe-1" });
+  });
+
+  it("rejects malformed control RTT acknowledgements", () => {
+    expect(decodeControlChannelText(JSON.stringify({
+      t: "control-rtt-ack",
+      requestId: "",
+    }))).toEqual({ kind: "invalid" });
+    expect(decodeControlChannelText(JSON.stringify({
+      t: "control-rtt-ack",
+      requestId: "x".repeat(129),
+    }))).toEqual({ kind: "invalid" });
+  });
+
   it("leaves unrelated control messages for their own handlers", () => {
     expect(decodeControlChannelText(JSON.stringify({
       t: "monitor-state",
