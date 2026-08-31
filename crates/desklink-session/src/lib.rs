@@ -93,10 +93,14 @@ pub enum SessionError {
 pub struct RemoteSessionStateMachine {
     state: SessionState,
     session: Option<SessionGeneration>,
+    session_high_water: Option<SessionGeneration>,
     peer: Option<PeerGeneration>,
     control: Option<ControlChannelGeneration>,
+    control_high_water: Option<ControlChannelGeneration>,
     pointer: Option<PointerChannelGeneration>,
+    pointer_high_water: Option<PointerChannelGeneration>,
     operation: Option<OperationGeneration>,
+    operation_high_water: Option<OperationGeneration>,
 }
 
 impl Default for RemoteSessionStateMachine {
@@ -110,10 +114,14 @@ impl RemoteSessionStateMachine {
         Self {
             state: SessionState::Idle,
             session: None,
+            session_high_water: None,
             peer: None,
             control: None,
+            control_high_water: None,
             pointer: None,
+            pointer_high_water: None,
             operation: None,
+            operation_high_water: None,
         }
     }
 
@@ -169,18 +177,30 @@ impl RemoteSessionStateMachine {
         Err(SessionError::InvalidTransition { state: self.state })
     }
 
-    fn clear_scoped_authority(&mut self) {
+    fn clear_active_authority(&mut self) {
         self.control = None;
         self.pointer = None;
         self.operation = None;
     }
 
+    fn reset_scoped_authority(&mut self) {
+        self.clear_active_authority();
+        self.control_high_water = None;
+        self.pointer_high_water = None;
+        self.operation_high_water = None;
+    }
+
     pub fn apply(&mut self, event: SessionEvent) -> Result<Vec<SessionCommand>, SessionError> {
         match event {
             SessionEvent::Start { session } if self.state == SessionState::Idle => {
+                match self.session_high_water.map(|latest| session.cmp(&latest)) {
+                    Some(Ordering::Less | Ordering::Equal) => return Self::ignore_stale(),
+                    Some(Ordering::Greater) | None => {}
+                }
                 self.session = Some(session);
+                self.session_high_water = Some(session);
                 self.peer = None;
-                self.clear_scoped_authority();
+                self.reset_scoped_authority();
                 self.state = SessionState::Signaling;
                 Ok(vec![SessionCommand::BeginSignaling])
             }
@@ -198,7 +218,7 @@ impl RemoteSessionStateMachine {
                     Some(Ordering::Less) => Self::ignore_stale(),
                     Some(Ordering::Equal) if self.state == SessionState::Authenticating => {
                         self.peer = Some(peer);
-                        self.clear_scoped_authority();
+                        self.reset_scoped_authority();
                         self.state = SessionState::Negotiating;
                         Ok(vec![SessionCommand::BeginNegotiation])
                     }
@@ -235,7 +255,7 @@ impl RemoteSessionStateMachine {
                         ) =>
                     {
                         self.peer = Some(peer);
-                        self.clear_scoped_authority();
+                        self.reset_scoped_authority();
                         self.state = SessionState::Negotiating;
                         Ok(vec![SessionCommand::BeginNegotiation])
                     }
@@ -260,10 +280,17 @@ impl RemoteSessionStateMachine {
                 if self.state != SessionState::Connected {
                     return self.invalid();
                 }
-                match self.control_ordering(control) {
+                match self.control_high_water.map(|latest| control.cmp(&latest)) {
                     Some(Ordering::Less) => Self::ignore_stale(),
+                    Some(Ordering::Equal) if self.control.is_none() => Self::ignore_stale(),
                     Some(Ordering::Equal | Ordering::Greater) | None => {
                         self.control = Some(control);
+                        if self
+                            .control_high_water
+                            .is_none_or(|latest| control > latest)
+                        {
+                            self.control_high_water = Some(control);
+                        }
                         Ok(Vec::new())
                     }
                 }
@@ -310,10 +337,17 @@ impl RemoteSessionStateMachine {
                 if self.state != SessionState::Connected {
                     return self.invalid();
                 }
-                match self.pointer_ordering(pointer) {
+                match self.pointer_high_water.map(|latest| pointer.cmp(&latest)) {
                     Some(Ordering::Less) => Self::ignore_stale(),
+                    Some(Ordering::Equal) if self.pointer.is_none() => Self::ignore_stale(),
                     Some(Ordering::Equal | Ordering::Greater) | None => {
                         self.pointer = Some(pointer);
+                        if self
+                            .pointer_high_water
+                            .is_none_or(|latest| pointer > latest)
+                        {
+                            self.pointer_high_water = Some(pointer);
+                        }
                         Ok(Vec::new())
                     }
                 }
@@ -351,10 +385,17 @@ impl RemoteSessionStateMachine {
                 if self.state != SessionState::Connected {
                     return self.invalid();
                 }
-                match self.operation_ordering(operation) {
+                match self.operation_high_water.map(|latest| operation.cmp(&latest)) {
                     Some(Ordering::Less) => Self::ignore_stale(),
+                    Some(Ordering::Equal) if self.operation.is_none() => Self::ignore_stale(),
                     Some(Ordering::Equal | Ordering::Greater) | None => {
                         self.operation = Some(operation);
+                        if self
+                            .operation_high_water
+                            .is_none_or(|latest| operation > latest)
+                        {
+                            self.operation_high_water = Some(operation);
+                        }
                         Ok(Vec::new())
                     }
                 }
@@ -377,7 +418,7 @@ impl RemoteSessionStateMachine {
             SessionEvent::CloseRequested { session } => match self.session_ordering(session) {
                 Some(Ordering::Less) => Self::ignore_stale(),
                 Some(Ordering::Equal) if self.state == SessionState::Connected => {
-                    self.clear_scoped_authority();
+                    self.clear_active_authority();
                     self.state = SessionState::Closing;
                     Ok(vec![SessionCommand::BeginClose])
                 }
@@ -388,7 +429,7 @@ impl RemoteSessionStateMachine {
                 Some(Ordering::Equal) if self.state == SessionState::Closing => {
                     self.session = None;
                     self.peer = None;
-                    self.clear_scoped_authority();
+                    self.clear_active_authority();
                     self.state = SessionState::Idle;
                     Ok(vec![SessionCommand::SessionClosed])
                 }
