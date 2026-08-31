@@ -108,6 +108,37 @@ std::uint64_t RustCoreShadow::mismatch_count() const {
   return mismatch_count_;
 }
 
+bool RustCoreShadow::Reset() {
+#if DESKLINK_ENABLE_RUST_CORE_SHADOW
+  std::scoped_lock lock(mutex_);
+  bool ok = true;
+  if (handle_ != nullptr) {
+    const std::int32_t destroy_status =
+        desklink_core_destroy(static_cast<DeskLinkCoreHandle*>(handle_));
+    if (destroy_status != DESKLINK_CORE_STATUS_OK) {
+      std::ostringstream message;
+      message << "reset destroy returned status=" << destroy_status;
+      LogShadowMismatch(message.str());
+      ok = false;
+    }
+    handle_ = nullptr;
+  }
+
+  DeskLinkCoreHandle* created = nullptr;
+  const std::int32_t create_status = desklink_core_create(&created);
+  if (create_status != DESKLINK_CORE_STATUS_OK || created == nullptr) {
+    std::ostringstream message;
+    message << "reset create returned status=" << create_status;
+    LogShadowMismatch(message.str());
+    return false;
+  }
+  handle_ = created;
+  return ok;
+#else
+  return true;
+#endif
+}
+
 bool RustCoreShadow::Observe(
     std::uint32_t kind,
     std::uint64_t session,
@@ -229,6 +260,20 @@ bool RustCoreShadow::ObservePeerConnected(std::uint64_t session, std::uint64_t p
       kCommandSessionConnected);
 }
 
+bool RustCoreShadow::ObserveStalePeerConnected(
+    std::uint64_t session,
+    std::uint64_t peer) {
+  return Observe(
+      kEventPeerConnected,
+      session,
+      peer,
+      0,
+      0,
+      0,
+      kStatusStale,
+      kCommandNone);
+}
+
 bool RustCoreShadow::ObservePeerReplaced(std::uint64_t session, std::uint64_t peer) {
   return Observe(
       kEventPeerReplaced,
@@ -286,6 +331,21 @@ bool RustCoreShadow::ObserveStaleControlOpened(
       kCommandNone);
 }
 
+bool RustCoreShadow::ObserveStaleControlClosed(
+    std::uint64_t session,
+    std::uint64_t peer,
+    std::uint64_t control) {
+  return Observe(
+      kEventControlClosed,
+      session,
+      peer,
+      control,
+      0,
+      0,
+      kStatusStale,
+      kCommandNone);
+}
+
 bool RustCoreShadow::ObservePointerOpened(
     std::uint64_t session,
     std::uint64_t peer,
@@ -322,6 +382,21 @@ bool RustCoreShadow::ObserveStalePointerOpened(
     std::uint64_t pointer) {
   return Observe(
       kEventPointerOpened,
+      session,
+      peer,
+      0,
+      pointer,
+      0,
+      kStatusStale,
+      kCommandNone);
+}
+
+bool RustCoreShadow::ObserveStalePointerClosed(
+    std::uint64_t session,
+    std::uint64_t peer,
+    std::uint64_t pointer) {
+  return Observe(
+      kEventPointerClosed,
       session,
       peer,
       0,
@@ -395,6 +470,157 @@ bool RustCoreShadow::ObserveClosed(std::uint64_t session) {
       0,
       kStatusOk,
       kCommandSessionClosed);
+}
+
+bool RustCoreShadowLifecycle::available() const noexcept {
+  return shadow_.available();
+}
+
+std::uint64_t RustCoreShadowLifecycle::mismatch_count() const {
+  return shadow_.mismatch_count();
+}
+
+std::uint64_t RustCoreShadowLifecycle::AdvanceNonZero(std::uint64_t* sequence) {
+  if (sequence == nullptr) return 0;
+  ++(*sequence);
+  if (*sequence == 0) ++(*sequence);
+  return *sequence;
+}
+
+bool RustCoreShadowLifecycle::EndSessionLocked() {
+  if (!session_active_) return true;
+
+  bool matches = true;
+  if (peer_connected_) {
+    matches = shadow_.ObserveCloseRequested(current_scope_.session) && matches;
+    matches = shadow_.ObserveClosed(current_scope_.session) && matches;
+  } else {
+    // The Phase-1 model has no abort transition from Negotiating. Reset only the
+    // observer after C++ has already abandoned that peer; do not invent a C++
+    // production transition merely to satisfy the model.
+    matches = shadow_.Reset() && matches;
+  }
+
+  session_active_ = false;
+  peer_connected_ = false;
+  current_scope_ = {};
+  return matches;
+}
+
+RustCoreShadowPeerScope RustCoreShadowLifecycle::BeginPeer(
+    bool same_authoritative_session) {
+  std::scoped_lock lock(mutex_);
+
+  if (session_active_ && !same_authoritative_session) {
+    (void)EndSessionLocked();
+  }
+
+  if (!session_active_) {
+    current_scope_.session = AdvanceNonZero(&session_sequence_);
+    current_scope_.peer = AdvanceNonZero(&peer_sequence_);
+    session_active_ = true;
+    peer_connected_ = false;
+
+    (void)shadow_.ObserveStart(current_scope_.session);
+    (void)shadow_.ObserveSignalConnected(current_scope_.session);
+    (void)shadow_.ObserveAuthenticationAccepted(
+        current_scope_.session,
+        current_scope_.peer);
+    return current_scope_;
+  }
+
+  current_scope_.peer = AdvanceNonZero(&peer_sequence_);
+  peer_connected_ = false;
+  (void)shadow_.ObservePeerReplaced(
+      current_scope_.session,
+      current_scope_.peer);
+  return current_scope_;
+}
+
+bool RustCoreShadowLifecycle::ComparePeerConnected(
+    RustCoreShadowPeerScope scope,
+    bool cpp_authoritative) {
+  std::scoped_lock lock(mutex_);
+  if (cpp_authoritative && scope == current_scope_) {
+    peer_connected_ = true;
+  }
+  if (cpp_authoritative) {
+    return shadow_.ObservePeerConnected(scope.session, scope.peer);
+  }
+  return shadow_.ObserveStalePeerConnected(scope.session, scope.peer);
+}
+
+bool RustCoreShadowLifecycle::CompareControlOpened(
+    RustCoreShadowPeerScope scope,
+    std::uint64_t control_generation,
+    bool cpp_authoritative) {
+  std::scoped_lock lock(mutex_);
+  if (cpp_authoritative) {
+    return shadow_.ObserveControlOpened(
+        scope.session,
+        scope.peer,
+        control_generation);
+  }
+  return shadow_.ObserveStaleControlOpened(
+      scope.session,
+      scope.peer,
+      control_generation);
+}
+
+bool RustCoreShadowLifecycle::CompareControlClosed(
+    RustCoreShadowPeerScope scope,
+    std::uint64_t control_generation,
+    bool cpp_authoritative) {
+  std::scoped_lock lock(mutex_);
+  if (cpp_authoritative) {
+    return shadow_.ObserveControlClosed(
+        scope.session,
+        scope.peer,
+        control_generation);
+  }
+  return shadow_.ObserveStaleControlClosed(
+      scope.session,
+      scope.peer,
+      control_generation);
+}
+
+bool RustCoreShadowLifecycle::ComparePointerOpened(
+    RustCoreShadowPeerScope scope,
+    std::uint64_t pointer_generation,
+    bool cpp_authoritative) {
+  std::scoped_lock lock(mutex_);
+  if (cpp_authoritative) {
+    return shadow_.ObservePointerOpened(
+        scope.session,
+        scope.peer,
+        pointer_generation);
+  }
+  return shadow_.ObserveStalePointerOpened(
+      scope.session,
+      scope.peer,
+      pointer_generation);
+}
+
+bool RustCoreShadowLifecycle::ComparePointerClosed(
+    RustCoreShadowPeerScope scope,
+    std::uint64_t pointer_generation,
+    bool cpp_authoritative) {
+  std::scoped_lock lock(mutex_);
+  if (cpp_authoritative) {
+    return shadow_.ObservePointerClosed(
+        scope.session,
+        scope.peer,
+        pointer_generation);
+  }
+  return shadow_.ObserveStalePointerClosed(
+      scope.session,
+      scope.peer,
+      pointer_generation);
+}
+
+bool RustCoreShadowLifecycle::EndSession() {
+  std::scoped_lock lock(mutex_);
+  return EndSessionLocked();
 }
 
 }  // namespace desklink
