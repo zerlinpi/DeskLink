@@ -20,6 +20,7 @@
       controllerAuthRequired: null,
       turnRuntimeRequired: null,
       forceRelay: null,
+      lanFirstIce: null,
     },
   };
 
