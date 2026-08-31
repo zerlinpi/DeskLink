@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/desklink-core-ffi",
     "crates/desklink-protocol",
     "crates/desklink-recovery",
     "crates/desklink-session",
