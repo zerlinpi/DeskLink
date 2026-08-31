@@ -1,3 +1,8 @@
+import {
+  pauseDownloadForChannelReplacement,
+  pauseUploadForChannelReplacement,
+} from "./file_transfer_recovery";
+
 type ControlChannelDetail = {
   channel: RTCDataChannel;
   peer: RTCPeerConnection;
@@ -796,9 +801,22 @@ function handleDownloadMessage(message: UploadMessage) {
   return false;
 }
 
+function pauseTransfersForChannelReplacement() {
+  const uploadPaused = pauseUploadForChannelReplacement(activeJob);
+  const downloadPaused = pauseDownloadForChannelReplacement(activeDownload);
+  if (!uploadPaused && !downloadPaused) return;
+
+  setStatus("文件通道正在恢复，将从已确认位置自动续传");
+  renderJobs();
+  renderDownload();
+}
+
 function attachTransferChannel(channel: RTCDataChannel) {
-  if (transferChannel && transferChannel !== channel && transferChannel.readyState !== "closed") {
-    try { transferChannel.close(); } catch { /* ignored */ }
+  if (transferChannel && transferChannel !== channel) {
+    pauseTransfersForChannelReplacement();
+    if (transferChannel.readyState !== "closed") {
+      try { transferChannel.close(); } catch { /* ignored */ }
+    }
   }
   transferChannel = channel;
   channel.binaryType = "arraybuffer";
