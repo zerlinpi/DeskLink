@@ -1,0 +1,71 @@
+name: One-shot LAN relay race guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-lan-race-guard.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Guard late relay escalation
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('apps/web/src/main.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          old = '''  directFirstIceServers,\n  shouldEscalateLanFirstToRelay,\n  shouldUseLanFirstIce,\n} from "./ice_startup_policy";\n'''
+          new = '''  directFirstIceServers,\n  shouldCommitLanFirstRelayEscalation,\n  shouldEscalateLanFirstToRelay,\n  shouldUseLanFirstIce,\n} from "./ice_startup_policy";\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'import anchor count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = '''        const iceServers = await resolveIceServers(localId, authToken);\n        if (pcRef.current !== pc || manualDisconnectRef.current) return;\n        pc.setConfiguration({\n          ...pc.getConfiguration(),\n          iceServers,\n        });\n        relayEscalatedRef.current = true;\n'''
+          new = '''        const iceServers = await resolveIceServers(localId, authToken);\n        if (!shouldCommitLanFirstRelayEscalation({\n          manualDisconnect: manualDisconnectRef.current,\n          currentPeer: pcRef.current === pc,\n          connectionState: pc.connectionState,\n          relayEscalated: relayEscalatedRef.current,\n        })) {\n          iceRestartInFlightRef.current = false;\n          return;\n        }\n        pc.setConfiguration({\n          ...pc.getConfiguration(),\n          iceServers,\n        });\n        relayEscalatedRef.current = true;\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'relay commit anchor count={text.count(old)}')
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+      - name: Typecheck
+        working-directory: apps/web
+        run: npm run typecheck
+      - name: Unit tests
+        working-directory: apps/web
+        run: npm test
+      - name: Production build
+        working-directory: apps/web
+        run: npm run build
+      - name: Commit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): preserve direct connection during TURN fetch"
+          git push origin HEAD:main
