@@ -1,4 +1,5 @@
 import {
+  isDownloadChunkCommitCurrent,
   pauseDownloadForChannelReplacement,
   pauseUploadForChannelReplacement,
 } from "./file_transfer_recovery";
@@ -635,14 +636,18 @@ function pumpDownloadReads(job: DownloadJob) {
   }
 }
 
-async function writeDownloadChunk(job: DownloadJob, offset: number, payload: Uint8Array) {
+async function prepareDownloadChunk(
+  job: DownloadJob,
+  offset: number,
+  payload: Uint8Array,
+): Promise<ArrayBuffer | null> {
+  const copy = new ArrayBuffer(payload.byteLength);
+  new Uint8Array(copy).set(payload);
   if (job.sink.kind === "filesystem") {
-    const copy = new ArrayBuffer(payload.byteLength);
-    new Uint8Array(copy).set(payload);
     await job.sink.writable.write({ type: "write", position: offset, data: copy });
-  } else {
-    job.sink.chunks.push(payload.slice());
+    return null;
   }
+  return copy;
 }
 
 function digestEqual(expected: Uint8Array, actual: Uint8Array) {
@@ -717,15 +722,19 @@ async function processDownloadBinary(buffer: ArrayBuffer, token: number) {
     return;
   }
 
+  let memoryChunk: ArrayBuffer | null;
   try {
-    await writeDownloadChunk(job, offset, payload);
+    memoryChunk = await prepareDownloadChunk(job, offset, payload);
   } catch (error) {
     console.debug("DeskLink local download write failed", error);
     await failDownload(job, "写入本地文件失败");
     return;
   }
 
-  if (activeDownload !== job || job.token !== token) return;
+  if (!isDownloadChunkCommitCurrent(activeDownload, job, token)) return;
+  if (memoryChunk !== null && job.sink.kind === "memory") {
+    job.sink.chunks.push(memoryChunk);
+  }
   job.received += payload.byteLength;
   job.outstanding = Math.max(0, job.outstanding - 1);
   renderDownload();
