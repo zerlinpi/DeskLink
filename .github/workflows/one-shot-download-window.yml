@@ -28,48 +28,18 @@ jobs:
         run: |
           python3 <<'PY'
           from pathlib import Path
-
           path = Path('apps/web/src/file_transfer.ts')
           text = path.read_text(encoding='utf-8')
-
-          old_import = '''import {
-  isDownloadChunkCommitCurrent,
-  pauseDownloadForChannelReplacement,
-  pauseUploadForChannelReplacement,
-} from "./file_transfer_recovery";
-'''
-          new_import = old_import + 'import { isRequestedDownloadChunk } from "./download_chunk_window";\n'
+          old_import = "import {\n  isDownloadChunkCommitCurrent,\n  pauseDownloadForChannelReplacement,\n  pauseUploadForChannelReplacement,\n} from \"./file_transfer_recovery\";\n"
+          new_import = old_import + "import { isRequestedDownloadChunk } from \"./download_chunk_window\";\n"
           if text.count(old_import) != 1:
               raise SystemExit(f'import anchor count={text.count(old_import)}')
           text = text.replace(old_import, new_import, 1)
-
-          old_guard = '''  const offset = Number(rawOffset);
-  const expectedDigest = bytes.slice(8, 40);
-  const payload = bytes.slice(CHUNK_HEADER_BYTES);
-  if (offset !== job.received || offset + payload.byteLength > job.file.size) {
-    await failDownload(job, "远端文件分块顺序不一致");
-    return;
-  }
-'''
-          new_guard = '''  const offset = Number(rawOffset);
-  const expectedDigest = bytes.slice(8, 40);
-  const payload = bytes.slice(CHUNK_HEADER_BYTES);
-  if (!isRequestedDownloadChunk({
-    offset,
-    payloadBytes: payload.byteLength,
-    received: job.received,
-    requested: job.requested,
-    outstanding: job.outstanding,
-    fileSize: job.file.size,
-  })) {
-    await failDownload(job, "远端返回了未请求、无进度或顺序不一致的文件分块");
-    return;
-  }
-'''
+          old_guard = "  const offset = Number(rawOffset);\n  const expectedDigest = bytes.slice(8, 40);\n  const payload = bytes.slice(CHUNK_HEADER_BYTES);\n  if (offset !== job.received || offset + payload.byteLength > job.file.size) {\n    await failDownload(job, \"远端文件分块顺序不一致\");\n    return;\n  }\n"
+          new_guard = "  const offset = Number(rawOffset);\n  const expectedDigest = bytes.slice(8, 40);\n  const payload = bytes.slice(CHUNK_HEADER_BYTES);\n  if (!isRequestedDownloadChunk({\n    offset,\n    payloadBytes: payload.byteLength,\n    received: job.received,\n    requested: job.requested,\n    outstanding: job.outstanding,\n    fileSize: job.file.size,\n  })) {\n    await failDownload(job, \"远端返回了未请求、无进度或顺序不一致的文件分块\");\n    return;\n  }\n"
           if text.count(old_guard) != 1:
               raise SystemExit(f'download guard anchor count={text.count(old_guard)}')
           text = text.replace(old_guard, new_guard, 1)
-
           path.write_text(text, encoding='utf-8')
           PY
           git diff --check
