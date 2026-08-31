@@ -111,6 +111,7 @@ add_executable(desklink-agent
   src/host_capabilities.h
   src/host_capabilities_publisher.cpp
   src/input_channel_authority.h
+  src/peer_signal_scope.h
   src/input_injector.cpp
   src/input_injector.h
   src/pointer_wire.cpp
@@ -311,6 +312,13 @@ add_executable(desklink-input-channel-authority-smoke
 )
 target_compile_definitions(desklink-input-channel-authority-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(desklink-input-channel-authority-smoke PRIVATE /W4 /permissive-)
+
+add_executable(desklink-peer-signal-scope-smoke
+  src/peer_signal_scope_smoke.cpp
+  src/peer_signal_scope.h
+)
+target_compile_definitions(desklink-peer-signal-scope-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(desklink-peer-signal-scope-smoke PRIVATE /W4 /permissive-)
 
 add_executable(desklink-file-transfer-download-policy-smoke
   src/file_transfer_download_policy_smoke.cpp

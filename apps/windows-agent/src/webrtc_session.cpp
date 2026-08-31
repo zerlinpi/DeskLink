@@ -22,6 +22,7 @@
 
 #include "clipboard_win32.h"
 #include "file_transfer_receiver.h"
+#include "peer_signal_scope.h"
 #include "pointer_wire.h"
 #include "service_auth_client.h"
 #include "signal_token_client.h"
@@ -1049,13 +1050,43 @@ void WebRtcSession::CreatePeer(
   peer->onIceStateChange([](rtc::PeerConnection::IceState state) {
     std::cout << "ICE state: " << state << "\n";
   });
-  peer->onLocalDescription([this](rtc::Description description) {
-    SendSignal(
+  peer->onLocalDescription([this, weak_peer, controller, session](rtc::Description description) {
+    auto owner = weak_peer.lock();
+    if (!owner) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (!PeerSignalScopeCurrent(
+              peer_ == owner,
+              controller_id_,
+              controller,
+              session_id_,
+              session)) {
+        return;
+      }
+    }
+    SendSignalTo(
+        controller,
+        session,
         description.typeString(),
         json{{"type", description.typeString()}, {"sdp", std::string(description)}});
   });
-  peer->onLocalCandidate([this](rtc::Candidate candidate) {
-    SendSignal(
+  peer->onLocalCandidate([this, weak_peer, controller, session](rtc::Candidate candidate) {
+    auto owner = weak_peer.lock();
+    if (!owner) return;
+    {
+      std::scoped_lock lock(mutex_);
+      if (!PeerSignalScopeCurrent(
+              peer_ == owner,
+              controller_id_,
+              controller,
+              session_id_,
+              session)) {
+        return;
+      }
+    }
+    SendSignalTo(
+        controller,
+        session,
         "ice",
         json{{"candidate", std::string(candidate)}, {"sdpMid", candidate.mid()}});
   });
