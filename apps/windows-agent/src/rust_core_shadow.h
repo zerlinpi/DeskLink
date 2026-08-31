@@ -154,4 +154,46 @@ class RustCoreShadowLifecycle {
   RustCoreShadowPeerScope current_scope_{};
 };
 
+// Orders asynchronous libdatachannel callbacks before feeding the deterministic
+// lifecycle adapter. C++ remains authoritative. In particular, a DataChannel may
+// open before PeerConnection::Connected; the bridge caches only that already-
+// accepted C++ authority and replays it after the connected observation.
+class RustCoreShadowEventBridge {
+ public:
+  bool available() const noexcept;
+  std::uint64_t mismatch_count() const;
+
+  RustCoreShadowPeerScope BeginPeer(bool same_authoritative_session);
+  bool ComparePeerConnected(
+      RustCoreShadowPeerScope scope,
+      bool cpp_authoritative);
+  bool CompareControlOpened(
+      RustCoreShadowPeerScope scope,
+      std::uint64_t control_generation,
+      bool cpp_authoritative);
+  bool CompareControlClosed(
+      RustCoreShadowPeerScope scope,
+      std::uint64_t control_generation,
+      bool cpp_authoritative);
+  bool ComparePointerOpened(
+      RustCoreShadowPeerScope scope,
+      std::uint64_t pointer_generation,
+      bool cpp_authoritative);
+  bool ComparePointerClosed(
+      RustCoreShadowPeerScope scope,
+      std::uint64_t pointer_generation,
+      bool cpp_authoritative);
+  bool EndSession();
+
+ private:
+  void ClearPendingLocked();
+
+  mutable std::mutex mutex_;
+  RustCoreShadowLifecycle lifecycle_;
+  RustCoreShadowPeerScope current_scope_{};
+  bool peer_connected_{false};
+  std::uint64_t pending_control_generation_{0};
+  std::uint64_t pending_pointer_generation_{0};
+};
+
 }  // namespace desklink
