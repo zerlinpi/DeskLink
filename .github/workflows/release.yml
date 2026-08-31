@@ -137,7 +137,8 @@ jobs:
           foreach ($script in @(
             "packaging/windows/install-service.ps1",
             "packaging/windows/uninstall-service.ps1",
-            "packaging/windows/sign-binaries.ps1"
+            "packaging/windows/sign-binaries.ps1",
+            "tools/windows/run-native-smokes.ps1"
           )) {
             $tokens = $null
             $errors = $null
@@ -166,26 +167,9 @@ jobs:
       - name: Build Windows release
         run: cmake --build build/windows-agent --config Release --parallel
 
-      - name: Run native release smoke tests
+      - name: Run all native release smoke tests
         shell: pwsh
-        run: |
-          $smokes = @(
-            "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
-            "build/windows-agent/Release/desklink-video-policy-smoke.exe",
-            "build/windows-agent/Release/desklink-pointer-wire-smoke.exe",
-            "build/windows-agent/Release/desklink-peer-signal-scope-smoke.exe",
-            "build/windows-agent/Release/desklink-active-session-smoke.exe",
-            "build/windows-agent/Release/desklink-device-identity-smoke.exe",
-            "build/windows-agent/Release/desklink-secure-attention-smoke.exe",
-            "build/windows-agent/Release/desklink-host-capabilities-smoke.exe",
-            "build/windows-agent/Release/desklink-access-proof-smoke.exe",
-            "build/windows-agent/Release/desklink-service-auth-smoke.exe"
-          )
-          foreach ($smokePath in $smokes) {
-            $smoke = Resolve-Path $smokePath
-            & $smoke
-            if ($LASTEXITCODE -ne 0) { throw "$smokePath failed with exit code $LASTEXITCODE" }
-          }
+        run: ./tools/windows/run-native-smokes.ps1 -BuildDirectory "build/windows-agent" -Configuration "Release"
 
       - name: Validate DPAPI protected secrets
         shell: pwsh
@@ -256,8 +240,7 @@ jobs:
           Copy-Item "packaging/windows/README.txt" $packageRoot
           Copy-Item "docs/WINDOWS_SERVICE.md" $packageRoot
 
-          $zip = Join-Path $PWD "release\desklink-windows-v$version-x64"
-          $zip = "$zip.zip"
+          $zip = Join-Path $PWD "release\desklink-windows-v$version-x64.zip"
           Compress-Archive -Path "$packageRoot\*" -DestinationPath $zip -CompressionLevel Optimal
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $zip -Leaf)" | Set-Content "release\SHA256SUMS.windows.txt" -Encoding ascii
