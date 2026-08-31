@@ -37,7 +37,11 @@ fn direct_current_setup() -> (RemoteSessionStateMachine, SessionGeneration) {
     direct_connected()
 }
 
-fn direct_stale_setup() -> (RemoteSessionStateMachine, SessionGeneration, OperationGeneration) {
+fn direct_stale_setup() -> (
+    RemoteSessionStateMachine,
+    SessionGeneration,
+    OperationGeneration,
+) {
     let (mut machine, session) = direct_connected();
     let operation1 = OperationGeneration::initial();
     let operation2 = operation1.next().expect("next operation");
@@ -71,7 +75,11 @@ fn run_direct_current(mut setup: (RemoteSessionStateMachine, SessionGeneration),
 }
 
 fn run_direct_stale(
-    mut setup: (RemoteSessionStateMachine, SessionGeneration, OperationGeneration),
+    mut setup: (
+        RemoteSessionStateMachine,
+        SessionGeneration,
+        OperationGeneration,
+    ),
     events: usize,
 ) {
     let (machine, session, stale_operation) = &mut setup;
@@ -191,13 +199,17 @@ fn ffi_benchmarks(c: &mut Criterion) {
     for events in EVENT_COUNTS {
         group.throughput(Throughput::Elements(events as u64));
 
-        group.bench_with_input(BenchmarkId::new("direct_current", events), &events, |b, &n| {
-            b.iter_batched(
-                direct_current_setup,
-                |setup| run_direct_current(setup, black_box(n)),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("direct_current", events),
+            &events,
+            |b, &n| {
+                b.iter_batched(
+                    direct_current_setup,
+                    |setup| run_direct_current(setup, black_box(n)),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
         group.bench_with_input(BenchmarkId::new("ffi_current", events), &events, |b, &n| {
             b.iter_batched(
                 ffi_current_setup,
@@ -205,13 +217,17 @@ fn ffi_benchmarks(c: &mut Criterion) {
                 BatchSize::SmallInput,
             );
         });
-        group.bench_with_input(BenchmarkId::new("direct_stale", events), &events, |b, &n| {
-            b.iter_batched(
-                direct_stale_setup,
-                |setup| run_direct_stale(setup, black_box(n)),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("direct_stale", events),
+            &events,
+            |b, &n| {
+                b.iter_batched(
+                    direct_stale_setup,
+                    |setup| run_direct_stale(setup, black_box(n)),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
         group.bench_with_input(BenchmarkId::new("ffi_stale", events), &events, |b, &n| {
             b.iter_batched(
                 ffi_stale_setup,
