@@ -1,0 +1,78 @@
+name: One-shot bounded download binary queue
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-download-queue.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Integrate bounded download binary queue
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('apps/web/src/file_transfer.ts')
+          text = path.read_text(encoding='utf-8')
+          old_import = "import { isRequestedDownloadChunk } from \"./download_chunk_window\";\n"
+          new_import = old_import + "import { canQueueDownloadBinaryFrame } from \"./download_binary_queue\";\n"
+          if text.count(old_import) != 1:
+              raise SystemExit(f'import anchor count={text.count(old_import)}')
+          text = text.replace(old_import, new_import, 1)
+          old_state = "let activeDownload: DownloadJob | null = null;\nlet downloadProcessChain: Promise<void> = Promise.resolve();\n"
+          new_state = old_state + "let pendingDownloadBinaryFrames = 0;\n"
+          if text.count(old_state) != 1:
+              raise SystemExit(f'queue state anchor count={text.count(old_state)}')
+          text = text.replace(old_state, new_state, 1)
+          old_handler = "    if (event.data instanceof ArrayBuffer) {\n      const job = activeDownload;\n      if (!job) return;\n      const token = job.token;\n      const buffer = event.data;\n      downloadProcessChain = downloadProcessChain\n        .then(() => processDownloadBinary(buffer, token))\n        .catch((error) => {\n          console.debug(\"DeskLink download processing chain failed\", error);\n        });\n    }\n"
+          new_handler = "    if (event.data instanceof ArrayBuffer) {\n      const job = activeDownload;\n      if (!job || job.state !== \"receiving\") return;\n      const token = job.token;\n      const buffer = event.data;\n      if (!canQueueDownloadBinaryFrame({\n        pendingFrames: pendingDownloadBinaryFrames,\n        frameBytes: buffer.byteLength,\n      })) {\n        void failDownload(job, \"远端文件分块超过浏览器接收队列或协议上限\");\n        return;\n      }\n      pendingDownloadBinaryFrames += 1;\n      downloadProcessChain = downloadProcessChain\n        .then(() => processDownloadBinary(buffer, token))\n        .catch((error) => {\n          console.debug(\"DeskLink download processing chain failed\", error);\n        })\n        .finally(() => {\n          pendingDownloadBinaryFrames = Math.max(0, pendingDownloadBinaryFrames - 1);\n        });\n    }\n"
+          if text.count(old_handler) != 1:
+              raise SystemExit(f'binary handler anchor count={text.count(old_handler)}')
+          text = text.replace(old_handler, new_handler, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/file_transfer.ts
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): bound pending download binary frames"
+          git push origin HEAD:main
