@@ -84,11 +84,7 @@ impl RecoveryCoordinator {
         }
     }
 
-    pub fn mark_recovered(
-        &mut self,
-        session: SessionGeneration,
-        attempt: RecoveryAttempt,
-    ) -> bool {
+    pub fn mark_recovered(&mut self, session: SessionGeneration, attempt: RecoveryAttempt) -> bool {
         if session != self.session {
             return false;
         }
