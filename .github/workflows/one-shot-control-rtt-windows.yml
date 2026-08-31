@@ -1,0 +1,76 @@
+name: One-shot Windows control RTT acknowledgement
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-control-rtt-windows.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore native build cache
+        uses: actions/cache@v4
+        with:
+          path: build/windows-agent
+          key: desklink-windows-${{ runner.os }}-${{ hashFiles('VERSION', 'apps/windows-agent/CMakeLists.txt', 'packages/protocol/**') }}
+
+      - name: Add bounded control RTT echo
+        shell: pwsh
+        run: |
+          $path = "apps/windows-agent/src/webrtc_session.cpp"
+          $text = Get-Content $path -Raw
+          $old = @'
+  if (type == "release-all") {
+    input_.ReleaseAll();
+    return;
+  }
+
+  if (type == "system-operation") {
+'@
+          $new = @'
+  if (type == "release-all") {
+    input_.ReleaseAll();
+    return;
+  }
+
+  if (type == "control-rtt-probe") {
+    const std::string request_id = event.value("requestId", "");
+    if (!ValidRequestId(request_id)) return;
+    SendControlMessage(json{
+        {"t", "control-rtt-ack"},
+        {"requestId", request_id},
+    }.dump());
+    return;
+  }
+
+  if (type == "system-operation") {
+'@
+          $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
+          if ($count -ne 1) { throw "control RTT insertion anchor count=$count" }
+          $text = $text.Replace($old, $new)
+          [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+          git diff --check
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+      - name: Build Windows agent
+        run: cmake --build build/windows-agent --config Release --target desklink-agent --parallel
+
+      - name: Commit Windows acknowledgement
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/windows-agent/src/webrtc_session.cpp
+          git diff --cached --check
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m "feat(windows): echo control channel RTT probes"
+          git push origin HEAD:main
