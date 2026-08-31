@@ -1,0 +1,142 @@
+name: One-shot stale memory download commit fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-memory-download-commit.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Fence memory chunk commits against channel replacement
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/web/src/file_transfer.ts')
+          text = path.read_text(encoding='utf-8')
+
+          old_import = '''import {
+            pauseDownloadForChannelReplacement,
+            pauseUploadForChannelReplacement,
+          } from "./file_transfer_recovery";'''
+          old_import = '\n'.join(line[10:] if line.startswith('          ') else line for line in old_import.splitlines())
+          new_import = '''import {
+            isDownloadChunkCommitCurrent,
+            pauseDownloadForChannelReplacement,
+            pauseUploadForChannelReplacement,
+          } from "./file_transfer_recovery";'''
+          new_import = '\n'.join(line[10:] if line.startswith('          ') else line for line in new_import.splitlines())
+          if text.count(old_import) != 1:
+              raise SystemExit(f'import anchor count={text.count(old_import)}')
+          text = text.replace(old_import, new_import, 1)
+
+          old_writer = '''async function writeDownloadChunk(job: DownloadJob, offset: number, payload: Uint8Array) {
+            if (job.sink.kind === "filesystem") {
+              const copy = new ArrayBuffer(payload.byteLength);
+              new Uint8Array(copy).set(payload);
+              await job.sink.writable.write({ type: "write", position: offset, data: copy });
+            } else {
+              job.sink.chunks.push(payload.slice());
+            }
+          }'''
+          old_writer = '\n'.join(line[10:] if line.startswith('          ') else line for line in old_writer.splitlines())
+          new_writer = '''async function prepareDownloadChunk(
+            job: DownloadJob,
+            offset: number,
+            payload: Uint8Array,
+          ): Promise<Uint8Array | null> {
+            if (job.sink.kind === "filesystem") {
+              const copy = new ArrayBuffer(payload.byteLength);
+              new Uint8Array(copy).set(payload);
+              await job.sink.writable.write({ type: "write", position: offset, data: copy });
+              return null;
+            }
+            return payload.slice();
+          }'''
+          new_writer = '\n'.join(line[10:] if line.startswith('          ') else line for line in new_writer.splitlines())
+          if text.count(old_writer) != 1:
+              raise SystemExit(f'writer anchor count={text.count(old_writer)}')
+          text = text.replace(old_writer, new_writer, 1)
+
+          old_commit = '''  try {
+            await writeDownloadChunk(job, offset, payload);
+          } catch (error) {
+            console.debug("DeskLink local download write failed", error);
+            await failDownload(job, "写入本地文件失败");
+            return;
+          }
+
+          if (activeDownload !== job || job.token !== token) return;
+          job.received += payload.byteLength;'''
+          old_commit = '\n'.join(line[10:] if line.startswith('          ') else line for line in old_commit.splitlines())
+          new_commit = '''  let memoryChunk: Uint8Array | null;
+          try {
+            memoryChunk = await prepareDownloadChunk(job, offset, payload);
+          } catch (error) {
+            console.debug("DeskLink local download write failed", error);
+            await failDownload(job, "写入本地文件失败");
+            return;
+          }
+
+          if (!isDownloadChunkCommitCurrent(activeDownload, job, token)) return;
+          if (memoryChunk !== null && job.sink.kind === "memory") {
+            job.sink.chunks.push(memoryChunk);
+          }
+          job.received += payload.byteLength;'''
+          new_commit = '\n'.join(line[10:] if line.startswith('          ') else line for line in new_commit.splitlines())
+          if text.count(old_commit) != 1:
+              raise SystemExit(f'commit anchor count={text.count(old_commit)}')
+          text = text.replace(old_commit, new_commit, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+
+      - name: Typecheck
+        working-directory: apps/web
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Production build
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit stale memory download fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/file_transfer.ts
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): prevent duplicate memory chunks after recovery"
+          git push origin HEAD:main
