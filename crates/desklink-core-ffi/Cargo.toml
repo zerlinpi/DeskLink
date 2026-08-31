@@ -1,0 +1,12 @@
+[package]
+name = "desklink-core-ffi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+desklink-protocol = { path = "../desklink-protocol" }
+desklink-session = { path = "../desklink-session" }
