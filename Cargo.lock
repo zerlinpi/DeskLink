@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "desklink-core-ffi"
+version = "0.0.0"
+dependencies = [
+ "desklink-protocol",
+ "desklink-session",
+]
+
+[[package]]
 name = "desklink-protocol"
 version = "0.0.0"
 
