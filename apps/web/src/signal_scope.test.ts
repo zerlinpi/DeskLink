@@ -83,9 +83,9 @@ describe("shouldAcceptSignalMessage", () => {
     }, scope)).toBe(false);
   });
 
-  it("preserves the signaling service broadcast revocation behavior", () => {
-    expect(shouldAcceptSignalMessage({ type: "device-revoked" }, scope)).toBe(true);
-    expect(shouldAcceptSignalMessage({ type: "device-revoked", target: "" }, scope)).toBe(true);
+  it("fails closed when a device revocation omits its target", () => {
+    expect(shouldAcceptSignalMessage({ type: "device-revoked" }, scope)).toBe(false);
+    expect(shouldAcceptSignalMessage({ type: "device-revoked", target: "" }, scope)).toBe(false);
   });
 
   it("does not change unrelated signaling-service messages", () => {
