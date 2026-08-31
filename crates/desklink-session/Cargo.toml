@@ -6,3 +6,10 @@ publish = false
 
 [dependencies]
 desklink-protocol = { path = "../desklink-protocol" }
+
+[dev-dependencies]
+criterion = "=0.5.1"
+
+[[bench]]
+name = "session_bench"
+harness = false
