@@ -1,0 +1,103 @@
+name: One-shot requested download chunk enforcement
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-download-window.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Enforce requested download chunk window
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/web/src/file_transfer.ts')
+          text = path.read_text(encoding='utf-8')
+
+          old_import = '''import {
+  isDownloadChunkCommitCurrent,
+  pauseDownloadForChannelReplacement,
+  pauseUploadForChannelReplacement,
+} from "./file_transfer_recovery";
+'''
+          new_import = old_import + 'import { isRequestedDownloadChunk } from "./download_chunk_window";\n'
+          if text.count(old_import) != 1:
+              raise SystemExit(f'import anchor count={text.count(old_import)}')
+          text = text.replace(old_import, new_import, 1)
+
+          old_guard = '''  const offset = Number(rawOffset);
+  const expectedDigest = bytes.slice(8, 40);
+  const payload = bytes.slice(CHUNK_HEADER_BYTES);
+  if (offset !== job.received || offset + payload.byteLength > job.file.size) {
+    await failDownload(job, "远端文件分块顺序不一致");
+    return;
+  }
+'''
+          new_guard = '''  const offset = Number(rawOffset);
+  const expectedDigest = bytes.slice(8, 40);
+  const payload = bytes.slice(CHUNK_HEADER_BYTES);
+  if (!isRequestedDownloadChunk({
+    offset,
+    payloadBytes: payload.byteLength,
+    received: job.received,
+    requested: job.requested,
+    outstanding: job.outstanding,
+    fileSize: job.file.size,
+  })) {
+    await failDownload(job, "远端返回了未请求、无进度或顺序不一致的文件分块");
+    return;
+  }
+'''
+          if text.count(old_guard) != 1:
+              raise SystemExit(f'download guard anchor count={text.count(old_guard)}')
+          text = text.replace(old_guard, new_guard, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build Web production bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/file_transfer.ts
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): reject unsolicited download chunks"
+          git push origin HEAD:main
