@@ -385,7 +385,10 @@ impl RemoteSessionStateMachine {
                 if self.state != SessionState::Connected {
                     return self.invalid();
                 }
-                match self.operation_high_water.map(|latest| operation.cmp(&latest)) {
+                match self
+                    .operation_high_water
+                    .map(|latest| operation.cmp(&latest))
+                {
                     Some(Ordering::Less) => Self::ignore_stale(),
                     Some(Ordering::Equal) if self.operation.is_none() => Self::ignore_stale(),
                     Some(Ordering::Equal | Ordering::Greater) | None => {
