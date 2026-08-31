@@ -1,3 +1,8 @@
+import {
+  resetClipboardRequestsForChannelChange,
+  type ClipboardPendingDirection,
+} from "./clipboard_request_scope";
+
 type ControlChannelDetail = {
   channel: RTCDataChannel;
 };
@@ -7,8 +12,6 @@ type ControlMessageDetail = {
   message: Record<string, unknown>;
 };
 
-type PendingDirection = "local-to-remote" | "remote-to-local";
-
 const MAX_CLIPBOARD_UTF8_BYTES = 128 * 1024;
 const encoder = new TextEncoder();
 let controlChannel: RTCDataChannel | null = null;
@@ -16,7 +19,7 @@ let clipboardButton: HTMLButtonElement | null = null;
 let clipboardPanel: HTMLDivElement | null = null;
 let clipboardText: HTMLTextAreaElement | null = null;
 let clipboardStatus: HTMLSpanElement | null = null;
-const pending = new Map<string, PendingDirection>();
+const pending = new Map<string, ClipboardPendingDirection>();
 
 function textBytes(value: string) {
   return encoder.encode(value).byteLength;
@@ -99,7 +102,20 @@ async function copyTextLocally() {
 }
 
 function attachControlChannel(channel: RTCDataChannel) {
+  const cancelledPending = resetClipboardRequestsForChannelChange(
+    pending,
+    controlChannel,
+    channel,
+  );
   controlChannel = channel;
+
+  if (cancelledPending) {
+    setStatus("控制通道已切换，未完成的剪贴板操作已取消");
+  }
+  if (channel.readyState === "open") {
+    setStatus(cancelledPending ? "剪贴板已恢复，请重新执行操作" : "剪贴板就绪");
+  }
+
   channel.addEventListener("open", () => {
     if (controlChannel === channel) setStatus("剪贴板就绪");
   });
