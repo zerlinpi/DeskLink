@@ -51,6 +51,7 @@ for (const required of [
   "controllerAuthRequired",
   "turnRuntimeRequired",
   "forceRelay",
+  "lanFirstIce",
 ]) {
   if (!configSource.includes(required)) {
     fail(`desklink-config.js is missing public field ${required}`);
@@ -67,7 +68,13 @@ const bundleSource = (
 if (!bundleSource.includes("DESKLINK_CONFIG")) {
   fail("production bundle no longer references the runtime configuration object");
 }
-for (const required of ["signalUrl", "controllerSessionUrl", "turnCredentialsUrl", "forceRelay"]) {
+for (const required of [
+  "signalUrl",
+  "controllerSessionUrl",
+  "turnCredentialsUrl",
+  "forceRelay",
+  "lanFirstIce",
+]) {
   if (!bundleSource.includes(required)) {
     fail(`production bundle is not wired to runtime field ${required}`);
   }
