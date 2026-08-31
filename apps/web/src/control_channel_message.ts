@@ -1,3 +1,4 @@
+import { isValidControlRttRequestId } from "./control_rtt";
 import {
   parseHostCapabilitiesMessage,
   type HostCapabilitiesV1,
@@ -5,6 +6,7 @@ import {
 
 export type ControlChannelMessage =
   | { kind: "host-capabilities"; capabilities: HostCapabilitiesV1 }
+  | { kind: "control-rtt-ack"; requestId: string }
   | { kind: "other" }
   | { kind: "invalid" };
 
@@ -25,6 +27,11 @@ export function decodeControlChannelText(text: string): ControlChannelMessage {
   }
 
   const record = value as Record<string, unknown>;
+  if (record.t === "control-rtt-ack") {
+    return isValidControlRttRequestId(record.requestId)
+      ? { kind: "control-rtt-ack", requestId: record.requestId }
+      : { kind: "invalid" };
+  }
   if (record.t !== "host-capabilities") return { kind: "other" };
 
   const capabilities = parseHostCapabilitiesMessage(record);
