@@ -177,7 +177,9 @@ fn session_generation_high_water_survives_close() {
     let peer = PeerGeneration::initial();
     let mut machine = RemoteSessionStateMachine::new();
 
-    machine.apply(SessionEvent::Start { session: session2 }).unwrap();
+    machine
+        .apply(SessionEvent::Start { session: session2 })
+        .unwrap();
     machine
         .apply(SessionEvent::SignalConnected { session: session2 })
         .unwrap();
@@ -201,7 +203,9 @@ fn session_generation_high_water_survives_close() {
         .unwrap();
 
     assert_eq!(
-        machine.apply(SessionEvent::Start { session: session1 }).unwrap(),
+        machine
+            .apply(SessionEvent::Start { session: session1 })
+            .unwrap(),
         vec![SessionCommand::IgnoreStaleEvent]
     );
     assert_eq!(machine.state(), SessionState::Idle);
