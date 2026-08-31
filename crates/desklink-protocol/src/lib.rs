@@ -9,6 +9,14 @@ macro_rules! generation_type {
                 Self(1)
             }
 
+            pub const fn from_raw(value: u64) -> Option<Self> {
+                if value == 0 {
+                    None
+                } else {
+                    Some(Self(value))
+                }
+            }
+
             pub const fn get(self) -> u64 {
                 self.0
             }
@@ -45,6 +53,8 @@ mod tests {
         );
         assert_eq!(peer.get(), 1);
         assert_eq!(peer.next().expect("peer generation increment").get(), 2);
+        assert_eq!(SessionGeneration::from_raw(0), None);
+        assert_eq!(SessionGeneration::from_raw(42).map(SessionGeneration::get), Some(42));
 
         let _: SessionGeneration = session;
         let _: PeerGeneration = peer;
