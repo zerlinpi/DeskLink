@@ -1,0 +1,148 @@
+name: One-shot Windows peer signaling scope
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-peer-signal-scope.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bind local signaling callbacks to their peer session
+        shell: pwsh
+        run: |
+          @'
+          #pragma once
+
+          #include <string_view>
+
+          namespace desklink {
+
+          inline bool PeerSignalScopeCurrent(
+              bool peer_current,
+              std::string_view current_controller,
+              std::string_view expected_controller,
+              std::string_view current_session,
+              std::string_view expected_session) {
+            return peer_current &&
+                !expected_controller.empty() &&
+                !expected_session.empty() &&
+                current_controller == expected_controller &&
+                current_session == expected_session;
+          }
+
+          }  // namespace desklink
+          '@ | Set-Content apps/windows-agent/src/peer_signal_scope.h -Encoding utf8
+
+          @'
+          #include "peer_signal_scope.h"
+
+          #include <iostream>
+
+          int main() {
+            using desklink::PeerSignalScopeCurrent;
+
+            if (!PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-a", "session-a")) {
+              std::cerr << "current peer signaling scope was rejected\n";
+              return 1;
+            }
+            if (PeerSignalScopeCurrent(false, "controller-a", "controller-a", "session-a", "session-a")) {
+              std::cerr << "stale peer signaling scope was accepted\n";
+              return 1;
+            }
+            if (PeerSignalScopeCurrent(true, "controller-b", "controller-a", "session-a", "session-a")) {
+              std::cerr << "replaced controller signaling scope was accepted\n";
+              return 1;
+            }
+            if (PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-b", "session-a")) {
+              std::cerr << "replaced session signaling scope was accepted\n";
+              return 1;
+            }
+            if (PeerSignalScopeCurrent(true, "", "", "session-a", "session-a") ||
+                PeerSignalScopeCurrent(true, "controller-a", "controller-a", "", "")) {
+              std::cerr << "empty signaling identity was accepted\n";
+              return 1;
+            }
+
+            std::cout << "DeskLink peer signaling scope smoke passed.\n";
+            return 0;
+          }
+          '@ | Set-Content apps/windows-agent/src/peer_signal_scope_smoke.cpp -Encoding utf8
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/windows-agent/src/webrtc_session.cpp')
+          text = path.read_text(encoding='utf-8')
+
+          include_anchor = '#include "file_transfer_receiver.h"\n#include "pointer_wire.h"\n'
+          include_replacement = '#include "file_transfer_receiver.h"\n#include "peer_signal_scope.h"\n#include "pointer_wire.h"\n'
+          if include_anchor in text:
+              text = text.replace(include_anchor, include_replacement, 1)
+          elif '#include "peer_signal_scope.h"' not in text:
+              raise SystemExit('peer signal scope include anchor missing')
+
+          old = '''  peer->onLocalDescription([this](rtc::Description description) {\n    SendSignal(\n        description.typeString(),\n        json{{"type", description.typeString()}, {"sdp", std::string(description)}});\n  });\n  peer->onLocalCandidate([this](rtc::Candidate candidate) {\n    SendSignal(\n        "ice",\n        json{{"candidate", std::string(candidate)}, {"sdpMid", candidate.mid()}});\n  });'''
+          new = '''  peer->onLocalDescription([this, weak_peer, controller, session](rtc::Description description) {\n    auto owner = weak_peer.lock();\n    if (!owner) return;\n    {\n      std::scoped_lock lock(mutex_);\n      if (!PeerSignalScopeCurrent(\n              peer_ == owner,\n              controller_id_,\n              controller,\n              session_id_,\n              session)) {\n        return;\n      }\n    }\n    SendSignalTo(\n        controller,\n        session,\n        description.typeString(),\n        json{{"type", description.typeString()}, {"sdp", std::string(description)}});\n  });\n  peer->onLocalCandidate([this, weak_peer, controller, session](rtc::Candidate candidate) {\n    auto owner = weak_peer.lock();\n    if (!owner) return;\n    {\n      std::scoped_lock lock(mutex_);\n      if (!PeerSignalScopeCurrent(\n              peer_ == owner,\n              controller_id_,\n              controller,\n              session_id_,\n              session)) {\n        return;\n      }\n    }\n    SendSignalTo(\n        controller,\n        session,\n        "ice",\n        json{{"candidate", std::string(candidate)}, {"sdpMid", candidate.mid()}});\n  });'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('local description/candidate callback anchor missing')
+          path.write_text(text, encoding='utf-8')
+
+          cmake = Path('apps/windows-agent/CMakeLists.txt')
+          text = cmake.read_text(encoding='utf-8')
+          agent_anchor = '  src/input_channel_authority.h\n  src/input_injector.cpp\n'
+          agent_replacement = '  src/input_channel_authority.h\n  src/peer_signal_scope.h\n  src/input_injector.cpp\n'
+          if agent_anchor in text:
+              text = text.replace(agent_anchor, agent_replacement, 1)
+          elif '  src/peer_signal_scope.h\n' not in text:
+              raise SystemExit('agent peer signal scope source anchor missing')
+
+          smoke_anchor = '''add_executable(desklink-input-channel-authority-smoke\n  src/input_channel_authority_smoke.cpp\n  src/input_channel_authority.h\n)\ntarget_compile_definitions(desklink-input-channel-authority-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)\ntarget_compile_options(desklink-input-channel-authority-smoke PRIVATE /W4 /permissive-)\n'''
+          smoke_replacement = smoke_anchor + '''\nadd_executable(desklink-peer-signal-scope-smoke\n  src/peer_signal_scope_smoke.cpp\n  src/peer_signal_scope.h\n)\ntarget_compile_definitions(desklink-peer-signal-scope-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)\ntarget_compile_options(desklink-peer-signal-scope-smoke PRIVATE /W4 /permissive-)\n'''
+          if smoke_anchor in text and 'add_executable(desklink-peer-signal-scope-smoke' not in text:
+              text = text.replace(smoke_anchor, smoke_replacement, 1)
+          elif 'add_executable(desklink-peer-signal-scope-smoke' not in text:
+              raise SystemExit('peer signal scope smoke CMake anchor missing')
+          cmake.write_text(text, encoding='utf-8')
+          PY
+
+          git diff --check
+
+      - name: Configure Windows host
+        run: cmake -S apps/windows-agent -B build/windows-peer-scope -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+
+      - name: Build Agent and peer scope smoke
+        run: cmake --build build/windows-peer-scope --config Release --target desklink-agent desklink-peer-signal-scope-smoke --parallel
+
+      - name: Validate peer signaling scope
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-peer-scope/Release/desklink-peer-signal-scope-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Peer signaling scope smoke failed with exit code $LASTEXITCODE" }
+
+      - name: Commit Windows peer signaling hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/windows-agent/CMakeLists.txt \
+            apps/windows-agent/src/webrtc_session.cpp \
+            apps/windows-agent/src/peer_signal_scope.h \
+            apps/windows-agent/src/peer_signal_scope_smoke.cpp
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(windows): bind local signaling to current peer"
+          git push origin HEAD:main
