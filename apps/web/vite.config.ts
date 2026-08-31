@@ -46,6 +46,10 @@ function runtimeConfigBridge(env: Record<string, string>) {
       "import.meta.env.VITE_ICE_TRANSPORT_POLICY",
       runtimeBooleanFlag("forceRelay", env.VITE_ICE_TRANSPORT_POLICY, "relay", "all"),
     ],
+    [
+      "import.meta.env.VITE_LAN_FIRST_ICE",
+      runtimeBooleanFlag("lanFirstIce", env.VITE_LAN_FIRST_ICE, "1", "0"),
+    ],
   ]);
 
   return {
