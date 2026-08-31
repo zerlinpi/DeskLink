@@ -3,6 +3,7 @@ import {
   pauseDownloadForChannelReplacement,
   pauseUploadForChannelReplacement,
 } from "./file_transfer_recovery";
+import { isRequestedDownloadChunk } from "./download_chunk_window";
 
 type ControlChannelDetail = {
   channel: RTCDataChannel;
@@ -711,8 +712,15 @@ async function processDownloadBinary(buffer: ArrayBuffer, token: number) {
   const offset = Number(rawOffset);
   const expectedDigest = bytes.slice(8, 40);
   const payload = bytes.slice(CHUNK_HEADER_BYTES);
-  if (offset !== job.received || offset + payload.byteLength > job.file.size) {
-    await failDownload(job, "远端文件分块顺序不一致");
+  if (!isRequestedDownloadChunk({
+    offset,
+    payloadBytes: payload.byteLength,
+    received: job.received,
+    requested: job.requested,
+    outstanding: job.outstanding,
+    fileSize: job.file.size,
+  })) {
+    await failDownload(job, "远端返回了未请求、无进度或顺序不一致的文件分块");
     return;
   }
 
