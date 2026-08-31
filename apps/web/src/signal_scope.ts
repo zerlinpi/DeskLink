@@ -35,8 +35,7 @@ export function shouldAcceptSignalMessage(
   }
 
   if (message.type === "device-revoked") {
-    const revokedTarget = typeof message.target === "string" ? message.target : "";
-    return !revokedTarget || revokedTarget === scope.hostId;
+    return message.target === scope.hostId;
   }
 
   return true;
