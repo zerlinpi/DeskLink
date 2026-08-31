@@ -1,6 +1,6 @@
 # Rust Core Prototype 基准基线
 
-> 状态：Phase 1 首次基线已采集。本文档记录可复现实测，不把首次采样结果反向包装成“通过阈值”。微基准结果只描述 reducer / C ABI 的本地 CPU 成本，不等同于端到端远程桌面延迟。
+> 状态：Phase 1 首次基线已采集，并在 Phase-1 decision gate 上完成独立复测。本文档记录可复现实测，不把采样结果反向包装成“通过阈值”。微基准结果只描述 reducer / C ABI 的本地 CPU 成本，不等同于端到端远程桌面延迟。
 
 ## 1. 基准环境
 
@@ -78,3 +78,43 @@ Criterion 每项使用 10 个 samples。下面的 `ns/event` 均由 Criterion �
 3. GitHub hosted runner 的绝对性能只能用于 prototype microbenchmark 趋势；不能据此承诺 Windows 用户的端到端延迟。
 4. FFI benchmark 如果更慢，必须保留真实结果；Phase-1 的主要判断仍是确定性、stale-race 正确性、集成风险和总体产品回归，而不是单一 ns/event。
 5. 在至少有多次独立 benchmark run 之前，不把单次 hosted-runner 数据设为硬失败阈值；当前 workflow 负责确保 benchmark 可编译、可执行并产生可审计输出。
+
+## 6. Phase-1 decision gate 独立复测
+
+Phase-1 gate 在 commit `bb0e4d43104d52b75cf3e725b5f93e5edb50d180`、GitHub Actions run `33395660025` 上重新执行了 release property/stress、session Criterion 和 FFI Criterion。Runner 仍为 GitHub-hosted Ubuntu 24.04；绝对值与首次基线有明显 runner-to-runner 漂移，因此只能作为第二份独立 synthetic 证据，不能把两个不同 hosted runner 的差值解释为代码回归。
+
+### 6.1 Session reducer 复测
+
+| Benchmark | Events / batch | Criterion time | Throughput median |
+| --- | ---: | --- | ---: |
+| valid lifecycle | 100,000 | `[2.6957, 2.6978, 2.7001] ms` | `37.068 Melem/s` |
+| stale events | 100,000 | `[2.4574, 2.4605, 2.4629] ms` | `40.643 Melem/s` |
+| peer replacement | 100,000 | `[2.6552, 2.6585, 2.6645] ms` | `37.615 Melem/s` |
+| control replacement | 100,000 | `[1.2300, 1.2304, 1.2313] ms` | `81.271 Melem/s` |
+| pointer replacement | 100,000 | `[1.2302, 1.2307, 1.2314] ms` | `81.255 Melem/s` |
+| valid lifecycle | 1,000,000 | `[29.004, 29.150, 29.349] ms` | `34.305 Melem/s` |
+| stale events | 1,000,000 | `[24.592, 24.635, 24.703] ms` | `40.593 Melem/s` |
+| peer replacement | 1,000,000 | `[26.566, 26.593, 26.636] ms` | `37.604 Melem/s` |
+| control replacement | 1,000,000 | `[12.304, 12.315, 12.338] ms` | `81.203 Melem/s` |
+| pointer replacement | 1,000,000 | `[12.298, 12.300, 12.303] ms` | `81.302 Melem/s` |
+
+### 6.2 FFI 复测
+
+| Path | Event class | Events / batch | Criterion time | Throughput median | derived FFI overhead |
+| --- | --- | ---: | --- | ---: | ---: |
+| Direct reducer | current | 100,000 | `[1.2376, 1.2378, 1.2384] ms` | `80.785 Melem/s` | baseline |
+| C ABI | current | 100,000 | `[1.6828, 1.6854, 1.6882] ms` | `59.332 Melem/s` | `~4.476 ns/event` |
+| Direct reducer | stale | 100,000 | `[2.4071, 2.4099, 2.4119] ms` | `41.496 Melem/s` | baseline |
+| C ABI | stale | 100,000 | `[2.5162, 2.5203, 2.5256] ms` | `39.678 Melem/s` | `~1.104 ns/event` |
+| Direct reducer | current | 1,000,000 | `[12.386, 12.398, 12.429] ms` | `80.658 Melem/s` | baseline |
+| C ABI | current | 1,000,000 | `[16.829, 16.929, 17.094] ms` | `59.071 Melem/s` | `~4.531 ns/event` |
+| Direct reducer | stale | 1,000,000 | `[23.958, 23.991, 24.066] ms` | `41.682 Melem/s` | baseline |
+| C ABI | stale | 1,000,000 | `[25.735, 25.756, 25.770] ms` | `38.826 Melem/s` | `~1.765 ns/event` |
+
+### 6.3 Stress 与工具链成本
+
+- Release `10,000`-case property test：PASS；测试体约 `0.01s`（首次 release 编译时间另计）。
+- Release `1,000,000`-event fixed-seed stale-race stress：PASS；测试体约 `0.04s`，带 Cargo 启动的 shell 计时 `0.136s`。
+- 同一 hosted run 的冷态 strict Clippy 在依赖下载/编译后约 `13.4s`；release property 首次冷编译约 `30.3s`；session bench profile 增量构建约 `1.8s`；FFI bench 额外构建约 `13.1s`。
+- 这些是 CI/toolchain 成本，不是生产 runtime CPU、内存或用户延迟。
+- Phase 1 尚未把 Rust library 链接进 Windows Agent，因此没有可代表生产用户的 Rust 增量 Private Bytes / Working Set。该指标必须在 shadow integration 后测量，并在任何 authority transfer 前成为硬门禁。
