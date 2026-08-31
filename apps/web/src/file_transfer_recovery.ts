@@ -11,6 +11,11 @@ export type DownloadRecoveryState = {
   outstanding: number;
 };
 
+export type DownloadChunkCommitState = {
+  state: string;
+  token: number;
+};
+
 const TERMINAL_STATES = new Set(["complete", "cancelled", "error"]);
 
 export function pauseUploadForChannelReplacement(job: UploadRecoveryState | null): boolean {
@@ -27,4 +32,12 @@ export function pauseDownloadForChannelReplacement(job: DownloadRecoveryState | 
   job.requested = job.received;
   job.outstanding = 0;
   return true;
+}
+
+export function isDownloadChunkCommitCurrent<T extends DownloadChunkCommitState>(
+  currentJob: T | null,
+  job: T,
+  token: number,
+): boolean {
+  return currentJob === job && job.state === "receiving" && job.token === token;
 }
