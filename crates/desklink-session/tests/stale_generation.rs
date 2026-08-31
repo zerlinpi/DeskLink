@@ -169,3 +169,140 @@ fn old_operation_timeout_is_ignored_after_new_operation_starts() {
     );
     assert_eq!(machine.current_operation(), Some(operation2));
 }
+
+#[test]
+fn session_generation_high_water_survives_close() {
+    let session1 = SessionGeneration::initial();
+    let session2 = session1.next().expect("next session generation");
+    let peer = PeerGeneration::initial();
+    let mut machine = RemoteSessionStateMachine::new();
+
+    machine.apply(SessionEvent::Start { session: session2 }).unwrap();
+    machine
+        .apply(SessionEvent::SignalConnected { session: session2 })
+        .unwrap();
+    machine
+        .apply(SessionEvent::AuthenticationAccepted {
+            session: session2,
+            peer,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::PeerConnected {
+            session: session2,
+            peer,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::CloseRequested { session: session2 })
+        .unwrap();
+    machine
+        .apply(SessionEvent::Closed { session: session2 })
+        .unwrap();
+
+    assert_eq!(
+        machine.apply(SessionEvent::Start { session: session1 }).unwrap(),
+        vec![SessionCommand::IgnoreStaleEvent]
+    );
+    assert_eq!(machine.state(), SessionState::Idle);
+    assert_eq!(machine.current_session(), None);
+}
+
+#[test]
+fn control_generation_high_water_survives_channel_close() {
+    let (mut machine, session, peer) = connected_machine();
+    let control1 = ControlChannelGeneration::initial();
+    let control2 = control1.next().expect("next control generation");
+
+    machine
+        .apply(SessionEvent::ControlOpened {
+            session,
+            peer,
+            control: control2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::ControlClosed {
+            session,
+            peer,
+            control: control2,
+        })
+        .unwrap();
+
+    assert_eq!(
+        machine
+            .apply(SessionEvent::ControlOpened {
+                session,
+                peer,
+                control: control1,
+            })
+            .unwrap(),
+        vec![SessionCommand::IgnoreStaleEvent]
+    );
+    assert_eq!(machine.current_control(), None);
+}
+
+#[test]
+fn pointer_generation_high_water_survives_channel_close() {
+    let (mut machine, session, peer) = connected_machine();
+    let pointer1 = PointerChannelGeneration::initial();
+    let pointer2 = pointer1.next().expect("next pointer generation");
+
+    machine
+        .apply(SessionEvent::PointerOpened {
+            session,
+            peer,
+            pointer: pointer2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::PointerClosed {
+            session,
+            peer,
+            pointer: pointer2,
+        })
+        .unwrap();
+
+    assert_eq!(
+        machine
+            .apply(SessionEvent::PointerOpened {
+                session,
+                peer,
+                pointer: pointer1,
+            })
+            .unwrap(),
+        vec![SessionCommand::IgnoreStaleEvent]
+    );
+    assert_eq!(machine.current_pointer(), None);
+}
+
+#[test]
+fn operation_generation_high_water_survives_timeout() {
+    let (mut machine, session, _peer) = connected_machine();
+    let operation1 = OperationGeneration::initial();
+    let operation2 = operation1.next().expect("next operation generation");
+
+    machine
+        .apply(SessionEvent::OperationStarted {
+            session,
+            operation: operation2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::OperationTimedOut {
+            session,
+            operation: operation2,
+        })
+        .unwrap();
+
+    assert_eq!(
+        machine
+            .apply(SessionEvent::OperationStarted {
+                session,
+                operation: operation1,
+            })
+            .unwrap(),
+        vec![SessionCommand::IgnoreStaleEvent]
+    );
+    assert_eq!(machine.current_operation(), None);
+}
