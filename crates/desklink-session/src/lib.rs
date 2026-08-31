@@ -100,7 +100,8 @@ impl RemoteSessionStateMachine {
                 SessionCommand::BeginAuthentication
             }
             SessionEvent::AuthenticationAccepted { session, peer }
-                if self.state == SessionState::Authenticating && self.session_is_current(session) =>
+                if self.state == SessionState::Authenticating
+                    && self.session_is_current(session) =>
             {
                 self.peer = Some(peer);
                 self.state = SessionState::Negotiating;
