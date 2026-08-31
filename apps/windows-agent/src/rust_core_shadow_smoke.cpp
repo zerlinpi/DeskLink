@@ -152,7 +152,7 @@ int main() {
   // PeerConnection::Connected. C++ may already consider that channel current, but the
   // Rust reducer is still Negotiating. Cache the current channel authority and replay it
   // only after the peer-connected observation rather than reporting a false mismatch.
-  desklink::RustCoreShadowLifecycle reordered;
+  desklink::RustCoreShadowEventBridge reordered;
   const auto early_scope = reordered.BeginPeer(false);
   Require(
       reordered.CompareControlOpened(early_scope, 11, true),
