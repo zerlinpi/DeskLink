@@ -4,11 +4,7 @@ use desklink_protocol::{
 };
 use desklink_session::{RemoteSessionStateMachine, SessionCommand, SessionEvent, SessionState};
 
-fn connected_machine() -> (
-    RemoteSessionStateMachine,
-    SessionGeneration,
-    PeerGeneration,
-) {
+fn connected_machine() -> (RemoteSessionStateMachine, SessionGeneration, PeerGeneration) {
     let session = SessionGeneration::initial();
     let peer = PeerGeneration::initial();
     let mut machine = RemoteSessionStateMachine::new();
