@@ -39,8 +39,7 @@ From the repository root:
 
 ```bash
 cd infra/production
-chmod +x bootstrap.sh
-./bootstrap.sh control.example.com 203.0.113.10 office-pc-01 admin
+sh bootstrap.sh control.example.com 203.0.113.10 office-pc-01 admin
 ```
 
 The script creates:
