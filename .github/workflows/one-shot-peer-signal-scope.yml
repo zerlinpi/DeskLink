@@ -22,62 +22,12 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import base64
 
-          Path('apps/windows-agent/src/peer_signal_scope.h').write_text(r'''#pragma once
-
-#include <string_view>
-
-namespace desklink {
-
-inline bool PeerSignalScopeCurrent(
-    bool peer_current,
-    std::string_view current_controller,
-    std::string_view expected_controller,
-    std::string_view current_session,
-    std::string_view expected_session) {
-  return peer_current &&
-      !expected_controller.empty() &&
-      !expected_session.empty() &&
-      current_controller == expected_controller &&
-      current_session == expected_session;
-}
-
-}  // namespace desklink
-''', encoding='utf-8')
-
-          Path('apps/windows-agent/src/peer_signal_scope_smoke.cpp').write_text(r'''#include "peer_signal_scope.h"
-
-#include <iostream>
-
-int main() {
-  using desklink::PeerSignalScopeCurrent;
-
-  if (!PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-a", "session-a")) {
-    std::cerr << "current peer signaling scope was rejected\n";
-    return 1;
-  }
-  if (PeerSignalScopeCurrent(false, "controller-a", "controller-a", "session-a", "session-a")) {
-    std::cerr << "stale peer signaling scope was accepted\n";
-    return 1;
-  }
-  if (PeerSignalScopeCurrent(true, "controller-b", "controller-a", "session-a", "session-a")) {
-    std::cerr << "replaced controller signaling scope was accepted\n";
-    return 1;
-  }
-  if (PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-b", "session-a")) {
-    std::cerr << "replaced session signaling scope was accepted\n";
-    return 1;
-  }
-  if (PeerSignalScopeCurrent(true, "", "", "session-a", "session-a") ||
-      PeerSignalScopeCurrent(true, "controller-a", "controller-a", "", "")) {
-    std::cerr << "empty signaling identity was accepted\n";
-    return 1;
-  }
-
-  std::cout << "DeskLink peer signaling scope smoke passed.\n";
-  return 0;
-}
-''', encoding='utf-8')
+          header = "I3ByYWdtYSBvbmNlCgojaW5jbHVkZSA8c3RyaW5nX3ZpZXc+CgpuYW1lc3BhY2UgZGVza2xpbmsgewoKaW5saW5lIGJvb2wgUGVlclNpZ25hbFNjb3BlQ3VycmVudCgKICAgIGJvb2wgcGVlcl9jdXJyZW50LAogICAgc3RkOjpzdHJpbmdfdmlldyBjdXJyZW50X2NvbnRyb2xsZXIsCiAgICBzdGQ6OnN0cmluZ192aWV3IGV4cGVjdGVkX2NvbnRyb2xsZXIsCiAgICBzdGQ6OnN0cmluZ192aWV3IGN1cnJlbnRfc2Vzc2lvbiwKICAgIHN0ZDo6c3RyaW5nX3ZpZXcgZXhwZWN0ZWRfc2Vzc2lvbikgewogIHJldHVybiBwZWVyX2N1cnJlbnQgJiYKICAgICAgIWV4cGVjdGVkX2NvbnRyb2xsZXIuZW1wdHkoKSAmJgogICAgICAhZXhwZWN0ZWRfc2Vzc2lvbi5lbXB0eSgpICYmCiAgICAgIGN1cnJlbnRfY29udHJvbGxlciA9PSBleHBlY3RlZF9jb250cm9sbGVyICYmCiAgICAgIGN1cnJlbnRfc2Vzc2lvbiA9PSBleHBlY3RlZF9zZXNzaW9uOwp9Cgp9ICAvLyBuYW1lc3BhY2UgZGVza2xpbmsK"
+          smoke = "I2luY2x1ZGUgInBlZXJfc2lnbmFsX3Njb3BlLmgiCgojaW5jbHVkZSA8aW9zdHJlYW0+CgppbnQgbWFpbigpIHsKICB1c2luZyBkZXNrbGluazo6UGVlclNpZ25hbFNjb3BlQ3VycmVudDsKCiAgaWYgKCFQZWVyU2lnbmFsU2NvcGVDdXJyZW50KHRydWUsICJjb250cm9sbGVyLWEiLCAiY29udHJvbGxlci1hIiwgInNlc3Npb24tYSIsICJzZXNzaW9uLWEiKSkgewogICAgc3RkOjpjZXJyIDw8ICJjdXJyZW50IHBlZXIgc2lnbmFsaW5nIHNjb3BlIHdhcyByZWplY3RlZFxuIjsKICAgIHJldHVybiAxOwogIH0KICBpZiAoUGVlclNpZ25hbFNjb3BlQ3VycmVudChmYWxzZSwgImNvbnRyb2xsZXItYSIsICJjb250cm9sbGVyLWEiLCAic2Vzc2lvbi1hIiwgInNlc3Npb24tYSIpKSB7CiAgICBzdGQ6OmNlcnIgPDwgInN0YWxlIHBlZXIgc2lnbmFsaW5nIHNjb3BlIHdhcyBhY2NlcHRlZFxuIjsKICAgIHJldHVybiAxOwogIH0KICBpZiAoUGVlclNpZ25hbFNjb3BlQ3VycmVudCh0cnVlLCAiY29udHJvbGxlci1iIiwgImNvbnRyb2xsZXItYSIsICJzZXNzaW9uLWEiLCAic2Vzc2lvbi1hIikpIHsKICAgIHN0ZDo6Y2VyciA8PCAicmVwbGFjZWQgY29udHJvbGxlciBzaWduYWxpbmcgc2NvcGUgd2FzIGFjY2VwdGVkXG4iOwogICAgcmV0dXJuIDE7CiAgfQogIGlmIChQZWVyU2lnbmFsU2NvcGVDdXJyZW50KHRydWUsICJjb250cm9sbGVyLWEiLCAiY29udHJvbGxlci1hIiwgInNlc3Npb24tYiIsICJzZXNzaW9uLWEiKSkgewogICAgc3RkOjpjZXJyIDw8ICJyZXBsYWNlZCBzZXNzaW9uIHNpZ25hbGluZyBzY29wZSB3YXMgYWNjZXB0ZWRcbiI7CiAgICByZXR1cm4gMTsKICB9CiAgaWYgKFBlZXJTaWduYWxTY29wZUN1cnJlbnQodHJ1ZSwgIiIsICIiLCAic2Vzc2lvbi1hIiwgInNlc3Npb24tYSIpIHx8CiAgICAgIFBlZXJTaWduYWxTY29wZUN1cnJlbnQodHJ1ZSwgImNvbnRyb2xsZXItYSIsICJjb250cm9sbGVyLWEiLCAiIiwgIiIpKSB7CiAgICBzdGQ6OmNlcnIgPDwgImVtcHR5IHNpZ25hbGluZyBpZGVudGl0eSB3YXMgYWNjZXB0ZWRcbiI7CiAgICByZXR1cm4gMTsKICB9CgogIHN0ZDo6Y291dCA8PCAiRGVza0xpbmsgcGVlciBzaWduYWxpbmcgc2NvcGUgc21va2UgcGFzc2VkLlxuIjsKICByZXR1cm4gMDsKfQo="
+          Path('apps/windows-agent/src/peer_signal_scope.h').write_bytes(base64.b64decode(header))
+          Path('apps/windows-agent/src/peer_signal_scope_smoke.cpp').write_bytes(base64.b64decode(smoke))
 
           path = Path('apps/windows-agent/src/webrtc_session.cpp')
           text = path.read_text(encoding='utf-8')
