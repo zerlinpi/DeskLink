@@ -16,6 +16,7 @@ on:
       - apps/windows-agent/src/rust_core_shadow_smoke.cpp
       - apps/windows-agent/src/webrtc_session.cpp
       - apps/windows-agent/src/webrtc_session.h
+      - tools/windows/run-native-smokes.ps1
       - .github/workflows/rust-core-shadow-prototype.yml
   workflow_dispatch:
 
@@ -23,6 +24,36 @@ permissions:
   contents: read
 
 jobs:
+  shadow-off:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Poison Cargo for default-off verification
+        shell: pwsh
+        run: |
+          $shim = Join-Path $env:RUNNER_TEMP "desklink-no-rust"
+          New-Item -ItemType Directory -Force -Path $shim | Out-Null
+          @"
+          @echo off
+          echo Cargo must not run when DESKLINK_ENABLE_RUST_CORE_SHADOW=OFF 1>&2
+          exit /b 97
+          "@ | Set-Content -Path (Join-Path $shim "cargo.cmd") -Encoding ascii
+          Add-Content -Path $env:GITHUB_PATH -Value $shim
+      - name: Configure default-off Windows build
+        run: cmake -S apps/windows-agent -B build/windows-agent-off -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+      - name: Verify shadow option defaults off
+        shell: pwsh
+        run: |
+          $cache = Get-Content "build/windows-agent-off/CMakeCache.txt" -Raw
+          if ($cache -notmatch '(?m)^DESKLINK_ENABLE_RUST_CORE_SHADOW:BOOL=OFF\s*$') {
+            throw "DESKLINK_ENABLE_RUST_CORE_SHADOW did not default to OFF"
+          }
+      - name: Build complete Windows Release without Rust
+        run: cmake --build build/windows-agent-off --config Release --parallel
+      - name: Run complete configured native smoke suite with shadow off
+        shell: pwsh
+        run: ./tools/windows/run-native-smokes.ps1 -BuildDirectory "build/windows-agent-off" -Configuration "Release"
+
   shadow-on:
     runs-on: windows-latest
     steps:
@@ -32,5 +63,8 @@ jobs:
         run: rustup toolchain install 1.85.1 --profile minimal
       - name: Configure shadow build
         run: cmake -S apps/windows-agent -B build/windows-agent-shadow -A x64 -DDESKLINK_ENABLE_RUST_CORE_SHADOW=ON -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
-      - name: Build native shadow smoke
-        run: cmake --build build/windows-agent-shadow --config Release --target desklink-rust-core-shadow-smoke --parallel
+      - name: Build complete Windows Release with shadow
+        run: cmake --build build/windows-agent-shadow --config Release --parallel
+      - name: Run complete native smoke suite with shadow on
+        shell: pwsh
+        run: ./tools/windows/run-native-smokes.ps1 -BuildDirectory "build/windows-agent-shadow" -Configuration "Release"
