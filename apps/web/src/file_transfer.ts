@@ -4,6 +4,7 @@ import {
   pauseUploadForChannelReplacement,
 } from "./file_transfer_recovery";
 import { isRequestedDownloadChunk } from "./download_chunk_window";
+import { canQueueDownloadBinaryFrame } from "./download_binary_queue";
 
 type ControlChannelDetail = {
   channel: RTCDataChannel;
@@ -93,6 +94,7 @@ const jobs: UploadJob[] = [];
 let remoteFiles: RemoteFile[] = [];
 let activeDownload: DownloadJob | null = null;
 let downloadProcessChain: Promise<void> = Promise.resolve();
+let pendingDownloadBinaryFrames = 0;
 
 let transferButton: HTMLButtonElement | null = null;
 let transferPanel: HTMLDivElement | null = null;
@@ -864,13 +866,24 @@ function attachTransferChannel(channel: RTCDataChannel) {
 
     if (event.data instanceof ArrayBuffer) {
       const job = activeDownload;
-      if (!job) return;
+      if (!job || job.state !== "receiving") return;
       const token = job.token;
       const buffer = event.data;
+      if (!canQueueDownloadBinaryFrame({
+        pendingFrames: pendingDownloadBinaryFrames,
+        frameBytes: buffer.byteLength,
+      })) {
+        void failDownload(job, "远端文件分块超过浏览器接收队列或协议上限");
+        return;
+      }
+      pendingDownloadBinaryFrames += 1;
       downloadProcessChain = downloadProcessChain
         .then(() => processDownloadBinary(buffer, token))
         .catch((error) => {
           console.debug("DeskLink download processing chain failed", error);
+        })
+        .finally(() => {
+          pendingDownloadBinaryFrames = Math.max(0, pendingDownloadBinaryFrames - 1);
         });
     }
   });
