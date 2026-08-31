@@ -49,6 +49,11 @@ void LogShadowMismatch(const std::string& message) {
 #endif
 }
 
+bool ShouldLogMismatch(std::uint64_t count) {
+  if (count <= 8) return true;
+  return count != 0 && (count & (count - 1)) == 0;
+}
+
 #if DESKLINK_ENABLE_RUST_CORE_SHADOW
 static_assert(kStatusOk == DESKLINK_CORE_STATUS_OK);
 static_assert(kStatusStale == DESKLINK_CORE_STATUS_STALE_EVENT);
@@ -76,6 +81,7 @@ RustCoreShadow::RustCoreShadow() {
 
 RustCoreShadow::~RustCoreShadow() {
 #if DESKLINK_ENABLE_RUST_CORE_SHADOW
+  std::scoped_lock lock(mutex_);
   if (handle_ != nullptr) {
     const std::int32_t status =
         desklink_core_destroy(static_cast<DeskLinkCoreHandle*>(handle_));
@@ -97,6 +103,11 @@ bool RustCoreShadow::available() const noexcept {
 #endif
 }
 
+std::uint64_t RustCoreShadow::mismatch_count() const {
+  std::scoped_lock lock(mutex_);
+  return mismatch_count_;
+}
+
 bool RustCoreShadow::Observe(
     std::uint32_t kind,
     std::uint64_t session,
@@ -107,6 +118,7 @@ bool RustCoreShadow::Observe(
     std::int32_t expected_status,
     std::uint32_t expected_command) {
 #if DESKLINK_ENABLE_RUST_CORE_SHADOW
+  std::unique_lock lock(mutex_);
   if (handle_ == nullptr) return true;
 
   DeskLinkCoreEvent event{};
@@ -133,12 +145,22 @@ bool RustCoreShadow::Observe(
 
   if (status == expected_status && command_matches) return true;
 
-  std::ostringstream message;
-  message << "event=" << kind << " session=" << session << " peer=" << peer
-          << " expected_status=" << expected_status << " actual_status=" << status
-          << " expected_command=" << expected_command << " actual_len=" << commands.len;
-  if (commands.len > 0) message << " actual_command=" << commands.commands[0];
-  LogShadowMismatch(message.str());
+  ++mismatch_count_;
+  const std::uint64_t mismatch_count = mismatch_count_;
+  const bool should_log = ShouldLogMismatch(mismatch_count);
+  std::string mismatch_message;
+  if (should_log) {
+    std::ostringstream message;
+    message << "count=" << mismatch_count << " event=" << kind << " session=" << session
+            << " peer=" << peer << " expected_status=" << expected_status
+            << " actual_status=" << status << " expected_command=" << expected_command
+            << " actual_len=" << commands.len;
+    if (commands.len > 0) message << " actual_command=" << commands.commands[0];
+    mismatch_message = message.str();
+  }
+  lock.unlock();
+
+  if (should_log) LogShadowMismatch(mismatch_message);
   return false;
 #else
   (void)kind;
