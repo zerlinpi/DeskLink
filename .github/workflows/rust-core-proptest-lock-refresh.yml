@@ -1,0 +1,39 @@
+name: Rust Core Proptest Lock Refresh
+
+on:
+  push:
+    branches:
+      - prototype/rust-core
+    paths:
+      - crates/desklink-session/Cargo.toml
+      - crates/desklink-session/tests/property_stress.rs
+      - .github/workflows/rust-core-proptest-lock-refresh.yml
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: prototype/rust-core
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Resolve proptest and compile session tests
+        run: cargo check -p desklink-session --tests
+      - name: Commit lockfile and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/rust-core-proptest-lock-refresh.yml
+          git add Cargo.lock .github/workflows/rust-core-proptest-lock-refresh.yml
+          if git diff --cached --quiet; then
+            echo "Expected Cargo.lock or workflow deletion to change the tree" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "test(rust): lock proptest dependency and remove refresh workflow"
+          git push origin HEAD:prototype/rust-core
