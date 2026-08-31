@@ -319,6 +319,12 @@ jobs:
           $smoke = Resolve-Path "build/windows-agent/Release/desklink-host-capabilities-smoke.exe"
           & $smoke
           if ($LASTEXITCODE -ne 0) { throw "HostCapabilitiesV1 producer smoke failed with exit code $LASTEXITCODE" }
+      - name: Validate peer signaling scope
+        shell: pwsh
+        run: |
+          $smoke = Resolve-Path "build/windows-agent/Release/desklink-peer-signal-scope-smoke.exe"
+          & $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Peer signaling scope smoke failed with exit code $LASTEXITCODE" }
       - name: Validate Access Code proof vector
         shell: pwsh
         run: |
