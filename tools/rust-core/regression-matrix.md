@@ -37,7 +37,7 @@
 | Web Controller | `npm ci`、`npm audit --audit-level=moderate`、typecheck、Vitest、production build | Chrome/Edge 连接、断线、输入、Ctrl+Alt+Del UI 状态 | Web 不接 Rust；任何协议差异先回滚 shadow |
 | Signal service | `go test ./...` + versioned build + provisioning tool checks | 自托管 Signal reconnect、controller/device auth | Go Signal 保持生产 authority |
 | Packaging / portable Windows | Windows static dependency validation、PowerShell syntax | 干净 Win10/11 安装、Service start、卸载/重装 | Prototype 不进入 release packaging，除非 decision gate ADVANCE |
-| Deployment | Compose config + network helper syntax；后续 Phase-1 执行部署 smoke | 自托管 Signal/TURN/Web 最小部署连接 | 部署失败阻断 Phase-1 ADVANCE |
+| Deployment | Compose config + Phase-1 production-stack hosted smoke | 公网域名/TLS、真实客户端到 Signal/Web/TURN 的跨网络连接 | 部署失败阻断 Phase-1 ADVANCE |
 | Memory / soak | 当前无 Rust 生产集成，因此没有可代表用户的长期结果 | 8h/24h/72h：Private Bytes/Working Set、CPU/GPU、crash、recovery | 未完成长期结果前不转 production authority |
 
 ## 当前自动化 target 清单
@@ -59,6 +59,32 @@ Windows CMake 当前可见的 native smoke targets：
 - `desklink-host-capabilities-smoke`
 
 `tools/windows/run-native-smokes.ps1` 应在 Phase-1 decision gate 重新运行完整集合，而不是只挑与 Rust 看似相关的 target。
+
+## Phase-1 automated gate evidence
+
+Phase-1 decision gate 在 commit `bb0e4d43104d52b75cf3e725b5f93e5edb50d180`、GitHub Actions run `33395660025` 上完成同一 SHA 的全栈自动化复测：
+
+- Rust：fmt、strict Clippy、workspace all-target tests、release 10,000-case property、release 1,000,000-event stress、session benchmark、FFI benchmark、Release FFI build 全部 PASS。
+- Signal：`go test ./...`、带项目版本 build、legacy device credential、独立 device credential rotation、controller registry provisioning 全部 PASS。
+- Web：Access Code proof vector、`npm ci`、`npm audit --audit-level=moderate`、typecheck、unit tests、production build 全部 PASS。
+- Windows：Windows Server 2025 hosted runner 上 CMake configure、static OpenSSL selection、Release build、portable dependency validation、DPAPI credential/access-code store-clear 全部 PASS。
+- Windows native smoke：动态发现并执行 `13` 个 target，全部 PASS；包括 access proof、active session、stable device identity、file-transfer chunk/download policy、H.264 Annex-B、host capabilities、input channel authority、peer signal scope、pointer wire、secure-attention API resolution、Service auth/SAS capability、video policy。
+- Deployment：version/schema/shell/Compose validation PASS；production bootstrap PASS；实际 build/start Signal + Web + coturn PASS；Signal `/readyz`、Web HTTP、TURN `3478` 和三个 container running 检查 PASS；teardown PASS。
+
+首次 gate run `33392595469` 曾在 deployment bootstrap 处失败，根因是 Git tree 中 `infra/production/bootstrap.sh` mode 为 `100644`，而 gate 使用 `./bootstrap.sh` 直接执行。受支持的调用方式已统一为 `sh bootstrap.sh`，第二次 gate 验证通过。该修复没有修改脚本 executable bit。
+
+### Phase-1 自动化没有证明的事项
+
+以下仍是 shadow / authority-transfer 前的真实机器硬门禁，不能从 hosted CI 推导为已通过：
+
+- 两台真实网络主机的 P2P 成功率、TTFF、重连；
+- 强制 TURN relay、真实 NAT、UDP/TCP/TLS fallback；
+- Win10/11 + Intel/NVIDIA/AMD 的 DXGI/MF capture/encode、GPU 使用率和高刷行为；
+- 浏览器到 Host 的实际 input latency / Motion-to-Photon、DPI/多显示器手感；
+- 本地 policy 允许 Services 时的实际 Ctrl+Alt+Del；hosted SAS smoke 只验证 API resolution / broker capability；
+- 登录/UAC Secure Desktop capture/control；当前仍不是完整生产能力；
+- Agent/Service 的 Rust shadow 增量 Private Bytes / Working Set；
+- 8h / 24h / 72h soak、crash count 和 recovery 后资源增长。
 
 ## Phase-1 rollback boundary
 
