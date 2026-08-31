@@ -26,10 +26,7 @@ fn snapshot(machine: &RemoteSessionStateMachine) -> Snapshot {
     }
 }
 
-fn connected_with(
-    session: SessionGeneration,
-    peer: PeerGeneration,
-) -> RemoteSessionStateMachine {
+fn connected_with(session: SessionGeneration, peer: PeerGeneration) -> RemoteSessionStateMachine {
     let mut machine = RemoteSessionStateMachine::new();
     machine.apply(SessionEvent::Start { session }).unwrap();
     machine
@@ -285,7 +282,8 @@ fn million_event_stale_race_stress_preserves_authority() {
                         SessionEvent::ControlOpened {
                             session,
                             peer,
-                            control: ControlChannelGeneration::from_raw(control_high_water).unwrap(),
+                            control: ControlChannelGeneration::from_raw(control_high_water)
+                                .unwrap(),
                         },
                     );
                 }
@@ -327,7 +325,8 @@ fn million_event_stale_race_stress_preserves_authority() {
                         SessionEvent::PointerOpened {
                             session,
                             peer,
-                            pointer: PointerChannelGeneration::from_raw(pointer_high_water).unwrap(),
+                            pointer: PointerChannelGeneration::from_raw(pointer_high_water)
+                                .unwrap(),
                         },
                     );
                 }
@@ -347,8 +346,7 @@ fn million_event_stale_race_stress_preserves_authority() {
                     &mut machine,
                     SessionEvent::OperationStarted {
                         session,
-                        operation: OperationGeneration::from_raw(operation_high_water - 1)
-                            .unwrap(),
+                        operation: OperationGeneration::from_raw(operation_high_water - 1).unwrap(),
                     },
                 );
             }
