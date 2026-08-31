@@ -21,11 +21,23 @@ DeskLink Web 现在支持“Build once, deploy anywhere”。正式发布会提�
    - features.controllerAuthRequired
    - features.turnRuntimeRequired
    - features.forceRelay
+   - features.lanFirstIce
 
 3. 不需要重新 npm install/npm ci，也不需要重新 Vite build。
 4. desklink-config.js 应使用 no-store/no-cache 策略；仓库自带 nginx.conf 已为该文件设置 no-store。
 
 `null` 表示继续使用构建期值（如果存在），然后使用应用默认值。部署时可以直接填字符串/布尔值覆盖。
+
+LAN Direct / TURN 回退
+----------------------
+
+默认 `features.lanFirstIce` 为启用状态：在非 relay-only 模式下，浏览器先使用 host/STUN candidates 发起直连，避免在局域网可直达时把 TURN 凭证获取放在首连关键路径上。如果约 1.5 秒内仍未建立连接，DeskLink 会补充 TURN 配置并通过 ICE restart 自动回退到 relay 能力。
+
+- `features.lanFirstIce: true`：推荐默认值，优先尝试 LAN/P2P 直连。
+- `features.lanFirstIce: false`：恢复为首连前准备完整 ICE/TURN 配置。
+- `features.forceRelay: true`：始终强制 relay，LAN-first 会自动停用，适合限制网络或 TURN 验证环境。
+
+LAN-first 只改变 ICE 候选准备与回退时机，不绕过 Controller Session、Access Code 或 WebRTC DTLS/SRTP 安全边界。
 
 安全边界
 --------
