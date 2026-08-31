@@ -6,9 +6,7 @@ use desklink_protocol::{
     ControlChannelGeneration, OperationGeneration, PeerGeneration, PointerChannelGeneration,
     SessionGeneration,
 };
-use desklink_session::{
-    RemoteSessionStateMachine, SessionCommand, SessionError, SessionEvent,
-};
+use desklink_session::{RemoteSessionStateMachine, SessionCommand, SessionError, SessionEvent};
 
 pub const DESKLINK_CORE_ABI_VERSION: u32 = 1;
 pub const DESKLINK_CORE_COMMAND_CAPACITY: usize = 8;
@@ -165,10 +163,7 @@ fn encode_command(command: SessionCommand) -> Option<u32> {
     }
 }
 
-fn write_commands(
-    source: &[SessionCommand],
-    target: &mut DeskLinkCoreCommandBuffer,
-) -> i32 {
+fn write_commands(source: &[SessionCommand], target: &mut DeskLinkCoreCommandBuffer) -> i32 {
     clear_commands(target);
 
     if source == [SessionCommand::IgnoreStaleEvent] {
