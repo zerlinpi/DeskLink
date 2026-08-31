@@ -14,6 +14,7 @@ import {
 import { resolveControllerSessionUrl } from "./controller_session";
 import { createControllerSessionTokenRequest } from "./controller_token_request";
 import { decodeControlChannelText } from "./control_channel_message";
+import { resolveControlRttAck, shouldIssueControlRttProbe, type PendingControlRttProbe } from "./control_rtt";
 import type { HostCapabilitiesV1 } from "./host_capabilities";
 import { ControllerTokenCoordinator } from "./controller_token_coordinator";
 import {
@@ -69,6 +70,7 @@ type NetworkView = {
   route: "direct" | "relay" | "unknown";
   protocol: string;
   rttMs: number | null;
+  controlRttMs: number | null;
   lossPct: number;
   jitterMs: number | null;
   decodeFps: number;
@@ -85,6 +87,7 @@ const EMPTY_NETWORK_VIEW: NetworkView = {
   route: "unknown",
   protocol: "-",
   rttMs: null,
+  controlRttMs: null,
   lossPct: 0,
   jitterMs: null,
   decodeFps: 0,
@@ -213,6 +216,7 @@ function App() {
   const pointerRafRef = useRef<number | null>(null);
   const statsTimerRef = useRef<number | null>(null);
   const statsBaselineRef = useRef<StatsBaseline | null>(null);
+  const controlRttProbeRef = useRef<PendingControlRttProbe | null>(null);
   const telemetryAttemptRef = useRef(new AsyncAttemptCoordinator());
   const offerSentRef = useRef(false);
   const negotiationPendingRef = useRef(false);
@@ -274,6 +278,23 @@ function App() {
   const sendReliable = (payload: object) => {
     const channel = controlRef.current;
     if (channel?.readyState === "open") channel.send(JSON.stringify(payload));
+  };
+
+  const sendControlRttProbe = (channel: RTCDataChannel | null) => {
+    if (!channel || channel.readyState !== "open" || controlRef.current !== channel) return;
+    const nowMs = performance.now();
+    const pending = controlRttProbeRef.current;
+    if (!shouldIssueControlRttProbe(pending, nowMs)) return;
+    if (pending) {
+      setNetworkView((current) => ({ ...current, controlRttMs: null }));
+    }
+    const requestId = crypto.randomUUID();
+    try {
+      channel.send(JSON.stringify({ t: "control-rtt-probe", requestId }));
+      controlRttProbeRef.current = { requestId, sentAtMs: nowMs };
+    } catch (error) {
+      console.debug("DeskLink control RTT probe send failed", error);
+    }
   };
 
   const sendPointerFast = (payload: ArrayBuffer) => {
@@ -389,6 +410,7 @@ function App() {
 
     try {
       if (!resourcesCurrent()) return;
+      sendControlRttProbe(control);
       const report = await pc.getStats();
       if (!resourcesCurrent()) return;
       let inboundVideo: any = null;
@@ -462,15 +484,16 @@ function App() {
         );
       }
 
-      setNetworkView({
+      setNetworkView((current) => ({
         route,
         protocol,
         rttMs,
+        controlRttMs: current.controlRttMs,
         lossPct,
         jitterMs,
         decodeFps,
         availableIncomingBitrate,
-      });
+      }));
 
       sendReliable({
         t: "telemetry",
@@ -744,6 +767,8 @@ function App() {
       setStatus(wsRef.current?.readyState === WebSocket.OPEN
         ? "control ready"
         : "control ready · signaling reconnecting");
+      controlRttProbeRef.current = null;
+      sendControlRttProbe(control);
       startTelemetry(pc);
     };
     control.onmessage = (event) => {
@@ -756,6 +781,16 @@ function App() {
       const decoded = decodeControlChannelText(event.data);
       if (decoded.kind === "host-capabilities") {
         setHostCapabilities(decoded.capabilities);
+      } else if (decoded.kind === "control-rtt-ack") {
+        const measured = resolveControlRttAck(
+          controlRttProbeRef.current,
+          decoded.requestId,
+          performance.now(),
+        );
+        if (measured !== null) {
+          controlRttProbeRef.current = null;
+          setNetworkView((current) => ({ ...current, controlRttMs: measured }));
+        }
       } else if (decoded.kind === "invalid" && event.data.includes('"t":"host-capabilities"')) {
         console.debug("DeskLink rejected malformed host capabilities");
       }
@@ -764,6 +799,8 @@ function App() {
       if (controlRef.current !== control) return;
       clearDataChannelOpenWatchdog("control");
       stopTelemetry();
+      controlRttProbeRef.current = null;
+      setNetworkView((current) => ({ ...current, controlRttMs: null }));
       setHostCapabilities(null);
       if (isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) &&
           pc.connectionState === "connected") {
@@ -1262,6 +1299,7 @@ function App() {
     clearSignalReconnectTimer();
     clearHostWaitRefreshTimer();
     resetDataChannelRecoveryState();
+    controlRttProbeRef.current = null;
     iceRestartInFlightRef.current = false;
     negotiationPendingRef.current = false;
     signalReconnectAttemptRef.current = 0;
@@ -1406,6 +1444,7 @@ function App() {
             <span className={`route route-${networkView.route}`}>{routeLabel}</span>
             <span>{networkView.protocol.toUpperCase()}</span>
             <span>RTT {networkView.rttMs == null ? "-" : `${networkView.rttMs.toFixed(0)} ms`}</span>
+            <span>Control RTT {networkView.controlRttMs == null ? "-" : `${networkView.controlRttMs.toFixed(0)} ms`}</span>
             <span>Loss {networkView.lossPct.toFixed(1)}%</span>
             <span>Jitter {networkView.jitterMs == null ? "-" : `${networkView.jitterMs.toFixed(1)} ms`}</span>
             <span>Decode {networkView.decodeFps.toFixed(0)} fps</span>
