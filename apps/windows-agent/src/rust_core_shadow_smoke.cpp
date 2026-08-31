@@ -148,6 +148,32 @@ int main() {
   Require(lifecycle.EndSession(), "connected shadow session did not close cleanly");
   Require(lifecycle.mismatch_count() == 0, "lifecycle adapter produced unexpected mismatches");
 
+  // libdatachannel is free to deliver an input DataChannel open callback before
+  // PeerConnection::Connected. C++ may already consider that channel current, but the
+  // Rust reducer is still Negotiating. Cache the current channel authority and replay it
+  // only after the peer-connected observation rather than reporting a false mismatch.
+  desklink::RustCoreShadowLifecycle reordered;
+  const auto early_scope = reordered.BeginPeer(false);
+  Require(
+      reordered.CompareControlOpened(early_scope, 11, true),
+      "early authoritative control open produced a false mismatch");
+  Require(
+      reordered.ComparePointerOpened(early_scope, 12, true),
+      "early authoritative pointer open produced a false mismatch");
+  Require(
+      reordered.ComparePeerConnected(early_scope, true),
+      "peer connect did not replay early channel authority");
+  Require(
+      reordered.CompareControlClosed(early_scope, 11, true),
+      "replayed control close mismatch");
+  Require(
+      reordered.ComparePointerClosed(early_scope, 12, true),
+      "replayed pointer close mismatch");
+  Require(reordered.EndSession(), "reordered shadow session did not close cleanly");
+  Require(
+      reordered.mismatch_count() == 0,
+      "early channel callback ordering produced an unexpected mismatch");
+
   std::cout << "DeskLink Rust core shadow lifecycle + concurrency smoke passed.\n";
   return 0;
 #endif
