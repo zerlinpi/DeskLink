@@ -1,0 +1,22 @@
+name: Rust Core RED Check
+
+on:
+  push:
+    branches:
+      - prototype/rust-core-red-check
+    paths:
+      - Cargo.toml
+      - rust-toolchain.toml
+      - crates/**
+      - .github/workflows/rust-core-red-check.yml
+
+permissions:
+  contents: read
+
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify failing generation contract
+        run: cargo test -p desklink-protocol generations_are_strongly_typed_and_monotonic
