@@ -1196,6 +1196,16 @@ void WebRtcSession::HandleControl(const std::string& text) {
     return;
   }
 
+  if (type == "control-rtt-probe") {
+    const std::string request_id = event.value("requestId", "");
+    if (!ValidRequestId(request_id)) return;
+    SendControlMessage(json{
+        {"t", "control-rtt-ack"},
+        {"requestId", request_id},
+    }.dump());
+    return;
+  }
+
   if (type == "system-operation") {
     const std::string request_id = event.value("requestId", "");
     const std::string operation = event.value("operation", "");
