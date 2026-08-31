@@ -1,392 +1,190 @@
-# ADR-001: Evidence-Gated Rust Core Prototype
+# ADR-001: Main-Only Incremental Rust Session/Recovery Core
 
-- **Status:** Accepted for prototype only
+- **Status:** Accepted for incremental migration
 - **Date:** 2026-08-31
-- **DeskLink baseline:** `f248fe1d6a4e22b09bfaa9154ac9f3b8e41c39a7`
-- **Target prototype branch:** `prototype/rust-core`
-- **Production impact:** None until benchmark and regression gates pass
-
-## Context
-
-DeskLink currently uses a mixed implementation:
-
-- Windows C++20 Agent and LocalSystem Service
-- DXGI Desktop Duplication
-- D3D11 GPU processing
-- Media Foundation H.264
-- libdatachannel/WebRTC
-- Go Signal/Auth server
-- React/TypeScript Web Controller
-
-This architecture already provides the working remote-control data plane and must remain the production reference while architecture experiments are evaluated.
-
-The areas with the highest bug and maintenance risk are no longer the mature Windows media hot path. They are lifecycle and coordination concerns such as session generation, stale asynchronous callbacks, reconnect and recovery, authentication state, privileged-operation scoping, signaling races, file-transfer lifecycle, updater state, IPC, and device lifecycle.
-
-The project therefore needs an evidence-driven way to evaluate whether Rust can reduce concurrency and lifetime risk without sacrificing connection success, latency, compatibility, or operational simplicity.
-
-## Current Architecture
-
-The production Windows Host currently combines several responsibilities around the WebRTC session:
-
-- signaling and token loading
-- authentication and challenge handling
-- PeerConnection lifecycle
-- ICE/TURN configuration and recovery
-- reliable Control DataChannel
-- unreliable Pointer DataChannel
-- clipboard and file transfer
-- privileged Service coordination
-- host capability publication
-- media/RTP coordination
-
-DeskLink has already added generation and scope guards in C++/TypeScript to prevent stale peer, stale channel, stale negotiation, and stale session callbacks. Those guards are valuable and remain the production regression reference.
-
-Windows media and input paths currently use native C++ APIs directly:
-
-- DXGI Desktop Duplication
-- D3D11 textures and conversion
-- Media Foundation hardware H.264
-- Win32 SendInput
-- Windows Service/session APIs
-
-These paths are not migration targets for the first prototype.
-
-## Candidate Architecture
-
-Adopt a **Strangler Rust Core** prototype while keeping the current production media stack intact.
-
-```text
-DeskLink
-├─ crates/
-│  ├─ desklink-protocol
-│  ├─ desklink-session
-│  ├─ desklink-recovery
-│  ├─ desklink-auth
-│  └─ desklink-core-ffi
-│
-├─ apps/windows-agent/        # current C++ production backend
-│  ├─ DXGI
-│  ├─ D3D11
-│  ├─ Media Foundation
-│  ├─ SendInput
-│  ├─ Windows Service APIs
-│  └─ libdatachannel/WebRTC
-│
-├─ apps/signal/               # Go remains production server in Phase 1
-└─ apps/web/                  # React/WebRTC remains production controller
-```
-
-The first Rust prototype owns only deterministic coordination state:
-
-- `RemoteSessionStateMachine`
-- `RecoveryCoordinator`
-- generation management
-- protocol/domain types that do not require platform media APIs
-- authentication state transitions
-- FFI-safe commands/events between C++ and Rust
-
-The first prototype does **not** replace DXGI, D3D11, Media Foundation, SendInput, libdatachannel, the Windows Service process model, the Go Signal server, or the Browser WebRTC controller.
-
-## Session Model
-
-The Rust prototype will model explicit session states rather than allowing callback-local state transitions:
-
-```text
-Idle
-  -> Signaling
-  -> Authenticating
-  -> Negotiating
-  -> Connected
-  -> RecoveringSignal | RecoveringTransport
-  -> Connected
-  -> Closing
-  -> Idle
-```
-
-State-changing asynchronous work must be scoped by generation tokens. At minimum the prototype will model:
-
-- `SessionId`
-- `SessionGeneration`
-- `PeerGeneration`
-- `ControlChannelGeneration`
-- `PointerChannelGeneration`
-- `OperationGeneration`
-
-A late callback may report an event, but the Rust state machine decides whether the event is still authoritative. Stale generations must fail closed without mutating current session state.
-
-## FFI Boundary
-
-The prototype FFI must remain narrow and deterministic.
-
-C++ sends input events such as:
-
-- signaling connected/disconnected
-- authentication accepted/rejected
-- peer created/replaced/failed
-- control channel opened/closed
-- pointer channel opened/closed
-- ICE failed/recovered
-- recovery timeout
-- session close requested
-
-Rust returns commands such as:
-
-- begin authentication
-- begin negotiation
-- schedule signaling reconnect
-- schedule ICE restart
-- invalidate peer generation
-- invalidate input-channel authority
-- close session
-- ignore stale event
-
-Rules:
-
-1. No Rust object pointer may be retained by arbitrary C++ callbacks without an opaque ownership handle.
-2. No C++ exception may cross the FFI boundary.
-3. No Rust panic may cross the FFI boundary.
-4. FFI messages must use fixed-width, versioned C-compatible representations or serialized protocol messages with explicit size limits.
-5. Allocation ownership must be explicit at every boundary.
-6. C++ remains responsible for Windows COM/D3D/MF object lifetime in Phase 1.
-
-## Reference Projects
-
-### RustDesk
-
-Reference snapshot reviewed: RustDesk `master` at commit `03a7fc5992069cc5bc9f7c36b872483dddf4f472`.
-
-Relevant architectural evidence:
-
-- Rust workspace with reusable library boundaries for capture, input, clipboard, common networking/types, virtual display, and portable platform code.
-- Core library can be emitted as `cdylib`, `staticlib`, and `rlib`, demonstrating a viable Rust-core/native-boundary model.
-- `hbb_common` centralizes Tokio, protocol serialization, TLS/WebSocket/network primitives, configuration, and shared models.
-- rendezvous and relay responsibilities are modeled independently rather than as one monolithic transport.
-- Windows code uses Rust Windows ecosystem crates while still retaining platform-specific implementations.
-- LAN, IPC, updater, service coordination, clipboard, file transfer, and rendezvous logic are largely outside the media capture hot path.
-
-RustDesk is licensed under **AGPL-3.0**. DeskLink may study its public architecture and behavior, but the prototype is a clean-room implementation. No RustDesk source code is to be copied into DeskLink unless a separate explicit license decision is made.
-
-### DeskLink production baseline
-
-DeskLink production behavior at the baseline commit remains the regression oracle. Existing C++/TypeScript generation, peer-scope, input-authority, recovery, authentication, and native smoke tests must not be removed simply because equivalent Rust logic exists in the prototype.
-
-## Benefits
-
-Potential benefits to be measured, not assumed:
-
-- stronger ownership and lifetime guarantees for session state
-- fewer stale-callback races
-- deterministic generation validation in one core instead of duplicated callback checks
-- easier property and stress testing of recovery behavior without Windows media dependencies
-- possible future protocol/auth reuse with Native Controller or Signal server
-- clearer separation between platform media backend and product/session state
-- safer foundation for updater, LAN discovery, IPC, and native controller work
-
-## Costs
-
-- additional Rust toolchain and CI time
-- C++/Rust FFI complexity
-- two implementations must coexist during strangler migration
-- debugging spans C++ and Rust until migration stabilizes
-- shared protocol ownership can become more complex if bindings/code generation are introduced prematurely
-- additional packaging work for static library/runtime integration
-- migration can distract from product work if benchmark gates are not enforced
-
-## Performance Requirements
-
-Rust is not accepted because of language-level safety claims alone.
-
-The prototype must benchmark against the existing C++ coordination path where comparison is meaningful.
-
-### Synthetic benchmarks
-
-Measure at minimum:
-
-- state-transition throughput
-- event dispatch latency p50/p95/p99
-- stale-event rejection throughput
-- 100k and 1M generated lifecycle events
-- memory allocation count/bytes where measurable
-- steady-state resident memory overhead
-- FFI call overhead
-- recovery timer scheduling overhead
-
-### Product benchmarks
-
-On real Windows machines compare:
-
-- Connection Success Rate
-- Time To First Frame
-- input latency
-- Motion-to-Photon latency where telemetry exists
-- signaling recovery time
-- ICE recovery time
-- session replacement time
-- CPU
-- GPU impact (must be statistically unchanged in Phase 1)
-- memory
-- crash rate
-- 8h, 24h, and 72h stability
-
-### Acceptance gate
-
-A migration phase may merge into production only if:
-
-- no core regression-matrix capability is lost;
-- connection success is not lower beyond normal test variance;
-- TTF and recovery time are not materially worse;
-- input latency does not regress materially;
-- memory overhead is understood and acceptable;
-- no new crash/lifetime class is introduced at the FFI boundary;
-- race/stale-callback stress tests are at least as strong as the current implementation;
-- rollback remains possible in one release.
-
-No code-line-count metric is an acceptance criterion.
-
-## Regression Matrix
-
-Every migration phase must preserve the current production capability baseline.
-
-| Capability | Production reference | Prototype requirement |
-| --- | --- | --- |
-| Video | Existing DXGI/D3D11/MF/WebRTC path | unchanged |
-| Mouse | Pointer DataChannel + SendInput | unchanged semantics |
-| Keyboard | reliable Control + SendInput | unchanged semantics |
-| Multi-monitor | existing monitor state/switch | unchanged |
-| Clipboard | existing reliable control flow | unchanged |
-| File transfer | existing chunk/download policy | unchanged |
-| Authentication | existing Access Code/device/controller auth | equivalent or stronger |
-| P2P | existing ICE/WebRTC | unchanged |
-| TURN | existing TURN fallback | unchanged |
-| Reconnect | existing signal/ICE recovery | equivalent or faster |
-| Ctrl+Alt+Del | existing authenticated SAS Broker | unchanged |
-| Windows Service | existing LocalSystem + Session Agent | unchanged in Phase 1 |
-
-Features that are not production-ready before migration are not counted as regressions merely because the prototype does not implement them.
-
-## Security
-
-The Rust core is not a new privileged broker.
-
-- LocalSystem Service privilege boundaries remain unchanged in Phase 1.
-- SAS and other privileged operations continue to use the existing authenticated Service Broker.
-- Access Code, Device Credential, Controller Token, Signal Token, and TURN credentials must not cross the FFI boundary unless required by an explicit auth operation.
-- Secret-bearing buffers must have explicit ownership and clearing behavior.
-- generation IDs are authorization context, not cryptographic credentials.
-- privileged operation allowlists remain enforced by the existing broker.
-- no arbitrary command execution, arbitrary file path RPC, DLL loading, or process-launch primitive is introduced.
-
-## Compatibility
-
-The production branch continues to build and run without Rust Core enabled until an explicit migration phase is accepted.
-
-Prototype integration should use a feature/build switch such as a CMake option rather than replacing the C++ implementation in place.
-
-Target compatibility during Phase 1:
-
-- current Windows Agent remains default
-- current Web Controller remains unchanged
-- current Go Signal server remains unchanged
-- wire protocol remains backward compatible
-- Rust core may consume internal normalized events but must not introduce a new incompatible public transport protocol
-
-## Migration Complexity
-
-### Phase 0 — Baseline
-
-- freeze benchmark definitions
-- capture current C++ state/recovery behavior
-- document regression matrix
-- ensure all existing native/Web/Go tests remain green
-
-### Phase 1 — Rust protocol/session/recovery prototype
-
-- create Rust workspace on `prototype/rust-core`
-- implement deterministic state machine and generations
-- implement recovery coordinator
-- define narrow C ABI
-- run synthetic benchmark and stress tests
-- no production path replacement
-
-### Phase 2 — Optional shadow integration
-
-Only if Phase 1 passes:
-
-- C++ continues driving production behavior
-- Rust core receives mirrored lifecycle events
-- compare C++ decision vs Rust decision
-- record mismatches without changing user-visible behavior
-
-### Phase 3 — Selective authority transfer
-
-Only if shadow results pass:
-
-- enable Rust authority for one bounded responsibility behind a build/runtime flag
-- candidate: generation/scope validation or recovery scheduling
-- preserve C++ fallback
-
-### Phase 4 — Broader core migration
-
-Only after real-machine and soak results justify it:
-
-- protocol/auth/session/network coordination may move to Rust incrementally
-- Go Signal, WebRTC implementation, and Windows media remain separate ADR decisions
-
-## Rollback Plan
-
-Every phase must be removable without rewriting the media stack.
-
-- C++ production implementation stays available until a later ADR explicitly retires it.
-- Rust authority is enabled behind an explicit build/runtime switch during transition.
-- wire formats remain compatible.
-- release packaging can revert to C++-only in one release.
-- no persistent on-disk state is migrated to a Rust-only format in Phase 1.
-- if benchmark gains are insufficient, stop after the prototype and delete the experimental authority path without impacting production data.
-
-## Alternatives Considered
-
-### A. Full Rust rewrite now
-
-Rejected.
-
-It mixes language migration, media rewrite, networking rewrite, packaging changes, and platform API changes. Any regression would be difficult to attribute, and DeskLink would lose its working rollback path.
-
-### B. Rust WebRTC and networking first
-
-Deferred.
-
-This could eventually reduce callback/lifetime complexity, but replacing libdatachannel while also introducing Rust would confound transport and language benchmark results. Browser interoperability and ICE/TURN behavior are production-critical and should remain stable during the first core experiment.
-
-### C. Rust Signal server first
-
-Deferred.
-
-Go currently provides a working Signal/Auth server with substantial tests. A Rust rewrite has little value until shared Rust protocol/auth/session crates actually exist and demonstrate concrete reuse. Server language is not currently the highest-risk component.
-
-### D. Rust Core + C++ Windows media backend
-
-Selected for prototype.
-
-It targets the highest concurrency/lifetime-risk area while preserving the mature GPU/media/input path and the existing browser/server ecosystem.
-
-## Future ADRs
-
-The following decisions remain independent and require their own evidence:
-
-- `ADR-002-webrtc-vs-native-quic.md`
-- `ADR-003-dxgi-vs-wgc.md`
-- `ADR-004-go-signal-vs-rust-signal.md`
-- Native Controller framework and transport choice
-- encoder backend abstraction
-
-No decision in this ADR pre-approves those migrations.
+- **Migration mode:** `main-only incremental migration`
+- **Current production authority:** C++
+- **Current Rust stage:** shadow-only integration is authorized; Rust production authority is not
 
 ## Decision
 
-Proceed with a **prototype-only Strangler Rust Core**.
+DeskLink will evaluate and adopt Rust incrementally for deterministic session, generation, recovery, protocol/domain and operation-lifecycle coordination while preserving the mature Windows media/input stack.
 
-The first implementation branch will be `prototype/rust-core` and will initially contain only protocol/session/recovery/auth coordination plus a narrow FFI boundary and benchmark/regression tooling.
+All implementation, tests, experiments, benchmarks, documentation and migration work happen directly on `main`. No prototype, feature, experiment or migration branch is required or permitted for this effort.
 
-The C++ Windows media backend, libdatachannel/WebRTC transport, Go Signal server, React Web Controller, Service architecture, and wire behavior remain the production reference during the prototype.
+Rust work on `main` is isolated from production authority through layered gates:
 
-The prototype may advance to shadow integration only after benchmark and regression gates are met. If the data does not show a meaningful product or engineering benefit, the migration stops with no production rewrite.
+1. the CMake option `DESKLINK_ENABLE_RUST_CORE_SHADOW`, default `OFF`;
+2. C++ remains the authoritative decision maker during shadow integration;
+3. Rust receives normalized lifecycle events and compares decisions only;
+4. mismatch telemetry blocks authority transfer;
+5. any later authority transfer is incremental and keeps a rollback switch until stable.
+
+## Context
+
+DeskLink already has a working mixed stack:
+
+- Windows C++20 Agent and LocalSystem Service;
+- DXGI Desktop Duplication and D3D11 processing;
+- Media Foundation hardware H.264;
+- libdatachannel/WebRTC with STUN/TURN/ICE;
+- reliable Control and Pointer DataChannels;
+- Win32 SendInput, clipboard, file transfer and multi-monitor support;
+- Access Code, device/controller authentication and DPAPI storage;
+- Secure Attention broker;
+- Go Signal/Auth server;
+- React/TypeScript Web Controller;
+- generation/scope guards, reconnect/recovery logic, telemetry and regression tests.
+
+The first Rust migration target is not the media hot path. It is lifecycle coordination where stale asynchronous callbacks, replacement races and recovery overlap are most difficult to reason about.
+
+## Rust Core Scope
+
+The workspace contains:
+
+```text
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+crates/
+  desklink-protocol/
+  desklink-session/
+  desklink-recovery/
+  desklink-core-ffi/
+```
+
+Phase 1 Rust owns deterministic coordination models only:
+
+- strongly typed generations;
+- `RemoteSessionStateMachine`;
+- `RecoveryCoordinator`;
+- protocol/domain lifecycle types;
+- operation lifecycle;
+- a narrow panic-safe C ABI.
+
+Phase 1 does not replace DXGI, D3D11, Media Foundation, SendInput, Windows Service process boundaries, libdatachannel/WebRTC, the Go Signal server, or the Browser Controller.
+
+## Generation Rules
+
+The model uses separate generation types for session, peer, control channel, pointer channel, negotiation, recovery and operation scopes where applicable.
+
+Generations:
+
+- start from explicit non-zero values;
+- advance monotonically;
+- fail closed on overflow;
+- are never interchangeable raw lifecycle identifiers;
+- are checked before an asynchronous completion may mutate authority.
+
+A stale callback may be recorded for diagnostics but must not change current session state, UI state, input authority, signaling, channel ownership or recovery authority.
+
+## Session State Machine
+
+Lifecycle decisions are normalized as:
+
+```text
+Event -> RemoteSessionStateMachine -> Commands
+```
+
+rather than callback-local mutation.
+
+The model covers the connection lifecycle, replacement, closing and recovery-related states required by the current DeskLink coordination path. A connected PeerConnection alone is not equivalent to full remote readiness; authentication and current channel/capability authority remain separate conditions.
+
+## Recovery Coordinator
+
+Recovery policy is deterministic and runtime-independent. It coordinates escalating recovery actions rather than allowing independent watchdogs to race each other.
+
+The intended escalation remains:
+
+1. natural recovery;
+2. DataChannel recreation;
+3. ICE restart;
+4. PeerConnection rebuild;
+5. Signal reconnect;
+6. full session rebuild.
+
+Only one authoritative recovery operation may own a recovery generation at a time. Actual timers and transport operations remain outside the Rust reducer until a later authority-transfer gate explicitly moves them.
+
+## FFI Boundary
+
+The Rust/C++ boundary is intentionally narrow:
+
+- opaque handle ownership;
+- versioned fixed-width C structures;
+- explicit allocation ownership;
+- no Rust `Vec`, `String`, references, trait objects or enum layout exposed directly;
+- every exported Rust entrypoint catches panics;
+- C++ exceptions and Rust panics never cross the ABI boundary.
+
+## Shadow Mode
+
+`DESKLINK_ENABLE_RUST_CORE_SHADOW` defaults to `OFF`.
+
+### OFF
+
+- the normal Windows build does not require Cargo/Rust;
+- the existing C++ implementation retains complete authority;
+- user-visible behavior is unchanged.
+
+### ON
+
+- C++ still makes the real production decision;
+- the same accepted/rejected normalized lifecycle decision is mirrored to Rust;
+- session/peer/channel generations are included in comparisons;
+- callback reordering is normalized by the shadow event bridge;
+- mismatches are logged and counted;
+- Rust must never change user-visible behavior because of a mismatch.
+
+Shadow mismatches block production authority transfer until explained and fixed.
+
+## Testing and Evidence
+
+Rust Core changes require:
+
+```text
+cargo fmt --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
+```
+
+Property/stress coverage includes at least 10,000 generated orderings and million-event stale/replacement stress in release mode.
+
+Existing Web, Go, Windows native, protocol and deployment regression suites remain mandatory. Rust tests add protection; they do not replace existing regressions.
+
+Synthetic benchmarks measure lifecycle throughput, stale-event handling, replacement paths and C ABI overhead. Real-machine connection success, TTFF, input latency, recovery, memory, GPU, TURN/P2P and soak evidence remain required before any authority transfer.
+
+Phase-1 evidence is recorded in `docs/adr/ADR-001-rust-core-phase1-results.md`, whose decision is `ADVANCE_TO_SHADOW_INTEGRATION`. That decision authorizes shadow-only integration, not Rust production authority.
+
+## Authority Transfer
+
+If shadow evidence passes, authority may move gradually on `main`:
+
+1. generation/stale validation;
+2. recovery policy;
+3. remote session state machine;
+4. auth/session coordination.
+
+Each transfer keeps the C++ fallback behind a rollback switch until it is stable for at least one release. No all-at-once C++ -> Rust rewrite is approved by this ADR.
+
+## Media and Server Boundaries
+
+Rust is not a goal by itself. The current C++ Windows media backend and Go Signal server remain valid long-term components unless separate benchmarks show a meaningful product or engineering benefit from replacement.
+
+Future DXGI vs WGC, encoder backend, WebRTC vs QUIC/custom transport, Go vs Rust Signal and Native Controller decisions remain independent evidence-gated decisions.
+
+## Open-Source Reference Policy
+
+DeskLink may study architecture, state machines, algorithms, module boundaries and behavior in projects such as RustDesk, Sunshine, Moonlight, MeshCentral, Apache Guacamole and noVNC.
+
+License compatibility must be checked before adding third-party source. RustDesk remains clean-room architectural reference only unless an explicit license decision says otherwise.
+
+## Rollback
+
+At every migration stage:
+
+- C++ remains available until explicitly retired;
+- normal builds can remain Rust-free while shadow is disabled;
+- wire formats and persisted production state remain compatible;
+- a failed shadow or authority experiment can be disabled without rewriting the media stack.
+
+This ADR therefore approves a **main-only, evidence-gated, incremental Rust Core migration** with C++ authority retained through the current shadow phase.

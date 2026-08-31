@@ -3,7 +3,7 @@ name: Rust Core Benchmark
 on:
   push:
     branches:
-      - prototype/rust-core
+      - main
     paths:
       - Cargo.toml
       - Cargo.lock

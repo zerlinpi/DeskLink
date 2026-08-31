@@ -1,9 +1,9 @@
-name: Rust Core Shadow Prototype
+name: Rust Core Shadow
 
 on:
   push:
     branches:
-      - prototype/rust-core
+      - main
     paths:
       - Cargo.toml
       - Cargo.lock
@@ -12,7 +12,9 @@ on:
       - crates/desklink-session/**
       - crates/desklink-core-ffi/**
       - apps/windows-agent/CMakeLists.txt
-      - apps/windows-agent/src/rust_core_shadow.*
+      - apps/windows-agent/src/rust_core_shadow.cpp
+      - apps/windows-agent/src/rust_core_shadow.h
+      - apps/windows-agent/src/rust_core_shadow_event_bridge.cpp
       - apps/windows-agent/src/rust_core_shadow_smoke.cpp
       - apps/windows-agent/src/webrtc_session.cpp
       - apps/windows-agent/src/webrtc_session.h

@@ -1,9 +1,9 @@
-name: Rust Core Prototype
+name: Rust Core CI
 
 on:
   push:
     branches:
-      - prototype/rust-core
+      - main
     paths:
       - Cargo.toml
       - Cargo.lock
@@ -14,7 +14,7 @@ on:
       - .github/workflows/rust-core-benchmark.yml
   pull_request:
     branches:
-      - prototype/rust-core
+      - main
     paths:
       - Cargo.toml
       - Cargo.lock
