@@ -44,6 +44,10 @@ fn call_clear(commands: *mut DeskLinkCoreCommandBuffer) -> i32 {
     unsafe { desklink_core_command_buffer_clear(commands) }
 }
 
+fn call_forced_panic() -> i32 {
+    desklink_core_test_force_panic()
+}
+
 fn create_handle() -> *mut DeskLinkCoreHandle {
     let mut handle: *mut DeskLinkCoreHandle = null_mut();
     assert_eq!(call_create(&mut handle), DESKLINK_CORE_STATUS_OK);
@@ -207,6 +211,6 @@ fn ten_thousand_create_destroy_cycles_are_stable() {
 
 #[test]
 fn forced_panic_is_caught_inside_the_ffi_boundary() {
-    let result = std::panic::catch_unwind(|| desklink_core_test_force_panic());
+    let result = std::panic::catch_unwind(call_forced_panic);
     assert!(matches!(result, Ok(DESKLINK_CORE_STATUS_PANIC)));
 }
