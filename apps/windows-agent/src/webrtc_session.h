@@ -29,6 +29,7 @@ struct NetworkFeedback {
   double loss_ratio{0.0};
   double jitter_ms{0.0};
   double rtt_ms{0.0};
+  double control_rtt_ms{0.0};
   double decode_fps{0.0};
   double available_incoming_bitrate_bps{0.0};
 };

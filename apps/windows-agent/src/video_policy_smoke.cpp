@@ -19,6 +19,8 @@ int main() {
   using desklink::AdaptationMode;
   using desklink::AdaptationPolicyForMode;
   using desklink::CaptureTimeoutMsForFps;
+  using desklink::ClassifyControlRttMs;
+  using desklink::ControlLatencyState;
   using desklink::DefaultBitrateForFps;
   using desklink::LowerFpsTier;
   using desklink::PacingBitrateForMedia;
@@ -58,6 +60,14 @@ int main() {
   Require(PacingIntervalMsForFps(60) == 5, "60 fps pacing interval");
   Require(PacingIntervalMsForFps(90) == 3, "90 fps pacing interval");
   Require(PacingIntervalMsForFps(144) == 2, "144 fps pacing interval");
+
+  Require(ClassifyControlRttMs(0.0) == ControlLatencyState::Unknown, "missing control RTT");
+  Require(ClassifyControlRttMs(119.9) == ControlLatencyState::Healthy, "healthy control RTT");
+  Require(ClassifyControlRttMs(120.0) == ControlLatencyState::Elevated, "elevated control RTT lower bound");
+  Require(ClassifyControlRttMs(179.9) == ControlLatencyState::Elevated, "elevated control RTT upper bound");
+  Require(ClassifyControlRttMs(180.0) == ControlLatencyState::Moderate, "moderate control RTT lower bound");
+  Require(ClassifyControlRttMs(299.9) == ControlLatencyState::Moderate, "moderate control RTT upper bound");
+  Require(ClassifyControlRttMs(300.0) == ControlLatencyState::Severe, "severe control RTT lower bound");
 
   const auto desktop = AdaptationPolicyForMode(AdaptationMode::Desktop, 144);
   Require(desktop.minimum_fps == 15, "desktop minimum FPS must preserve existing behavior");

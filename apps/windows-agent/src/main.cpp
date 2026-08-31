@@ -355,6 +355,7 @@ int wmain(int argc, wchar_t** argv) {
   uint32_t healthy_feedback_streak = 0;
   uint32_t resolution_pressure_streak = 0;
   uint32_t resolution_healthy_streak = 0;
+  uint32_t control_latency_pressure_streak = 0;
   desklink::AdaptationMode adaptation_mode = desklink::AdaptationMode::Desktop;
 
   desklink::SessionConfig session_config;
@@ -397,6 +398,7 @@ int wmain(int argc, wchar_t** argv) {
     healthy_feedback_streak = 0;
     resolution_pressure_streak = 0;
     resolution_healthy_streak = 0;
+    control_latency_pressure_streak = 0;
     const auto now = std::chrono::steady_clock::now();
     last_bitrate_change = now;
     last_fps_change = now;
@@ -418,6 +420,7 @@ int wmain(int argc, wchar_t** argv) {
     healthy_feedback_streak = 0;
     resolution_pressure_streak = 0;
     resolution_healthy_streak = 0;
+    control_latency_pressure_streak = 0;
     const auto now = std::chrono::steady_clock::now();
     last_bitrate_change = now - std::chrono::seconds(10);
     last_fps_change = now;
@@ -454,18 +457,41 @@ int wmain(int argc, wchar_t** argv) {
                                   feedback.available_incoming_bitrate_bps >
                                       static_cast<double>(current) * 1.25;
 
+    const desklink::ControlLatencyState control_latency =
+        desklink::ClassifyControlRttMs(feedback.control_rtt_ms);
+    const bool control_pressure_now =
+        control_latency == desklink::ControlLatencyState::Moderate ||
+        control_latency == desklink::ControlLatencyState::Severe;
+    if (control_pressure_now) {
+      control_latency_pressure_streak = std::min<uint32_t>(
+          control_latency_pressure_streak + 1, 60);
+    } else {
+      control_latency_pressure_streak = 0;
+    }
+    const bool sustained_control_severe =
+        control_latency == desklink::ControlLatencyState::Severe &&
+        control_latency_pressure_streak >= 2;
+    const bool sustained_control_moderate =
+        control_pressure_now && control_latency_pressure_streak >= 2;
+    const bool control_latency_healthy =
+        control_latency == desklink::ControlLatencyState::Unknown ||
+        control_latency == desklink::ControlLatencyState::Healthy;
+
     const bool severe = feedback.loss_ratio >= 0.08 ||
                         feedback.rtt_ms >= 250.0 ||
                         feedback.jitter_ms >= 80.0 ||
-                        capacity_severe;
+                        capacity_severe ||
+                        sustained_control_severe;
     const bool moderate = feedback.loss_ratio >= 0.03 ||
                           feedback.rtt_ms >= 160.0 ||
                           feedback.jitter_ms >= 45.0 ||
-                          capacity_moderate;
+                          capacity_moderate ||
+                          sustained_control_moderate;
     const bool healthy = feedback.loss_ratio < 0.01 &&
                          (feedback.rtt_ms <= 0.0 || feedback.rtt_ms < 100.0) &&
                          feedback.jitter_ms < 30.0 &&
-                         capacity_healthy;
+                         capacity_healthy &&
+                         control_latency_healthy;
 
     if (severe && since_change >= std::chrono::seconds(1)) {
       next = std::max<uint32_t>(

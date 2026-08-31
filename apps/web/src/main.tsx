@@ -217,6 +217,7 @@ function App() {
   const statsTimerRef = useRef<number | null>(null);
   const statsBaselineRef = useRef<StatsBaseline | null>(null);
   const controlRttProbeRef = useRef<PendingControlRttProbe | null>(null);
+  const controlRttMsRef = useRef<number | null>(null);
   const telemetryAttemptRef = useRef(new AsyncAttemptCoordinator());
   const offerSentRef = useRef(false);
   const negotiationPendingRef = useRef(false);
@@ -286,6 +287,7 @@ function App() {
     const pending = controlRttProbeRef.current;
     if (!shouldIssueControlRttProbe(pending, nowMs)) return;
     if (pending) {
+      controlRttMsRef.current = null;
       setNetworkView((current) => ({ ...current, controlRttMs: null }));
     }
     const requestId = crypto.randomUUID();
@@ -498,6 +500,7 @@ function App() {
       sendReliable({
         t: "telemetry",
         rttMs,
+        controlRttMs: controlRttMsRef.current,
         lossPct,
         decodeFps,
         jitterMs,
@@ -768,6 +771,7 @@ function App() {
         ? "control ready"
         : "control ready · signaling reconnecting");
       controlRttProbeRef.current = null;
+      controlRttMsRef.current = null;
       sendControlRttProbe(control);
       startTelemetry(pc);
     };
@@ -789,6 +793,7 @@ function App() {
         );
         if (measured !== null) {
           controlRttProbeRef.current = null;
+          controlRttMsRef.current = measured;
           setNetworkView((current) => ({ ...current, controlRttMs: measured }));
         }
       } else if (decoded.kind === "invalid" && event.data.includes('"t":"host-capabilities"')) {
@@ -800,6 +805,7 @@ function App() {
       clearDataChannelOpenWatchdog("control");
       stopTelemetry();
       controlRttProbeRef.current = null;
+      controlRttMsRef.current = null;
       setNetworkView((current) => ({ ...current, controlRttMs: null }));
       setHostCapabilities(null);
       if (isActiveSessionResource(pcRef.current, pc, manualDisconnectRef.current) &&
@@ -1300,6 +1306,7 @@ function App() {
     clearHostWaitRefreshTimer();
     resetDataChannelRecoveryState();
     controlRttProbeRef.current = null;
+    controlRttMsRef.current = null;
     iceRestartInFlightRef.current = false;
     negotiationPendingRef.current = false;
     signalReconnectAttemptRef.current = 0;

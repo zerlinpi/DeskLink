@@ -1,9 +1,18 @@
 #include "video_policy.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace desklink {
+
+ControlLatencyState ClassifyControlRttMs(double rtt_ms) {
+  if (!std::isfinite(rtt_ms) || rtt_ms <= 0.0) return ControlLatencyState::Unknown;
+  if (rtt_ms < 120.0) return ControlLatencyState::Healthy;
+  if (rtt_ms < 180.0) return ControlLatencyState::Elevated;
+  if (rtt_ms < 300.0) return ControlLatencyState::Moderate;
+  return ControlLatencyState::Severe;
+}
 
 AdaptationPolicy AdaptationPolicyForMode(AdaptationMode mode, uint32_t fps_ceiling) {
   fps_ceiling = std::clamp<uint32_t>(fps_ceiling, 15, 144);

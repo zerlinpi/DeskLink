@@ -9,6 +9,14 @@ enum class AdaptationMode : uint8_t {
   Game = 1,
 };
 
+enum class ControlLatencyState : uint8_t {
+  Unknown = 0,
+  Healthy = 1,
+  Elevated = 2,
+  Moderate = 3,
+  Severe = 4,
+};
+
 struct AdaptationPolicy {
   uint32_t minimum_fps;
   uint32_t resolution_trigger_fps;
@@ -20,6 +28,11 @@ struct AdaptationPolicy {
   uint32_t moderate_bitrate_percent;
   bool resolution_requires_fps_trigger;
 };
+
+// Classifies application-level reliable control-channel RTT. Unknown samples do
+// not force degradation; Elevated samples pause recovery; Moderate/Severe are
+// only acted on by the host after consecutive samples.
+ControlLatencyState ClassifyControlRttMs(double rtt_ms);
 
 // Desktop mode preserves text clarity and resolution for as long as possible.
 // Game mode protects motion/input responsiveness by shedding bitrate and

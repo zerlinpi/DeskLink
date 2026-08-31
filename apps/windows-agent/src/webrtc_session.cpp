@@ -1327,6 +1327,7 @@ void WebRtcSession::HandleControl(const std::string& text) {
       NetworkFeedback feedback;
       feedback.loss_ratio = std::clamp(JsonNumber(event, "lossPct") / 100.0, 0.0, 1.0);
       feedback.rtt_ms = std::clamp(JsonNumber(event, "rttMs"), 0.0, 5000.0);
+      feedback.control_rtt_ms = std::clamp(JsonNumber(event, "controlRttMs"), 0.0, 5000.0);
       feedback.jitter_ms = std::clamp(JsonNumber(event, "jitterMs"), 0.0, 5000.0);
       feedback.decode_fps = std::clamp(JsonNumber(event, "decodeFps"), 0.0, 240.0);
       feedback.available_incoming_bitrate_bps = std::max(
