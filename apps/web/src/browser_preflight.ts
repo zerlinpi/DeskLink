@@ -1,3 +1,10 @@
+import {
+  isConnectAction,
+  shouldBlockConnectionInteraction,
+  shouldBlockEnterConnect,
+  type PreflightInteractionContext,
+} from "./browser_preflight_policy";
+
 type CapabilityResult = {
   blocking: string[];
   optional: string[];
@@ -52,33 +59,42 @@ function renderNotice() {
   }
 }
 
-function shouldBlockConnect(target: EventTarget | null) {
-  if (capability.blocking.length === 0) return false;
+function interactionContext(target: EventTarget | null): PreflightInteractionContext {
   const element = target instanceof Element ? target : null;
-  if (!element?.closest(".connect-card")) return false;
-  if (element.closest(".recent-devices")) return false;
-  return true;
+  return {
+    blockingCount: capability.blocking.length,
+    insideConnectCard: Boolean(element?.closest(".connect-card")),
+    insideRecentDevices: Boolean(element?.closest(".recent-devices")),
+  };
 }
 
 function isConnectButton(button: HTMLButtonElement) {
-  if (button.dataset.connectionAction) return button.dataset.connectionAction === "connect";
-  const text = button.textContent?.trim();
-  return text === "Connect" || text === "连接设备";
+  return isConnectAction(button.dataset.connectionAction, button.textContent);
+}
+
+function findConnectButton(card: HTMLElement | null): HTMLButtonElement | null {
+  if (!card) return null;
+  for (const button of card.querySelectorAll<HTMLButtonElement>("button")) {
+    if (isConnectButton(button)) return button;
+  }
+  return null;
 }
 
 document.addEventListener("click", (event) => {
   const button = (event.target as Element | null)?.closest<HTMLButtonElement>(".connect-card button");
-  if (!button || !isConnectButton(button) || !shouldBlockConnect(button)) return;
+  if (!button || !isConnectButton(button)) return;
+  if (!shouldBlockConnectionInteraction(interactionContext(button))) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   renderNotice();
 }, true);
 
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" || !shouldBlockConnect(event.target)) return;
-  const card = (event.target as Element | null)?.closest<HTMLElement>(".connect-card");
-  const primary = card?.querySelector<HTMLButtonElement>('button[data-connection-action="connect"]');
-  if (!primary && capability.blocking.length === 0) return;
+  if (event.key !== "Enter") return;
+  const element = event.target instanceof Element ? event.target : null;
+  const card = element?.closest<HTMLElement>(".connect-card") ?? null;
+  const primary = findConnectButton(card);
+  if (!shouldBlockEnterConnect(interactionContext(event.target), Boolean(primary))) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   renderNotice();
