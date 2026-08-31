@@ -83,7 +83,7 @@ jobs:
           affected '^(apps/signal/|tools/auth/|infra/docker-compose\.yml$)' && signal=true
           affected '^(apps/web/|tools/auth/verify-access-proof-vector\.mjs$)' && web=true
           affected '^(tools/network/|infra/|tools/protocol/)' && repo=true
-          affected '^(apps/windows-agent/|packaging/windows/|tools/auth/verify-access-proof-vector\.mjs$)' && windows=true
+          affected '^(apps/windows-agent/|packaging/windows/|tools/windows/|tools/auth/verify-access-proof-vector\.mjs$)' && windows=true
 
           # Packaging changes can alter deployable artifacts even when product
           # source did not move. Validate both browser and Windows packaging.
@@ -228,7 +228,8 @@ jobs:
           foreach ($script in @(
             "packaging/windows/install-service.ps1",
             "packaging/windows/uninstall-service.ps1",
-            "packaging/windows/sign-binaries.ps1"
+            "packaging/windows/sign-binaries.ps1",
+            "tools/windows/run-native-smokes.ps1"
           )) {
             $tokens = $null
             $errors = $null
@@ -283,54 +284,9 @@ jobs:
               throw "$binary has an external runtime dependency that must be bundled or statically linked"
             }
           }
-      - name: Validate H264 Annex-B normalization
+      - name: Validate all native smoke targets
         shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-h264-annexb-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "H264 Annex-B smoke failed with exit code $LASTEXITCODE" }
-      - name: Validate high-refresh video policy
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-video-policy-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "Video policy smoke failed with exit code $LASTEXITCODE" }
-      - name: Validate active Windows session selection
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-active-session-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "Active session smoke failed with exit code $LASTEXITCODE" }
-      - name: Validate Device ID derivation
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-device-identity-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "Device identity smoke failed with exit code $LASTEXITCODE" }
-      - name: Validate Secure Attention API fail-closed behavior
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-secure-attention-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "Secure Attention smoke failed with exit code $LASTEXITCODE" }
-      - name: Validate HostCapabilitiesV1 producer contract
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-host-capabilities-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "HostCapabilitiesV1 producer smoke failed with exit code $LASTEXITCODE" }
-      - name: Validate peer signaling scope
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-peer-signal-scope-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "Peer signaling scope smoke failed with exit code $LASTEXITCODE" }
-      - name: Validate Access Code proof vector
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-access-proof-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "Access Code proof smoke failed with exit code $LASTEXITCODE" }
+        run: ./tools/windows/run-native-smokes.ps1 -BuildDirectory "build/windows-agent" -Configuration "Release"
       - name: Validate DPAPI protected secrets
         shell: pwsh
         run: |
@@ -345,12 +301,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "DPAPI access-code cleanup failed with exit code $LASTEXITCODE" }
           & $service --clear-device-credential
           if ($LASTEXITCODE -ne 0) { throw "DPAPI device credential cleanup failed with exit code $LASTEXITCODE" }
-      - name: Validate Service auth broker
-        shell: pwsh
-        run: |
-          $smoke = Resolve-Path "build/windows-agent/Release/desklink-service-auth-smoke.exe"
-          & $smoke
-          if ($LASTEXITCODE -ne 0) { throw "Service auth broker smoke test failed with exit code $LASTEXITCODE" }
       - name: Upload Windows binaries
         uses: actions/upload-artifact@v4
         with:
