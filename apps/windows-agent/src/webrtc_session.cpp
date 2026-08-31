@@ -484,6 +484,9 @@ void WebRtcSession::Stop() {
     session_id_.clear();
     pending_access_challenges_.clear();
     authorized_offer_sessions_.clear();
+    // C++ authority has already been cleared while the session mutex is held.
+    // Advance the observer before stale peer callbacks can observe that change.
+    (void)rust_core_shadow_event_bridge_.EndSession();
   }
   if (peer) peer->close();
   if (ws) ws->close();
@@ -601,6 +604,7 @@ void WebRtcSession::HandleSignal(const std::string& text) {
       session_id_.clear();
       pending_access_challenges_.clear();
       authorized_offer_sessions_.clear();
+      (void)rust_core_shadow_event_bridge_.EndSession();
     }
     if (peer) peer->close();
     std::cerr << "Device registration revoked; active remote-control session terminated\n";
@@ -1014,8 +1018,11 @@ void WebRtcSession::CreatePeer(
   }
 
   std::shared_ptr<rtc::PeerConnection> previous;
+  RustCoreShadowPeerScope rust_shadow_scope;
   {
     std::scoped_lock lock(mutex_);
+    const bool same_authoritative_session =
+        peer_ && controller_id_ == controller && session_id_ == session;
     previous = std::move(peer_);
     peer_ = peer;
     control_.reset();
@@ -1025,17 +1032,31 @@ void WebRtcSession::CreatePeer(
     video_timestamp_base100ns_ = 0;
     controller_id_ = controller;
     session_id_ = session;
+
+    // C++ authority is assigned first, then mirrored before releasing mutex_.
+    // Old callbacks cannot observe themselves as stale before Rust advances scope.
+    rust_shadow_scope =
+        rust_core_shadow_event_bridge_.BeginPeer(same_authoritative_session);
   }
   if (previous) previous->close();
 
   const std::weak_ptr<rtc::PeerConnection> weak_peer = peer;
-  peer->onStateChange([this, weak_peer](rtc::PeerConnection::State state) {
+  peer->onStateChange([this, weak_peer, rust_shadow_scope](rtc::PeerConnection::State state) {
     auto owner = weak_peer.lock();
     if (!owner) return;
+
+    bool cpp_authoritative = false;
     {
       std::scoped_lock lock(mutex_);
-      if (peer_ != owner) return;
+      cpp_authoritative = peer_ == owner;
     }
+
+    if (state == rtc::PeerConnection::State::Connected) {
+      (void)rust_core_shadow_event_bridge_.ComparePeerConnected(
+          rust_shadow_scope,
+          cpp_authoritative);
+    }
+    if (!cpp_authoritative) return;
 
     if (state == rtc::PeerConnection::State::Disconnected ||
         state == rtc::PeerConnection::State::Failed ||
@@ -1091,7 +1112,8 @@ void WebRtcSession::CreatePeer(
         json{{"candidate", std::string(candidate)}, {"sdpMid", candidate.mid()}});
   });
 
-  peer->onDataChannel([this, weak_peer](std::shared_ptr<rtc::DataChannel> channel) {
+  peer->onDataChannel(
+      [this, weak_peer, rust_shadow_scope](std::shared_ptr<rtc::DataChannel> channel) {
     auto owner = weak_peer.lock();
     if (!owner || !channel) return;
     {
@@ -1100,7 +1122,7 @@ void WebRtcSession::CreatePeer(
     }
 
     if (channel->label() == "control" || channel->label() == "pointer") {
-      AttachControlChannel(channel);
+      AttachControlChannel(channel, rust_shadow_scope);
       return;
     }
 
@@ -1117,7 +1139,9 @@ void WebRtcSession::CreatePeer(
   });
 }
 
-void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>& channel) {
+void WebRtcSession::AttachControlChannel(
+    const std::shared_ptr<rtc::DataChannel>& channel,
+    RustCoreShadowPeerScope rust_shadow_scope) {
   if (!channel) return;
 
   const std::string label = channel->label();
@@ -1137,6 +1161,21 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
     if (kind == InputChannelKind::Control) control_ = channel;
   }
 
+  // InputChannelAuthority grants C++ authority at activation time, before the
+  // transport onOpen callback. Mirror that authoritative decision immediately;
+  // EventBridge will buffer it if PeerConnected has not arrived yet.
+  if (kind == InputChannelKind::Control) {
+    (void)rust_core_shadow_event_bridge_.CompareControlOpened(
+        rust_shadow_scope,
+        generation,
+        true);
+  } else {
+    (void)rust_core_shadow_event_bridge_.ComparePointerOpened(
+        rust_shadow_scope,
+        generation,
+        true);
+  }
+
   const std::weak_ptr<rtc::DataChannel> weak_channel = channel;
   channel->onOpen([this, label, kind, generation, weak_channel]() {
     auto opened = weak_channel.lock();
@@ -1153,17 +1192,31 @@ void WebRtcSession::AttachControlChannel(const std::shared_ptr<rtc::DataChannel>
     }
   });
 
-  channel->onClosed([this, label, kind, generation, weak_channel]() {
+  channel->onClosed(
+      [this, label, kind, generation, rust_shadow_scope, weak_channel]() {
     auto closed = weak_channel.lock();
     bool was_current = false;
     {
       std::scoped_lock lock(mutex_);
       was_current = input_channel_authority_.RevokeIfCurrent(kind, generation);
-      if (!was_current) return;
-      if (kind == InputChannelKind::Control && (!closed || control_ == closed)) {
+      if (was_current && kind == InputChannelKind::Control &&
+          (!closed || control_ == closed)) {
         control_.reset();
       }
     }
+
+    if (kind == InputChannelKind::Control) {
+      (void)rust_core_shadow_event_bridge_.CompareControlClosed(
+          rust_shadow_scope,
+          generation,
+          was_current);
+    } else {
+      (void)rust_core_shadow_event_bridge_.ComparePointerClosed(
+          rust_shadow_scope,
+          generation,
+          was_current);
+    }
+    if (!was_current) return;
 
     // Only the currently authoritative input channel is an authority-loss
     // boundary. A predecessor that closes after its replacement is active must

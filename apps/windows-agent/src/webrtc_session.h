@@ -102,7 +102,9 @@ class WebRtcSession {
   void HandleOffer(const std::string& from, const std::string& session, const nlohmann::json& payload);
   void HandleIce(const nlohmann::json& payload);
   void CreatePeer(const std::string& controller, const std::string& session, uint8_t h264_payload_type);
-  void AttachControlChannel(const std::shared_ptr<rtc::DataChannel>& channel);
+  void AttachControlChannel(
+      const std::shared_ptr<rtc::DataChannel>& channel,
+      RustCoreShadowPeerScope rust_shadow_scope);
   void HandleControl(const std::string& text);
   void SendSignal(const std::string& type, const nlohmann::json& payload);
   void SendSignalTo(
@@ -138,9 +140,9 @@ class WebRtcSession {
   bool reconnect_requested_{false};
   std::jthread reconnect_thread_;
 
-  // Prototype-only observer. C++ remains authoritative; this member never changes
-  // session, peer, channel or input decisions.
-  RustCoreShadowLifecycle rust_core_shadow_lifecycle_;
+  // Shadow-only observer. C++ remains authoritative. The bridge normalizes
+  // callback ordering before mirrored decisions reach the deterministic Rust core.
+  RustCoreShadowEventBridge rust_core_shadow_event_bridge_;
 
   // Keep this member last: its worker may call connected()/SendControlMessage(),
   // so every session synchronization primitive must already be constructed.

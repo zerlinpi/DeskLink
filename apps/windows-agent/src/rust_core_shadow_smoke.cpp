@@ -148,10 +148,9 @@ int main() {
   Require(lifecycle.EndSession(), "connected shadow session did not close cleanly");
   Require(lifecycle.mismatch_count() == 0, "lifecycle adapter produced unexpected mismatches");
 
-  // libdatachannel is free to deliver an input DataChannel open callback before
-  // PeerConnection::Connected. C++ may already consider that channel current, but the
-  // Rust reducer is still Negotiating. Cache the current channel authority and replay it
-  // only after the peer-connected observation rather than reporting a false mismatch.
+  // libdatachannel is free to deliver input authority before PeerConnection::Connected.
+  // Cache the current channel authority and replay it only after the peer-connected
+  // observation rather than reporting a false mismatch.
   desklink::RustCoreShadowEventBridge reordered;
   const auto early_scope = reordered.BeginPeer(false);
   Require(
@@ -173,6 +172,45 @@ int main() {
   Require(
       reordered.mismatch_count() == 0,
       "early channel callback ordering produced an unexpected mismatch");
+
+  // Before PeerConnected, C++ may replace a DataChannel authority more than once.
+  // Rust sees only the latest buffered authority. A delayed close from the superseded
+  // generation must therefore be normalized away rather than becoming a false mismatch.
+  desklink::RustCoreShadowEventBridge preconnected_replacement;
+  const auto pending_scope = preconnected_replacement.BeginPeer(false);
+  Require(
+      preconnected_replacement.CompareControlOpened(pending_scope, 21, true),
+      "first pending control authority mismatch");
+  Require(
+      preconnected_replacement.CompareControlOpened(pending_scope, 22, true),
+      "replacement pending control authority mismatch");
+  Require(
+      preconnected_replacement.CompareControlClosed(pending_scope, 21, false),
+      "superseded pending control close produced a false mismatch");
+  Require(
+      preconnected_replacement.ComparePointerOpened(pending_scope, 31, true),
+      "first pending pointer authority mismatch");
+  Require(
+      preconnected_replacement.ComparePointerOpened(pending_scope, 32, true),
+      "replacement pending pointer authority mismatch");
+  Require(
+      preconnected_replacement.ComparePointerClosed(pending_scope, 31, false),
+      "superseded pending pointer close produced a false mismatch");
+  Require(
+      preconnected_replacement.ComparePeerConnected(pending_scope, true),
+      "peer connect did not replay replacement pending authority");
+  Require(
+      preconnected_replacement.CompareControlClosed(pending_scope, 22, true),
+      "replacement pending control close mismatch");
+  Require(
+      preconnected_replacement.ComparePointerClosed(pending_scope, 32, true),
+      "replacement pending pointer close mismatch");
+  Require(
+      preconnected_replacement.EndSession(),
+      "preconnected replacement shadow session did not close cleanly");
+  Require(
+      preconnected_replacement.mismatch_count() == 0,
+      "preconnected channel replacement produced an unexpected mismatch");
 
   std::cout << "DeskLink Rust core shadow lifecycle + concurrency smoke passed.\n";
   return 0;

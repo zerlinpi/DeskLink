@@ -72,6 +72,14 @@ bool RustCoreShadowEventBridge::CompareControlClosed(
     pending_control_generation_ = 0;
     return true;
   }
+  if (!cpp_authoritative && scope == current_scope_ && !peer_connected_ &&
+      pending_control_generation_ != 0 &&
+      control_generation < pending_control_generation_) {
+    // C++ already replaced this channel before the peer-connected observation.
+    // Rust has intentionally not seen the buffered replacement yet, so suppress
+    // this ordering artifact rather than reporting a false mismatch.
+    return true;
+  }
   return lifecycle_.CompareControlClosed(
       scope,
       control_generation,
@@ -101,6 +109,11 @@ bool RustCoreShadowEventBridge::ComparePointerClosed(
   if (cpp_authoritative && scope == current_scope_ && !peer_connected_ &&
       pending_pointer_generation_ == pointer_generation) {
     pending_pointer_generation_ = 0;
+    return true;
+  }
+  if (!cpp_authoritative && scope == current_scope_ && !peer_connected_ &&
+      pending_pointer_generation_ != 0 &&
+      pointer_generation < pending_pointer_generation_) {
     return true;
   }
   return lifecycle_.ComparePointerClosed(

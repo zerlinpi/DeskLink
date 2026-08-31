@@ -18,6 +18,7 @@ on:
       - apps/windows-agent/src/rust_core_shadow_smoke.cpp
       - apps/windows-agent/src/webrtc_session.cpp
       - apps/windows-agent/src/webrtc_session.h
+      - tools/rust-core/check-shadow-integration.py
       - tools/windows/run-native-smokes.ps1
       - .github/workflows/rust-core-shadow-prototype.yml
   workflow_dispatch:
@@ -30,6 +31,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify production shadow integration source contract
+        run: python tools/rust-core/check-shadow-integration.py
       - name: Poison Cargo for default-off verification
         shell: pwsh
         run: |
