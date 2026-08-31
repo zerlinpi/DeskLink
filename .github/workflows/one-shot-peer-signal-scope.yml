@@ -18,72 +18,69 @@ jobs:
           fetch-depth: 0
 
       - name: Bind local signaling callbacks to their peer session
-        shell: pwsh
+        shell: bash
         run: |
-          @'
-          #pragma once
-
-          #include <string_view>
-
-          namespace desklink {
-
-          inline bool PeerSignalScopeCurrent(
-              bool peer_current,
-              std::string_view current_controller,
-              std::string_view expected_controller,
-              std::string_view current_session,
-              std::string_view expected_session) {
-            return peer_current &&
-                !expected_controller.empty() &&
-                !expected_session.empty() &&
-                current_controller == expected_controller &&
-                current_session == expected_session;
-          }
-
-          }  // namespace desklink
-          '@ | Set-Content apps/windows-agent/src/peer_signal_scope.h -Encoding utf8
-
-          @'
-          #include "peer_signal_scope.h"
-
-          #include <iostream>
-
-          int main() {
-            using desklink::PeerSignalScopeCurrent;
-
-            if (!PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-a", "session-a")) {
-              std::cerr << "current peer signaling scope was rejected\n";
-              return 1;
-            }
-            if (PeerSignalScopeCurrent(false, "controller-a", "controller-a", "session-a", "session-a")) {
-              std::cerr << "stale peer signaling scope was accepted\n";
-              return 1;
-            }
-            if (PeerSignalScopeCurrent(true, "controller-b", "controller-a", "session-a", "session-a")) {
-              std::cerr << "replaced controller signaling scope was accepted\n";
-              return 1;
-            }
-            if (PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-b", "session-a")) {
-              std::cerr << "replaced session signaling scope was accepted\n";
-              return 1;
-            }
-            if (PeerSignalScopeCurrent(true, "", "", "session-a", "session-a") ||
-                PeerSignalScopeCurrent(true, "controller-a", "controller-a", "", "")) {
-              std::cerr << "empty signaling identity was accepted\n";
-              return 1;
-            }
-
-            std::cout << "DeskLink peer signaling scope smoke passed.\n";
-            return 0;
-          }
-          '@ | Set-Content apps/windows-agent/src/peer_signal_scope_smoke.cpp -Encoding utf8
-
           python - <<'PY'
           from pathlib import Path
 
+          Path('apps/windows-agent/src/peer_signal_scope.h').write_text(r'''#pragma once
+
+#include <string_view>
+
+namespace desklink {
+
+inline bool PeerSignalScopeCurrent(
+    bool peer_current,
+    std::string_view current_controller,
+    std::string_view expected_controller,
+    std::string_view current_session,
+    std::string_view expected_session) {
+  return peer_current &&
+      !expected_controller.empty() &&
+      !expected_session.empty() &&
+      current_controller == expected_controller &&
+      current_session == expected_session;
+}
+
+}  // namespace desklink
+''', encoding='utf-8')
+
+          Path('apps/windows-agent/src/peer_signal_scope_smoke.cpp').write_text(r'''#include "peer_signal_scope.h"
+
+#include <iostream>
+
+int main() {
+  using desklink::PeerSignalScopeCurrent;
+
+  if (!PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-a", "session-a")) {
+    std::cerr << "current peer signaling scope was rejected\n";
+    return 1;
+  }
+  if (PeerSignalScopeCurrent(false, "controller-a", "controller-a", "session-a", "session-a")) {
+    std::cerr << "stale peer signaling scope was accepted\n";
+    return 1;
+  }
+  if (PeerSignalScopeCurrent(true, "controller-b", "controller-a", "session-a", "session-a")) {
+    std::cerr << "replaced controller signaling scope was accepted\n";
+    return 1;
+  }
+  if (PeerSignalScopeCurrent(true, "controller-a", "controller-a", "session-b", "session-a")) {
+    std::cerr << "replaced session signaling scope was accepted\n";
+    return 1;
+  }
+  if (PeerSignalScopeCurrent(true, "", "", "session-a", "session-a") ||
+      PeerSignalScopeCurrent(true, "controller-a", "controller-a", "", "")) {
+    std::cerr << "empty signaling identity was accepted\n";
+    return 1;
+  }
+
+  std::cout << "DeskLink peer signaling scope smoke passed.\n";
+  return 0;
+}
+''', encoding='utf-8')
+
           path = Path('apps/windows-agent/src/webrtc_session.cpp')
           text = path.read_text(encoding='utf-8')
-
           include_anchor = '#include "file_transfer_receiver.h"\n#include "pointer_wire.h"\n'
           include_replacement = '#include "file_transfer_receiver.h"\n#include "peer_signal_scope.h"\n#include "pointer_wire.h"\n'
           if include_anchor in text:
