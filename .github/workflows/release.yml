@@ -173,6 +173,7 @@ jobs:
             "build/windows-agent/Release/desklink-h264-annexb-smoke.exe",
             "build/windows-agent/Release/desklink-video-policy-smoke.exe",
             "build/windows-agent/Release/desklink-pointer-wire-smoke.exe",
+            "build/windows-agent/Release/desklink-peer-signal-scope-smoke.exe",
             "build/windows-agent/Release/desklink-active-session-smoke.exe",
             "build/windows-agent/Release/desklink-device-identity-smoke.exe",
             "build/windows-agent/Release/desklink-secure-attention-smoke.exe",
@@ -255,7 +256,8 @@ jobs:
           Copy-Item "packaging/windows/README.txt" $packageRoot
           Copy-Item "docs/WINDOWS_SERVICE.md" $packageRoot
 
-          $zip = Join-Path $PWD "release\desklink-windows-v$version-x64.zip"
+          $zip = Join-Path $PWD "release\desklink-windows-v$version-x64"
+          $zip = "$zip.zip"
           Compress-Archive -Path "$packageRoot\*" -DestinationPath $zip -CompressionLevel Optimal
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $zip -Leaf)" | Set-Content "release\SHA256SUMS.windows.txt" -Encoding ascii
