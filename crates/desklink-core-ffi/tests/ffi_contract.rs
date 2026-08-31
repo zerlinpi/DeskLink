@@ -5,7 +5,7 @@ use desklink_core_ffi::{
     desklink_core_destroy, desklink_core_test_force_panic, DeskLinkCoreCommandBuffer,
     DeskLinkCoreEvent, DeskLinkCoreHandle, DESKLINK_CORE_ABI_VERSION,
     DESKLINK_CORE_COMMAND_BEGIN_SIGNALING, DESKLINK_CORE_EVENT_AUTHENTICATION_ACCEPTED,
-    DESKLINK_CORE_EVENT_CLOSE_REQUESTED, DESKLINK_CORE_EVENT_CLOSED,
+    DESKLINK_CORE_EVENT_CLOSED, DESKLINK_CORE_EVENT_CLOSE_REQUESTED,
     DESKLINK_CORE_EVENT_PEER_CONNECTED, DESKLINK_CORE_EVENT_SIGNAL_CONNECTED,
     DESKLINK_CORE_EVENT_START, DESKLINK_CORE_STATUS_INVALID_ARGUMENT, DESKLINK_CORE_STATUS_OK,
     DESKLINK_CORE_STATUS_PANIC, DESKLINK_CORE_STATUS_STALE_EVENT,
@@ -55,7 +55,11 @@ fn null_handles_and_null_outputs_are_rejected() {
 
     let mut commands = DeskLinkCoreCommandBuffer::default();
     assert_eq!(
-        desklink_core_apply(null_mut(), &event(DESKLINK_CORE_EVENT_START, 1), &mut commands),
+        desklink_core_apply(
+            null_mut(),
+            &event(DESKLINK_CORE_EVENT_START, 1),
+            &mut commands
+        ),
         DESKLINK_CORE_STATUS_INVALID_ARGUMENT
     );
 
