@@ -10,3 +10,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 desklink-protocol = { path = "../desklink-protocol" }
 desklink-session = { path = "../desklink-session" }
+
+[dev-dependencies]
+criterion = "=0.5.1"
+
+[[bench]]
+name = "ffi_bench"
+harness = false
