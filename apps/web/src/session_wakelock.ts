@@ -1,22 +1,14 @@
+import {
+  isWakeLockRequestCurrent,
+  shouldHoldWakeLock,
+} from "./session_wakelock_policy";
+
 let wakeLock: WakeLockSentinel | null = null;
 let requesting = false;
+let requestGeneration = 0;
 
 function currentStatus() {
   return document.querySelector<HTMLElement>(".status")?.textContent?.trim().toLowerCase() ?? "idle";
-}
-
-function sessionActive() {
-  const value = currentStatus();
-  if (["new", "connecting", "connected", "disconnected", "checking"].includes(value)) return true;
-  return [
-    "signaling",
-    "authorizing",
-    "proving host access",
-    "negotiating",
-    "reconnecting",
-    "control ready",
-    "host offline",
-  ].some((marker) => value.includes(marker));
 }
 
 async function releaseWakeLock() {
@@ -30,23 +22,47 @@ async function releaseWakeLock() {
 }
 
 async function syncWakeLock() {
-  if (!sessionActive() || document.visibilityState !== "visible") {
+  const status = currentStatus();
+  if (!shouldHoldWakeLock(status, document.visibilityState)) {
+    requestGeneration += 1;
     await releaseWakeLock();
     return;
   }
   if (wakeLock || requesting || !("wakeLock" in navigator)) return;
 
+  const generation = ++requestGeneration;
   requesting = true;
+  let resyncAfterStaleRequest = false;
+
   try {
     const sentinel = await navigator.wakeLock.request("screen");
+    if (!isWakeLockRequestCurrent(
+      generation,
+      requestGeneration,
+      currentStatus(),
+      document.visibilityState,
+    )) {
+      resyncAfterStaleRequest = shouldHoldWakeLock(currentStatus(), document.visibilityState);
+      try {
+        await sentinel.release();
+      } catch {
+      }
+      return;
+    }
+
     wakeLock = sentinel;
     sentinel.addEventListener("release", () => {
-      if (wakeLock === sentinel) wakeLock = null;
+      if (wakeLock !== sentinel) return;
+      wakeLock = null;
+      void syncWakeLock();
     }, { once: true });
   } catch (error) {
     console.debug("DeskLink screen wake lock unavailable", error);
   } finally {
     requesting = false;
+    if (resyncAfterStaleRequest && !wakeLock) {
+      queueMicrotask(() => void syncWakeLock());
+    }
   }
 }
 
@@ -67,6 +83,9 @@ if (root) {
     characterData: true,
   });
   document.addEventListener("visibilitychange", () => void syncWakeLock());
-  window.addEventListener("pagehide", () => void releaseWakeLock());
+  window.addEventListener("pagehide", () => {
+    requestGeneration += 1;
+    void releaseWakeLock();
+  });
   void syncWakeLock();
 }
