@@ -36,3 +36,5 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --locked --workspace --all-targets
+      - name: Release FFI build
+        run: cargo build --locked -p desklink-core-ffi --release
