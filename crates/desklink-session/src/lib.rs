@@ -229,7 +229,10 @@ impl RemoteSessionStateMachine {
                 match self.peer_ordering(peer) {
                     Some(Ordering::Less) => Self::ignore_stale(),
                     Some(Ordering::Greater)
-                        if matches!(self.state, SessionState::Connected | SessionState::Negotiating) =>
+                        if matches!(
+                            self.state,
+                            SessionState::Connected | SessionState::Negotiating
+                        ) =>
                     {
                         self.peer = Some(peer);
                         self.clear_scoped_authority();
