@@ -15,6 +15,12 @@ import { resolveControllerSessionUrl } from "./controller_session";
 import { createControllerSessionTokenRequest } from "./controller_token_request";
 import { decodeControlChannelText } from "./control_channel_message";
 import { resolveControlRttAck, shouldIssueControlRttProbe, type PendingControlRttProbe } from "./control_rtt";
+import {
+  LAN_FIRST_RELAY_FALLBACK_MS,
+  directFirstIceServers,
+  shouldEscalateLanFirstToRelay,
+  shouldUseLanFirstIce,
+} from "./ice_startup_policy";
 import type { HostCapabilitiesV1 } from "./host_capabilities";
 import { ControllerTokenCoordinator } from "./controller_token_coordinator";
 import {
@@ -107,6 +113,8 @@ const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD ?? "CHANGE_ME_NOW";
 const TURN_CREDENTIALS_URL = import.meta.env.VITE_TURN_CREDENTIALS_URL ?? "";
 const TURN_RUNTIME_REQUIRED = import.meta.env.VITE_TURN_RUNTIME_REQUIRED === "1";
 const FORCE_RELAY = import.meta.env.VITE_ICE_TRANSPORT_POLICY === "relay";
+const LAN_FIRST_ICE = import.meta.env.VITE_LAN_FIRST_ICE !== "0";
+const USE_LAN_FIRST_ICE = shouldUseLanFirstIce({ enabled: LAN_FIRST_ICE, forceRelay: FORCE_RELAY });
 const CONTROLLER_TOKEN_REFRESH_MARGIN_SECONDS = 90;
 const SIGNAL_PROTOCOL = "desklink-v1";
 const CONTROLLER_AUTH_PROTOCOL_PREFIX = "desklink-auth.";
@@ -226,6 +234,8 @@ function App() {
   const iceRestartTimerRef = useRef<number | null>(null);
   const iceRestartWatchdogRef = useRef<number | null>(null);
   const iceRestartInFlightRef = useRef(false);
+  const relayFallbackTimerRef = useRef<number | null>(null);
+  const relayEscalatedRef = useRef(false);
   const signalReconnectTimerRef = useRef<number | null>(null);
   const signalReconnectAttemptRef = useRef(0);
   const signalOpenInFlightRef = useRef(false);
@@ -314,6 +324,11 @@ function App() {
     iceRestartWatchdogRef.current = null;
   };
 
+  const clearRelayFallbackTimer = () => {
+    if (relayFallbackTimerRef.current !== null) window.clearTimeout(relayFallbackTimerRef.current);
+    relayFallbackTimerRef.current = null;
+  };
+
   const clearSignalReconnectTimer = () => {
     if (signalReconnectTimerRef.current !== null) window.clearTimeout(signalReconnectTimerRef.current);
     signalReconnectTimerRef.current = null;
@@ -383,6 +398,7 @@ function App() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       clearIceRestartTimer();
       clearIceRestartWatchdog();
+      clearRelayFallbackTimer();
       clearSignalReconnectTimer();
       clearHostWaitRefreshTimer();
       resetDataChannelRecoveryState();
@@ -645,10 +661,20 @@ function App() {
 
     iceRestartInFlightRef.current = true;
     clearIceRestartTimer();
+    clearRelayFallbackTimer();
     setStatus("reconnecting network");
 
     try {
-      if (TURN_CREDENTIALS_URL) {
+      if (USE_LAN_FIRST_ICE && !relayEscalatedRef.current) {
+        const authToken = await ensureSignalAuthToken(false);
+        const iceServers = await resolveIceServers(localId, authToken);
+        if (pcRef.current !== pc || manualDisconnectRef.current) return;
+        pc.setConfiguration({
+          ...pc.getConfiguration(),
+          iceServers,
+        });
+        relayEscalatedRef.current = true;
+      } else if (TURN_CREDENTIALS_URL) {
         const authToken = await ensureSignalAuthToken(false);
         const iceServers = await resolveIceServers(localId, authToken);
         if (pcRef.current !== pc || manualDisconnectRef.current) return;
@@ -683,6 +709,29 @@ function App() {
       iceRestartInFlightRef.current = false;
       scheduleIceRestart(pc, false);
     }
+  };
+
+  const armLanRelayFallback = (pc: RTCPeerConnection) => {
+    if (!USE_LAN_FIRST_ICE || relayFallbackTimerRef.current !== null) return;
+    if (!shouldEscalateLanFirstToRelay({
+      manualDisconnect: manualDisconnectRef.current,
+      currentPeer: pcRef.current === pc,
+      connectionState: pc.connectionState,
+      restartInFlight: iceRestartInFlightRef.current,
+      relayEscalated: relayEscalatedRef.current,
+    })) return;
+
+    relayFallbackTimerRef.current = window.setTimeout(() => {
+      relayFallbackTimerRef.current = null;
+      if (!shouldEscalateLanFirstToRelay({
+        manualDisconnect: manualDisconnectRef.current,
+        currentPeer: pcRef.current === pc,
+        connectionState: pc.connectionState,
+        restartInFlight: iceRestartInFlightRef.current,
+        relayEscalated: relayEscalatedRef.current,
+      })) return;
+      void restartIce(pc);
+    }, LAN_FIRST_RELAY_FALLBACK_MS);
   };
 
   const armDataChannelOpenWatchdog = (
@@ -877,6 +926,8 @@ function App() {
     pendingLocalIceRef.current = [];
     pendingRemoteIceRef.current = [];
     resetDataChannelRecoveryState();
+    clearRelayFallbackTimer();
+    relayEscalatedRef.current = !USE_LAN_FIRST_ICE;
     setHostCapabilities(null);
 
     const pc = new RTCPeerConnection({
@@ -908,6 +959,7 @@ function App() {
       if (state === "connected") {
         clearIceRestartTimer();
         clearIceRestartWatchdog();
+        clearRelayFallbackTimer();
         iceRestartInFlightRef.current = false;
         const control = controlRef.current;
         if (control?.readyState === "open") {
@@ -987,7 +1039,9 @@ function App() {
     try {
       const authToken = await ensureSignalAuthToken(false);
       if (!startupScopeCurrent()) return;
-      const iceServers = await resolveIceServers(localId, authToken);
+      const iceServers = USE_LAN_FIRST_ICE
+        ? directFirstIceServers(STUN_URL)
+        : await resolveIceServers(localId, authToken);
       if (!startupScopeCurrent() || pcRef.current) return;
 
       const pc = createPeer(iceServers);
@@ -1004,7 +1058,11 @@ function App() {
 
       const offerSent = await sendOffer(pc, false);
       if (!startupScopeCurrent()) return;
-      if (!offerSent) setStatus("signal error");
+      if (!offerSent) {
+        setStatus("signal error");
+      } else {
+        armLanRelayFallback(pc);
+      }
     } catch (error) {
       if (!startupScopeCurrent()) return;
       console.debug("DeskLink initial connection setup failed", error);
@@ -1302,12 +1360,14 @@ function App() {
     stopTelemetry();
     clearIceRestartTimer();
     clearIceRestartWatchdog();
+    clearRelayFallbackTimer();
     clearSignalReconnectTimer();
     clearHostWaitRefreshTimer();
     resetDataChannelRecoveryState();
     controlRttProbeRef.current = null;
     controlRttMsRef.current = null;
     iceRestartInFlightRef.current = false;
+    relayEscalatedRef.current = false;
     negotiationPendingRef.current = false;
     signalReconnectAttemptRef.current = 0;
     initialPeerAttemptRef.current.invalidate();
