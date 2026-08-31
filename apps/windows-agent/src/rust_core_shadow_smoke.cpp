@@ -1,5 +1,9 @@
 #include "rust_core_shadow.h"
 
+#ifndef DESKLINK_ENABLE_RUST_CORE_SHADOW
+#define DESKLINK_ENABLE_RUST_CORE_SHADOW 0
+#endif
+
 #include <cstdlib>
 #include <iostream>
 
@@ -16,6 +20,12 @@ void Require(bool condition, const char* message) {
 
 int main() {
   desklink::RustCoreShadow shadow;
+
+#if !DESKLINK_ENABLE_RUST_CORE_SHADOW
+  Require(!shadow.available(), "Rust shadow must stay unavailable when the CMake option is OFF");
+  std::cout << "DeskLink Rust core shadow disabled-mode smoke passed.\n";
+  return 0;
+#else
   Require(shadow.available(), "Rust shadow core was not available");
 
   constexpr std::uint64_t kSession = 10;
@@ -69,4 +79,5 @@ int main() {
 
   std::cout << "DeskLink Rust core shadow lifecycle smoke passed.\n";
   return 0;
+#endif
 }
