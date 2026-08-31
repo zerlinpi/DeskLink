@@ -35,7 +35,10 @@ import {
   signalReconnectDelayMs,
 } from "./session_recovery";
 import { shouldAcceptSignalMessage } from "./signal_scope";
-import { isActiveSessionResource } from "./session_resource_scope";
+import {
+  isActiveAsyncSessionResource,
+  isActiveSessionResource,
+} from "./session_resource_scope";
 import { encodePointerMove, encodePointerWheel } from "./pointer_wire";
 import {
   POINTER_MOVE_BUFFER_BUDGET_BYTES,
@@ -1193,10 +1196,17 @@ function App() {
 
     const pc = pcRef.current;
     if (!pc) return;
+    const negotiationScopeCurrent = () => isActiveAsyncSessionResource(
+      pcRef.current,
+      pc,
+      manualDisconnectRef.current,
+      callbackScopeCurrent(),
+    );
 
     if (msg.type === "answer" && msg.payload) {
       try {
         await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);
+        if (!negotiationScopeCurrent()) return;
         negotiationPendingRef.current = false;
         iceRestartInFlightRef.current = false;
         clearIceRestartWatchdog();
@@ -1206,11 +1216,14 @@ function App() {
         for (const candidate of pending) {
           try {
             await pc.addIceCandidate(candidate);
+            if (!negotiationScopeCurrent()) return;
           } catch (error) {
+            if (!negotiationScopeCurrent()) return;
             console.debug("DeskLink queued remote ICE rejected", error);
           }
         }
       } catch (error) {
+        if (!negotiationScopeCurrent()) return;
         console.debug("DeskLink remote answer rejected", error);
         negotiationPendingRef.current = false;
         iceRestartInFlightRef.current = false;
@@ -1221,10 +1234,12 @@ function App() {
       if (pc.remoteDescription && !negotiationPendingRef.current) {
         try {
           await pc.addIceCandidate(candidate);
+          if (!negotiationScopeCurrent()) return;
         } catch (error) {
+          if (!negotiationScopeCurrent()) return;
           console.debug("DeskLink remote ICE rejected", error);
         }
-      } else {
+      } else if (negotiationScopeCurrent()) {
         pendingRemoteIceRef.current.push(candidate);
       }
     }
