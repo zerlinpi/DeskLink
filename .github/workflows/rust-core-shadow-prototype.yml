@@ -1,0 +1,36 @@
+name: Rust Core Shadow Prototype
+
+on:
+  push:
+    branches:
+      - prototype/rust-core
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/desklink-protocol/**
+      - crates/desklink-session/**
+      - crates/desklink-core-ffi/**
+      - apps/windows-agent/CMakeLists.txt
+      - apps/windows-agent/src/rust_core_shadow.*
+      - apps/windows-agent/src/rust_core_shadow_smoke.cpp
+      - apps/windows-agent/src/webrtc_session.cpp
+      - apps/windows-agent/src/webrtc_session.h
+      - .github/workflows/rust-core-shadow-prototype.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shadow-on:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Configure shadow build
+        run: cmake -S apps/windows-agent -B build/windows-agent-shadow -A x64 -DDESKLINK_ENABLE_RUST_CORE_SHADOW=ON -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
+      - name: Build native shadow smoke
+        run: cmake --build build/windows-agent-shadow --config Release --target desklink-rust-core-shadow-smoke --parallel
