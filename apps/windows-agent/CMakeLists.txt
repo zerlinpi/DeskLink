@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(
+  DESKLINK_ENABLE_RUST_CORE_SHADOW
+  "Build the prototype-only Rust lifecycle shadow observer"
+  OFF
+)
+
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" DESKLINK_VERSION)
 string(STRIP "${DESKLINK_VERSION}" DESKLINK_VERSION)
 if(NOT DESKLINK_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)(-([0-9A-Za-z][0-9A-Za-z.-]*))?$")
@@ -375,3 +381,51 @@ target_compile_definitions(
 )
 target_compile_options(desklink-host-capabilities-smoke PRIVATE /W4 /permissive-)
 target_link_libraries(desklink-host-capabilities-smoke PRIVATE nlohmann_json::nlohmann_json)
+
+if(DESKLINK_ENABLE_RUST_CORE_SHADOW)
+  find_program(DESKLINK_CARGO_EXECUTABLE NAMES cargo REQUIRED)
+  set(DESKLINK_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+  set(DESKLINK_RUST_CORE_LIBRARY "${DESKLINK_REPOSITORY_ROOT}/target/release/desklink_core_ffi.lib")
+
+  add_custom_target(desklink-rust-core-staticlib
+    COMMAND
+      "${CMAKE_COMMAND}" -E env
+      "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-Ctarget-feature=+crt-static"
+      "${DESKLINK_CARGO_EXECUTABLE}" build --locked -p desklink-core-ffi --release
+    WORKING_DIRECTORY "${DESKLINK_REPOSITORY_ROOT}"
+    BYPRODUCTS "${DESKLINK_RUST_CORE_LIBRARY}"
+    VERBATIM
+  )
+
+  add_executable(desklink-rust-core-shadow-smoke
+    src/rust_core_shadow_smoke.cpp
+    src/rust_core_shadow.cpp
+    src/rust_core_shadow.h
+  )
+  add_dependencies(desklink-rust-core-shadow-smoke desklink-rust-core-staticlib)
+  target_include_directories(
+    desklink-rust-core-shadow-smoke
+    PRIVATE
+      "${DESKLINK_REPOSITORY_ROOT}/crates/desklink-core-ffi/include"
+  )
+  target_compile_definitions(
+    desklink-rust-core-shadow-smoke
+    PRIVATE
+      DESKLINK_ENABLE_RUST_CORE_SHADOW=1
+      UNICODE
+      _UNICODE
+      WIN32_LEAN_AND_MEAN
+      NOMINMAX
+  )
+  target_compile_options(desklink-rust-core-shadow-smoke PRIVATE /W4 /permissive-)
+  target_link_libraries(
+    desklink-rust-core-shadow-smoke
+    PRIVATE
+      "${DESKLINK_RUST_CORE_LIBRARY}"
+      advapi32
+      bcrypt
+      ntdll
+      userenv
+      ws2_32
+  )
+endif()
