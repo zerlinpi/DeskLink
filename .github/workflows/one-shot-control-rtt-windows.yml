@@ -16,6 +16,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - name: Restore native build cache
         uses: actions/cache@v4
         with:
@@ -25,38 +28,7 @@ jobs:
       - name: Add bounded control RTT echo
         shell: pwsh
         run: |
-          $path = "apps/windows-agent/src/webrtc_session.cpp"
-          $text = Get-Content $path -Raw
-          $old = @'
-  if (type == "release-all") {
-    input_.ReleaseAll();
-    return;
-  }
-
-  if (type == "system-operation") {
-'@
-          $new = @'
-  if (type == "release-all") {
-    input_.ReleaseAll();
-    return;
-  }
-
-  if (type == "control-rtt-probe") {
-    const std::string request_id = event.value("requestId", "");
-    if (!ValidRequestId(request_id)) return;
-    SendControlMessage(json{
-        {"t", "control-rtt-ack"},
-        {"requestId", request_id},
-    }.dump());
-    return;
-  }
-
-  if (type == "system-operation") {
-'@
-          $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
-          if ($count -ne 1) { throw "control RTT insertion anchor count=$count" }
-          $text = $text.Replace($old, $new)
-          [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+          python -c "from pathlib import Path; p=Path('apps/windows-agent/src/webrtc_session.cpp'); t=p.read_text(encoding='utf-8'); old='  if (type == \"release-all\") {\n    input_.ReleaseAll();\n    return;\n  }\n\n  if (type == \"system-operation\") {\n'; new='  if (type == \"release-all\") {\n    input_.ReleaseAll();\n    return;\n  }\n\n  if (type == \"control-rtt-probe\") {\n    const std::string request_id = event.value(\"requestId\", \"\");\n    if (!ValidRequestId(request_id)) return;\n    SendControlMessage(json{\n        {\"t\", \"control-rtt-ack\"},\n        {\"requestId\", request_id},\n    }.dump());\n    return;\n  }\n\n  if (type == \"system-operation\") {\n'; c=t.count(old); assert c == 1, f'control RTT insertion anchor count={c}'; p.write_text(t.replace(old,new,1),encoding='utf-8')"
           git diff --check
 
       - name: Configure Windows host
