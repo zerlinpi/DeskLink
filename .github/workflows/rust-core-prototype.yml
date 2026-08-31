@@ -40,5 +40,15 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --locked --workspace --all-targets
+      - name: Release property test - 10,000 cases
+        env:
+          PROPTEST_CASES: "10000"
+        run: cargo test --locked --release -p desklink-session --test property_stress stale_generations_never_replace_authority -- --exact
+      - name: Release million-event stale-race stress
+        shell: bash
+        run: |
+          set -euo pipefail
+          TIMEFORMAT='desklink_release_stress_elapsed=%3R seconds'
+          time cargo test --locked --release -p desklink-session --test property_stress million_event_stale_race_stress_preserves_authority -- --exact
       - name: Release FFI build
         run: cargo build --locked -p desklink-core-ffi --release
