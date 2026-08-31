@@ -1,4 +1,5 @@
 #include "file_transfer_receiver.h"
+#include "file_transfer_chunk_policy.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -752,8 +753,8 @@ struct FileTransferReceiver::Impl {
       Send(json{{"t", "upload-ready"}, {"id", active.id}, {"offset", active.received}, {"size", active.expected_size}});
       return;
     }
-    if (payload_size > active.expected_size - active.received) {
-      SendUploadError(active.id, "chunk-overflow");
+    if (!IsValidUploadChunkProgress(payload_size, active.received, active.expected_size)) {
+      SendUploadError(active.id, payload_size == 0 ? "empty-chunk" : "chunk-overflow");
       return;
     }
     if (!DigestMatches(supplied_digest, payload, payload_size)) {
