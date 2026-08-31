@@ -207,6 +207,6 @@ fn ten_thousand_create_destroy_cycles_are_stable() {
 
 #[test]
 fn forced_panic_is_caught_inside_the_ffi_boundary() {
-    let result = std::panic::catch_unwind(desklink_core_test_force_panic);
-    assert_eq!(result, Ok(DESKLINK_CORE_STATUS_PANIC));
+    let result = std::panic::catch_unwind(|| desklink_core_test_force_panic());
+    assert!(matches!(result, Ok(DESKLINK_CORE_STATUS_PANIC)));
 }
