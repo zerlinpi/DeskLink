@@ -28,8 +28,15 @@ jobs:
       - name: Add bounded control RTT echo
         shell: pwsh
         run: |
-          python -c "from pathlib import Path; p=Path('apps/windows-agent/src/webrtc_session.cpp'); t=p.read_text(encoding='utf-8'); old='  if (type == \"release-all\") {\n    input_.ReleaseAll();\n    return;\n  }\n\n  if (type == \"system-operation\") {\n'; new='  if (type == \"release-all\") {\n    input_.ReleaseAll();\n    return;\n  }\n\n  if (type == \"control-rtt-probe\") {\n    const std::string request_id = event.value(\"requestId\", \"\");\n    if (!ValidRequestId(request_id)) return;\n    SendControlMessage(json{\n        {\"t\", \"control-rtt-ack\"},\n        {\"requestId\", request_id},\n    }.dump());\n    return;\n  }\n\n  if (type == \"system-operation\") {\n'; c=t.count(old); assert c == 1, f'control RTT insertion anchor count={c}'; p.write_text(t.replace(old,new,1),encoding='utf-8')"
+          $env:OLD_BLOCK_B64 = 'ICBpZiAodHlwZSA9PSAicmVsZWFzZS1hbGwiKSB7CiAgICBpbnB1dF8uUmVsZWFzZUFsbCgpOwogICAgcmV0dXJuOwogIH0KCiAgaWYgKHR5cGUgPT0gInN5c3RlbS1vcGVyYXRpb24iKSB7Cg=='
+          $env:NEW_BLOCK_B64 = 'ICBpZiAodHlwZSA9PSAicmVsZWFzZS1hbGwiKSB7CiAgICBpbnB1dF8uUmVsZWFzZUFsbCgpOwogICAgcmV0dXJuOwogIH0KCiAgaWYgKHR5cGUgPT0gImNvbnRyb2wtcnR0LXByb2JlIikgewogICAgY29uc3Qgc3RkOjpzdHJpbmcgcmVxdWVzdF9pZCA9IGV2ZW50LnZhbHVlKCJyZXF1ZXN0SWQiLCAiIik7CiAgICBpZiAoIVZhbGlkUmVxdWVzdElkKHJlcXVlc3RfaWQpKSByZXR1cm47CiAgICBTZW5kQ29udHJvbE1lc3NhZ2UoanNvbnsKICAgICAgICB7InQiLCAiY29udHJvbC1ydHQtYWNrIn0sCiAgICAgICAgeyJyZXF1ZXN0SWQiLCByZXF1ZXN0X2lkfSwKICAgIH0uZHVtcCgpKTsKICAgIHJldHVybjsKICB9CgogIGlmICh0eXBlID09ICJzeXN0ZW0tb3BlcmF0aW9uIikgewo='
+          python -c "import base64, os; from pathlib import Path; p=Path('apps/windows-agent/src/webrtc_session.cpp'); t=p.read_text(encoding='utf-8'); old=base64.b64decode(os.environ['OLD_BLOCK_B64']).decode(); new=base64.b64decode(os.environ['NEW_BLOCK_B64']).decode(); c=t.count(old); assert c == 1, f'control RTT insertion anchor count={c}'; p.write_text(t.replace(old,new,1), encoding='utf-8')"
+          if ($LASTEXITCODE -ne 0) { throw "control RTT source patch failed" }
           git diff --check
+          if ($LASTEXITCODE -ne 0) { throw "patched source failed git diff --check" }
+          if (git diff --quiet -- apps/windows-agent/src/webrtc_session.cpp) { throw "control RTT source patch produced no change" }
+          Select-String -Path apps/windows-agent/src/webrtc_session.cpp -Pattern 'control-rtt-ack' -SimpleMatch | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "control RTT acknowledgement was not present after patch" }
 
       - name: Configure Windows host
         run: cmake -S apps/windows-agent -B build/windows-agent -A x64 -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
@@ -43,6 +50,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add apps/windows-agent/src/webrtc_session.cpp
           git diff --cached --check
-          if (git diff --cached --quiet) { exit 0 }
+          if ($LASTEXITCODE -ne 0) { throw "staged control RTT patch failed git diff --check" }
+          if (git diff --cached --quiet) { throw "validated control RTT patch was not staged" }
           git commit -m "feat(windows): echo control channel RTT probes"
+          if ($LASTEXITCODE -ne 0) { throw "control RTT commit failed" }
           git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw "control RTT push failed" }
