@@ -123,6 +123,8 @@ add_executable(desklink-agent
   src/pointer_wire.cpp
   src/pointer_wire.h
   src/performance_tuning.cpp
+  src/rust_core_shadow.cpp
+  src/rust_core_shadow.h
   src/service_auth_client.cpp
   src/service_auth_client.h
   src/secure_attention.cpp
@@ -139,7 +141,15 @@ add_executable(desklink-agent
   "${CMAKE_CURRENT_BINARY_DIR}/desklink-agent-version.rc"
 )
 
-target_compile_definitions(desklink-agent PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(
+  desklink-agent
+  PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    DESKLINK_ENABLE_RUST_CORE_SHADOW=$<BOOL:${DESKLINK_ENABLE_RUST_CORE_SHADOW}>
+)
 target_compile_options(desklink-agent PRIVATE /W4 /permissive-)
 target_link_libraries(
   desklink-agent
@@ -395,6 +405,21 @@ if(DESKLINK_ENABLE_RUST_CORE_SHADOW)
     WORKING_DIRECTORY "${DESKLINK_REPOSITORY_ROOT}"
     BYPRODUCTS "${DESKLINK_RUST_CORE_LIBRARY}"
     VERBATIM
+  )
+
+  add_dependencies(desklink-agent desklink-rust-core-staticlib)
+  target_include_directories(
+    desklink-agent
+    PRIVATE
+      "${DESKLINK_REPOSITORY_ROOT}/crates/desklink-core-ffi/include"
+  )
+  target_link_libraries(
+    desklink-agent
+    PRIVATE
+      "${DESKLINK_RUST_CORE_LIBRARY}"
+      ntdll
+      userenv
+      ws2_32
   )
 
   add_executable(desklink-rust-core-shadow-smoke
