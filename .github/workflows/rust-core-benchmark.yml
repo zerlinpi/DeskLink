@@ -1,0 +1,30 @@
+name: Rust Core Benchmark
+
+on:
+  push:
+    branches:
+      - prototype/rust-core
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/desklink-protocol/**
+      - crates/desklink-session/**
+      - crates/desklink-core-ffi/**
+      - .github/workflows/rust-core-benchmark.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Session benchmark smoke
+        run: cargo bench --locked -p desklink-session --bench session_bench -- --warm-up-time 1 --measurement-time 2
+      - name: FFI benchmark smoke
+        run: cargo bench --locked -p desklink-core-ffi --bench ffi_bench -- --warm-up-time 1 --measurement-time 2
