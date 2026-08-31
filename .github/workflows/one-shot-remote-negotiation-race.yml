@@ -65,44 +65,12 @@ jobs:
           elif 'const negotiationScopeCurrent = () => isActiveAsyncSessionResource(' not in main:
               raise SystemExit('remote negotiation scope insertion anchor missing')
 
-          remote_description = '        await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);\n'
-          if remote_description in main and 'await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);\n        if (!negotiationScopeCurrent()) return;' not in main:
-              main = main.replace(
-                  remote_description,
-                  remote_description + '        if (!negotiationScopeCurrent()) return;\n',
-                  1,
-              )
-
-          answer_catch = '''      } catch (error) {\n        console.debug("DeskLink remote answer rejected", error);'''
-          guarded_answer_catch = '''      } catch (error) {\n        if (!negotiationScopeCurrent()) return;\n        console.debug("DeskLink remote answer rejected", error);'''
-          if answer_catch in main:
-              main = main.replace(answer_catch, guarded_answer_catch, 1)
-
-          add_candidate = '            await pc.addIceCandidate(candidate);\n'
-          guarded_add_candidate = add_candidate + '            if (!negotiationScopeCurrent()) return;\n'
-          count = main.count(add_candidate)
-          if count not in (0, 1):
-              raise SystemExit(f'unexpected queued ICE add anchor count={count}')
-          if count == 1:
-              main = main.replace(add_candidate, guarded_add_candidate, 1)
-
-          queued_ice_catch = '''          } catch (error) {\n            console.debug("DeskLink queued remote ICE rejected", error);'''
-          guarded_queued_ice_catch = '''          } catch (error) {\n            if (!negotiationScopeCurrent()) return;\n            console.debug("DeskLink queued remote ICE rejected", error);'''
-          if queued_ice_catch in main:
-              main = main.replace(queued_ice_catch, guarded_queued_ice_catch, 1)
-
-          direct_add_candidate = '          await pc.addIceCandidate(candidate);\n'
-          guarded_direct_add_candidate = direct_add_candidate + '          if (!negotiationScopeCurrent()) return;\n'
-          count = main.count(direct_add_candidate)
-          if count not in (0, 1):
-              raise SystemExit(f'unexpected direct ICE add anchor count={count}')
-          if count == 1:
-              main = main.replace(direct_add_candidate, guarded_direct_add_candidate, 1)
-
-          direct_ice_catch = '''        } catch (error) {\n          console.debug("DeskLink remote ICE rejected", error);'''
-          guarded_direct_ice_catch = '''        } catch (error) {\n          if (!negotiationScopeCurrent()) return;\n          console.debug("DeskLink remote ICE rejected", error);'''
-          if direct_ice_catch in main:
-              main = main.replace(direct_ice_catch, guarded_direct_ice_catch, 1)
+          old_answer = '''    if (msg.type === "answer" && msg.payload) {\n      try {\n        await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);\n        negotiationPendingRef.current = false;\n        iceRestartInFlightRef.current = false;\n        clearIceRestartWatchdog();\n\n        const pending = pendingRemoteIceRef.current;\n        pendingRemoteIceRef.current = [];\n        for (const candidate of pending) {\n          try {\n            await pc.addIceCandidate(candidate);\n          } catch (error) {\n            console.debug("DeskLink queued remote ICE rejected", error);\n          }\n        }\n      } catch (error) {\n        console.debug("DeskLink remote answer rejected", error);\n        negotiationPendingRef.current = false;\n        iceRestartInFlightRef.current = false;\n        scheduleIceRestart(pc, false);\n      }\n    } else if (msg.type === "ice" && msg.payload) {\n      const candidate = msg.payload as RTCIceCandidateInit;\n      if (pc.remoteDescription && !negotiationPendingRef.current) {\n        try {\n          await pc.addIceCandidate(candidate);\n        } catch (error) {\n          console.debug("DeskLink remote ICE rejected", error);\n        }\n      } else {\n        pendingRemoteIceRef.current.push(candidate);\n      }\n    }'''
+          new_answer = '''    if (msg.type === "answer" && msg.payload) {\n      try {\n        await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);\n        if (!negotiationScopeCurrent()) return;\n        negotiationPendingRef.current = false;\n        iceRestartInFlightRef.current = false;\n        clearIceRestartWatchdog();\n\n        const pending = pendingRemoteIceRef.current;\n        pendingRemoteIceRef.current = [];\n        for (const candidate of pending) {\n          try {\n            await pc.addIceCandidate(candidate);\n            if (!negotiationScopeCurrent()) return;\n          } catch (error) {\n            if (!negotiationScopeCurrent()) return;\n            console.debug("DeskLink queued remote ICE rejected", error);\n          }\n        }\n      } catch (error) {\n        if (!negotiationScopeCurrent()) return;\n        console.debug("DeskLink remote answer rejected", error);\n        negotiationPendingRef.current = false;\n        iceRestartInFlightRef.current = false;\n        scheduleIceRestart(pc, false);\n      }\n    } else if (msg.type === "ice" && msg.payload) {\n      const candidate = msg.payload as RTCIceCandidateInit;\n      if (pc.remoteDescription && !negotiationPendingRef.current) {\n        try {\n          await pc.addIceCandidate(candidate);\n          if (!negotiationScopeCurrent()) return;\n        } catch (error) {\n          if (!negotiationScopeCurrent()) return;\n          console.debug("DeskLink remote ICE rejected", error);\n        }\n      } else if (negotiationScopeCurrent()) {\n        pendingRemoteIceRef.current.push(candidate);\n      }\n    }'''
+          if old_answer in main:
+              main = main.replace(old_answer, new_answer, 1)
+          elif new_answer not in main:
+              raise SystemExit('remote answer/ICE block anchor missing')
 
           main_path.write_text(main, encoding='utf-8')
           PY
