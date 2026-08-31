@@ -1,0 +1,137 @@
+name: One-shot remote negotiation race hardening
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-remote-negotiation-race.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Guard late WebRTC negotiation completions
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          scope_path = Path('apps/web/src/session_resource_scope.ts')
+          scope = scope_path.read_text(encoding='utf-8')
+          helper = '''\nexport function isActiveAsyncSessionResource<T>(\n  current: T | null,\n  source: T,\n  manualDisconnect: boolean,\n  callbackScopeCurrent: boolean,\n): boolean {\n  return callbackScopeCurrent &&\n    isActiveSessionResource(current, source, manualDisconnect);\n}\n'''
+          if 'isActiveAsyncSessionResource' not in scope:
+              scope_path.write_text(scope.rstrip() + '\n' + helper, encoding='utf-8')
+
+          test_path = Path('apps/web/src/session_resource_scope.test.ts')
+          test = test_path.read_text(encoding='utf-8')
+          old_import = 'import { isActiveSessionResource } from "./session_resource_scope";'
+          new_import = '''import {\n  isActiveAsyncSessionResource,\n  isActiveSessionResource,\n} from "./session_resource_scope";'''
+          if old_import in test:
+              test = test.replace(old_import, new_import, 1)
+          elif 'isActiveAsyncSessionResource' not in test:
+              raise SystemExit('session resource scope test import anchor missing')
+
+          if 'describe("isActiveAsyncSessionResource"' not in test:
+              test += '''\n\ndescribe("isActiveAsyncSessionResource", () => {\n  it("commits an async completion only while callback and resource scopes are current", () => {\n    const resource = {};\n    expect(isActiveAsyncSessionResource(resource, resource, false, true)).toBe(true);\n  });\n\n  it("rejects a late completion after socket/session scope changed", () => {\n    const resource = {};\n    expect(isActiveAsyncSessionResource(resource, resource, false, false)).toBe(false);\n  });\n\n  it("rejects a late completion from a replaced peer", () => {\n    expect(isActiveAsyncSessionResource({}, {}, false, true)).toBe(false);\n  });\n\n  it("rejects a late completion during manual disconnect", () => {\n    const resource = {};\n    expect(isActiveAsyncSessionResource(resource, resource, true, true)).toBe(false);\n  });\n});\n'''
+          test_path.write_text(test, encoding='utf-8')
+
+          main_path = Path('apps/web/src/main.tsx')
+          main = main_path.read_text(encoding='utf-8')
+
+          old_import = 'import { isActiveSessionResource } from "./session_resource_scope";'
+          new_import = '''import {\n  isActiveAsyncSessionResource,\n  isActiveSessionResource,\n} from "./session_resource_scope";'''
+          if old_import in main:
+              main = main.replace(old_import, new_import, 1)
+          elif 'isActiveAsyncSessionResource' not in main:
+              raise SystemExit('main session resource scope import anchor missing')
+
+          anchor = '''    const pc = pcRef.current;\n    if (!pc) return;\n\n    if (msg.type === "answer" && msg.payload) {'''
+          replacement = '''    const pc = pcRef.current;\n    if (!pc) return;\n    const negotiationScopeCurrent = () => isActiveAsyncSessionResource(\n      pcRef.current,\n      pc,\n      manualDisconnectRef.current,\n      callbackScopeCurrent(),\n    );\n\n    if (msg.type === "answer" && msg.payload) {'''
+          if anchor in main:
+              main = main.replace(anchor, replacement, 1)
+          elif 'const negotiationScopeCurrent = () => isActiveAsyncSessionResource(' not in main:
+              raise SystemExit('remote negotiation scope insertion anchor missing')
+
+          remote_description = '        await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);\n'
+          if remote_description in main and 'await pc.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);\n        if (!negotiationScopeCurrent()) return;' not in main:
+              main = main.replace(
+                  remote_description,
+                  remote_description + '        if (!negotiationScopeCurrent()) return;\n',
+                  1,
+              )
+
+          answer_catch = '''      } catch (error) {\n        console.debug("DeskLink remote answer rejected", error);'''
+          guarded_answer_catch = '''      } catch (error) {\n        if (!negotiationScopeCurrent()) return;\n        console.debug("DeskLink remote answer rejected", error);'''
+          if answer_catch in main:
+              main = main.replace(answer_catch, guarded_answer_catch, 1)
+
+          add_candidate = '            await pc.addIceCandidate(candidate);\n'
+          guarded_add_candidate = add_candidate + '            if (!negotiationScopeCurrent()) return;\n'
+          count = main.count(add_candidate)
+          if count not in (0, 1):
+              raise SystemExit(f'unexpected queued ICE add anchor count={count}')
+          if count == 1:
+              main = main.replace(add_candidate, guarded_add_candidate, 1)
+
+          queued_ice_catch = '''          } catch (error) {\n            console.debug("DeskLink queued remote ICE rejected", error);'''
+          guarded_queued_ice_catch = '''          } catch (error) {\n            if (!negotiationScopeCurrent()) return;\n            console.debug("DeskLink queued remote ICE rejected", error);'''
+          if queued_ice_catch in main:
+              main = main.replace(queued_ice_catch, guarded_queued_ice_catch, 1)
+
+          direct_add_candidate = '          await pc.addIceCandidate(candidate);\n'
+          guarded_direct_add_candidate = direct_add_candidate + '          if (!negotiationScopeCurrent()) return;\n'
+          count = main.count(direct_add_candidate)
+          if count not in (0, 1):
+              raise SystemExit(f'unexpected direct ICE add anchor count={count}')
+          if count == 1:
+              main = main.replace(direct_add_candidate, guarded_direct_add_candidate, 1)
+
+          direct_ice_catch = '''        } catch (error) {\n          console.debug("DeskLink remote ICE rejected", error);'''
+          guarded_direct_ice_catch = '''        } catch (error) {\n          if (!negotiationScopeCurrent()) return;\n          console.debug("DeskLink remote ICE rejected", error);'''
+          if direct_ice_catch in main:
+              main = main.replace(direct_ice_catch, guarded_direct_ice_catch, 1)
+
+          main_path.write_text(main, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Install locked Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Audit Web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=moderate
+
+      - name: Run Web tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build production Web bundle
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Commit hardened negotiation scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx apps/web/src/session_resource_scope.ts apps/web/src/session_resource_scope.test.ts
+          git diff --cached --check
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(web): ignore late remote negotiation completions"
+          git push origin HEAD:main
