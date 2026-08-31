@@ -98,10 +98,55 @@ int main() {
     });
   }
   for (auto& worker : workers) worker.join();
-
   Require(
       shadow.mismatch_count() == static_cast<std::uint64_t>(kThreads * kMismatchesPerThread),
       "concurrent shadow mismatch accounting lost observations");
+
+  // The production-facing lifecycle adapter consumes C++ authority decisions instead of
+  // inventing a second source of truth. It owns only internal Session/Peer generations;
+  // Control/Pointer generations are supplied by the existing InputChannelAuthority.
+  desklink::RustCoreShadowLifecycle lifecycle;
+  Require(lifecycle.available(), "Rust lifecycle shadow was not available");
+
+  const auto first = lifecycle.BeginPeer(false);
+  Require(first.session != 0 && first.peer != 0, "first peer scope was invalid");
+  Require(lifecycle.ComparePeerConnected(first, true), "first peer connected mismatch");
+  Require(lifecycle.CompareControlOpened(first, 1, true), "first control open mismatch");
+  Require(lifecycle.ComparePointerOpened(first, 1, true), "first pointer open mismatch");
+
+  const auto replacement = lifecycle.BeginPeer(true);
+  Require(replacement.session == first.session, "peer replacement rotated session generation");
+  Require(replacement.peer > first.peer, "peer replacement generation did not advance");
+  Require(
+      lifecycle.ComparePeerConnected(first, false),
+      "old peer connected callback was not classified stale");
+  Require(
+      lifecycle.CompareControlClosed(first, 1, false),
+      "old peer control close was not classified stale");
+  Require(
+      lifecycle.ComparePointerClosed(first, 1, false),
+      "old peer pointer close was not classified stale");
+  Require(
+      lifecycle.ComparePeerConnected(replacement, true),
+      "replacement peer connected mismatch");
+  Require(
+      lifecycle.CompareControlOpened(replacement, 2, true),
+      "replacement control open mismatch");
+  Require(
+      lifecycle.ComparePointerOpened(replacement, 2, true),
+      "replacement pointer open mismatch");
+
+  const auto next_session = lifecycle.BeginPeer(false);
+  Require(next_session.session > replacement.session, "new authoritative session did not rotate generation");
+  Require(next_session.peer > replacement.peer, "peer generation did not remain monotonic");
+  Require(
+      lifecycle.ComparePeerConnected(replacement, false),
+      "old session peer callback was not classified stale");
+  Require(
+      lifecycle.ComparePeerConnected(next_session, true),
+      "new session peer connected mismatch");
+  Require(lifecycle.EndSession(), "connected shadow session did not close cleanly");
+  Require(lifecycle.mismatch_count() == 0, "lifecycle adapter produced unexpected mismatches");
 
   std::cout << "DeskLink Rust core shadow lifecycle + concurrency smoke passed.\n";
   return 0;
