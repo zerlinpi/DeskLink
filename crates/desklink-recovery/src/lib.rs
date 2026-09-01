@@ -1,8 +1,14 @@
-//! Deterministic recovery scheduling prototype with no async-runtime dependency.
+//! Deterministic recovery scheduling with single-owner recovery leases.
+
+mod lease;
+mod levels;
 
 use std::time::Duration;
 
 use desklink_protocol::{OperationGeneration, SessionGeneration};
+
+pub use lease::RecoveryLease;
+pub use levels::RecoveryLevel;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryKind {
@@ -25,6 +31,7 @@ pub struct RecoveryCoordinator {
     transport_attempts: u32,
     active_signaling: Option<OperationGeneration>,
     active_transport: Option<OperationGeneration>,
+    active_lease: Option<RecoveryLease>,
 }
 
 impl RecoveryCoordinator {
@@ -36,6 +43,7 @@ impl RecoveryCoordinator {
             transport_attempts: 0,
             active_signaling: None,
             active_transport: None,
+            active_lease: None,
         }
     }
 
@@ -53,7 +61,33 @@ impl RecoveryCoordinator {
         self.transport_attempts = 0;
         self.active_signaling = None;
         self.active_transport = None;
+        self.active_lease = None;
         true
+    }
+
+    pub fn active_lease(&self) -> Option<RecoveryLease> {
+        self.active_lease
+    }
+
+    pub fn begin_with_level(&mut self, level: RecoveryLevel) -> Option<RecoveryAttempt> {
+        if let Some(active) = self.active_lease {
+            if !active.can_replace(level) {
+                return None;
+            }
+        }
+
+        let kind = match level {
+            RecoveryLevel::SignalReconnect | RecoveryLevel::SessionRebuild => RecoveryKind::Signaling,
+            _ => RecoveryKind::Transport,
+        };
+
+        let attempt = self.begin(kind);
+        self.active_lease = Some(RecoveryLease::new(
+            self.session,
+            attempt.operation,
+            level,
+        ));
+        Some(attempt)
     }
 
     pub fn begin(&mut self, kind: RecoveryKind) -> RecoveryAttempt {
@@ -77,11 +111,7 @@ impl RecoveryCoordinator {
             }
         }
 
-        RecoveryAttempt {
-            operation,
-            kind,
-            delay,
-        }
+        RecoveryAttempt { operation, kind, delay }
     }
 
     pub fn mark_recovered(&mut self, session: SessionGeneration, attempt: RecoveryAttempt) -> bool {
@@ -89,7 +119,7 @@ impl RecoveryCoordinator {
             return false;
         }
 
-        match attempt.kind {
+        let recovered = match attempt.kind {
             RecoveryKind::Signaling if self.active_signaling == Some(attempt.operation) => {
                 self.signaling_attempts = 0;
                 self.active_signaling = None;
@@ -101,7 +131,13 @@ impl RecoveryCoordinator {
                 true
             }
             _ => false,
+        };
+
+        if recovered {
+            self.active_lease = None;
         }
+
+        recovered
     }
 }
 
