@@ -197,6 +197,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "desklink-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "desklink-protocol"
 version = "0.0.0"
 
