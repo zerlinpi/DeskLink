@@ -81,7 +81,7 @@ impl RecoveryCoordinator {
             _ => RecoveryKind::Transport,
         };
 
-        let attempt = self.begin(kind);
+        let attempt = self.begin_internal(kind);
         self.active_lease = Some(RecoveryLease::new(
             self.session,
             attempt.operation,
@@ -90,7 +90,7 @@ impl RecoveryCoordinator {
         Some(attempt)
     }
 
-    pub fn begin(&mut self, kind: RecoveryKind) -> RecoveryAttempt {
+    fn begin_internal(&mut self, kind: RecoveryKind) -> RecoveryAttempt {
         let delay = match kind {
             RecoveryKind::Signaling => backoff_delay(self.signaling_attempts),
             RecoveryKind::Transport => backoff_delay(self.transport_attempts),
