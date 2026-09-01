@@ -28,7 +28,7 @@ impl RecoveryLease {
     }
 
     pub const fn can_replace(&self, next: RecoveryLevel) -> bool {
-        next.can_escalate_to(next) && next > self.level
+        next > self.level
     }
 }
 
