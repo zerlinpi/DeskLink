@@ -15,8 +15,12 @@ pub enum RecoveryLevel {
 }
 
 impl RecoveryLevel {
+    /// Returns true only when the requested recovery is a real escalation.
+    ///
+    /// Equal-level recovery requests must be coalesced by the coordinator.
+    /// Lower-level requests must never downgrade an active recovery.
     pub const fn can_escalate_to(self, next: Self) -> bool {
-        next >= self
+        next > self
     }
 }
 
@@ -28,5 +32,10 @@ mod tests {
     fn recovery_escalation_is_monotonic() {
         assert!(RecoveryLevel::IceRestart.can_escalate_to(RecoveryLevel::SignalReconnect));
         assert!(!RecoveryLevel::SignalReconnect.can_escalate_to(RecoveryLevel::IceRestart));
+    }
+
+    #[test]
+    fn same_level_is_not_escalation() {
+        assert!(!RecoveryLevel::IceRestart.can_escalate_to(RecoveryLevel::IceRestart));
     }
 }
