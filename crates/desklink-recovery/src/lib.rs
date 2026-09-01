@@ -77,16 +77,14 @@ impl RecoveryCoordinator {
         }
 
         let kind = match level {
-            RecoveryLevel::SignalReconnect | RecoveryLevel::SessionRebuild => RecoveryKind::Signaling,
+            RecoveryLevel::SignalReconnect | RecoveryLevel::SessionRebuild => {
+                RecoveryKind::Signaling
+            }
             _ => RecoveryKind::Transport,
         };
 
         let attempt = self.begin_internal(kind);
-        self.active_lease = Some(RecoveryLease::new(
-            self.session,
-            attempt.operation,
-            level,
-        ));
+        self.active_lease = Some(RecoveryLease::new(self.session, attempt.operation, level));
         Some(attempt)
     }
 
@@ -111,7 +109,11 @@ impl RecoveryCoordinator {
             }
         }
 
-        RecoveryAttempt { operation, kind, delay }
+        RecoveryAttempt {
+            operation,
+            kind,
+            delay,
+        }
     }
 
     pub fn mark_recovered(&mut self, session: SessionGeneration, attempt: RecoveryAttempt) -> bool {

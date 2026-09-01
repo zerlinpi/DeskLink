@@ -179,9 +179,7 @@ fn redact_labeled_values(mut text: String, label: &str) -> String {
         while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
             value_start += 1;
         }
-        let quote = if value_start < bytes.len()
-            && matches!(bytes[value_start], b'\'' | b'\"')
-        {
+        let quote = if value_start < bytes.len() && matches!(bytes[value_start], b'\'' | b'\"') {
             let quote = Some(bytes[value_start]);
             value_start += 1;
             quote
@@ -267,10 +265,8 @@ mod tests {
                 "safe": "known-device-secret",
             }],
         });
-        let redactor = DiagnosticsRedactor::new().with_secret(
-            SecretKind::DeviceCredential,
-            "known-device-secret",
-        );
+        let redactor = DiagnosticsRedactor::new()
+            .with_secret(SecretKind::DeviceCredential, "known-device-secret");
 
         redactor.redact_json(&mut value);
         let serialized = serde_json::to_string(&value).expect("serialize redacted value");

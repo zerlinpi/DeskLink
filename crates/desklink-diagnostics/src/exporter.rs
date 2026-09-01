@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::{
-    DiagnosticSnapshot, DiagnosticsRedactor, DIAGNOSTICS_SCHEMA_VERSION,
-};
+use crate::{DiagnosticSnapshot, DiagnosticsRedactor, DIAGNOSTICS_SCHEMA_VERSION};
 
 const DEFAULT_ARCHIVE_NAME: &str = "desklink-diagnostics.zip";
 const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
@@ -32,10 +30,16 @@ impl fmt::Display for DiagnosticsExportError {
         match self {
             Self::InvalidSnapshot(message) => write!(formatter, "invalid snapshot: {message}"),
             Self::EntryTooLarge { name, bytes } => {
-                write!(formatter, "diagnostics entry {name} is too large ({bytes} bytes)")
+                write!(
+                    formatter,
+                    "diagnostics entry {name} is too large ({bytes} bytes)"
+                )
             }
             Self::ArchiveTooLarge { bytes } => {
-                write!(formatter, "diagnostics archive is too large ({bytes} bytes)")
+                write!(
+                    formatter,
+                    "diagnostics archive is too large ({bytes} bytes)"
+                )
             }
             Self::Io(error) => write!(formatter, "diagnostics I/O failed: {error}"),
             Self::Serialization(error) => {
@@ -50,9 +54,9 @@ impl std::error::Error for DiagnosticsExportError {
         match self {
             Self::Io(error) => Some(error),
             Self::Serialization(error) => Some(error),
-            Self::InvalidSnapshot(_) | Self::EntryTooLarge { .. } | Self::ArchiveTooLarge { .. } => {
-                None
-            }
+            Self::InvalidSnapshot(_)
+            | Self::EntryTooLarge { .. }
+            | Self::ArchiveTooLarge { .. } => None,
         }
     }
 }
@@ -255,9 +259,8 @@ struct StoredZipArchive;
 
 impl StoredZipArchive {
     fn build(entries: Vec<ArchiveEntry>) -> Result<Vec<u8>, DiagnosticsExportError> {
-        let entry_count = u16::try_from(entries.len()).map_err(|_| {
-            DiagnosticsExportError::InvalidSnapshot("too many diagnostics entries")
-        })?;
+        let entry_count = u16::try_from(entries.len())
+            .map_err(|_| DiagnosticsExportError::InvalidSnapshot("too many diagnostics entries"))?;
         let mut output = Vec::new();
         let mut central = Vec::new();
 
@@ -313,16 +316,14 @@ impl StoredZipArchive {
             central.extend_from_slice(name);
         }
 
-        let central_offset = u32::try_from(output.len()).map_err(|_| {
-            DiagnosticsExportError::ArchiveTooLarge {
+        let central_offset =
+            u32::try_from(output.len()).map_err(|_| DiagnosticsExportError::ArchiveTooLarge {
                 bytes: output.len(),
-            }
-        })?;
-        let central_size = u32::try_from(central.len()).map_err(|_| {
-            DiagnosticsExportError::ArchiveTooLarge {
+            })?;
+        let central_size =
+            u32::try_from(central.len()).map_err(|_| DiagnosticsExportError::ArchiveTooLarge {
                 bytes: central.len(),
-            }
-        })?;
+            })?;
         output.extend_from_slice(&central);
         push_u32(&mut output, 0x0605_4b50);
         push_u16(&mut output, 0);
