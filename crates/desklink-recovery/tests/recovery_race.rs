@@ -14,7 +14,10 @@ fn recovery_storm_keeps_single_coordinator_flow() {
     assert_eq!(first.kind, RecoveryKind::Transport);
     assert!(second.is_none());
     assert_eq!(
-        coordinator.active_lease().expect("active recovery").operation,
+        coordinator
+            .active_lease()
+            .expect("active recovery")
+            .operation,
         first.operation
     );
     assert_eq!(coordinator.current_session(), session);
