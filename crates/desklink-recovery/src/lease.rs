@@ -27,7 +27,7 @@ impl RecoveryLease {
         }
     }
 
-    pub const fn can_replace(&self, next: RecoveryLevel) -> bool {
+    pub fn can_replace(&self, next: RecoveryLevel) -> bool {
         next > self.level
     }
 }

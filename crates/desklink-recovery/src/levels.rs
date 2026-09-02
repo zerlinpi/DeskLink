@@ -19,7 +19,7 @@ impl RecoveryLevel {
     ///
     /// Equal-level recovery requests must be coalesced by the coordinator.
     /// Lower-level requests must never downgrade an active recovery.
-    pub const fn can_escalate_to(self, next: Self) -> bool {
+    pub fn can_escalate_to(self, next: Self) -> bool {
         next > self
     }
 }
