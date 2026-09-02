@@ -393,6 +393,28 @@ target_compile_definitions(
 target_compile_options(desklink-host-capabilities-smoke PRIVATE /W4 /permissive-)
 target_link_libraries(desklink-host-capabilities-smoke PRIVATE nlohmann_json::nlohmann_json)
 
+add_executable(desklink-diagnostics-bundle-smoke
+  src/diagnostics_bundle_smoke.cpp
+  src/diagnostics_bundle.cpp
+  src/diagnostics_bundle.h
+)
+target_compile_definitions(
+  desklink-diagnostics-bundle-smoke
+  PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+)
+target_compile_options(desklink-diagnostics-bundle-smoke PRIVATE /W4 /permissive-)
+target_link_libraries(
+  desklink-diagnostics-bundle-smoke
+  PRIVATE
+    nlohmann_json::nlohmann_json
+    advapi32
+    dxgi
+)
+
 if(DESKLINK_ENABLE_RUST_CORE_SHADOW)
   find_program(DESKLINK_CARGO_EXECUTABLE NAMES cargo REQUIRED)
   set(DESKLINK_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
