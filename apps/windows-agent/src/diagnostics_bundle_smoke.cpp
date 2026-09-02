@@ -6,8 +6,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
