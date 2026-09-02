@@ -287,6 +287,90 @@ jobs:
       - name: Validate all native smoke targets
         shell: pwsh
         run: ./tools/windows/run-native-smokes.ps1 -BuildDirectory "build/windows-agent" -Configuration "Release"
+      - name: Validate local diagnostics CLI
+        shell: pwsh
+        run: |
+          $agent = Resolve-Path "build/windows-agent/Release/desklink-agent.exe"
+          $workDirectory = Join-Path $env:RUNNER_TEMP "desklink-diagnostics-cli-$env:GITHUB_RUN_ID"
+          if (Test-Path $workDirectory) {
+            Remove-Item -LiteralPath $workDirectory -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $workDirectory | Out-Null
+
+          $env:DESKLINK_ACCESS_CODE = "CI-DIAGNOSTICS-ACCESS-CODE-SECRET"
+          $env:DESKLINK_DEVICE_CREDENTIAL = "dc2.CI-DIAGNOSTICS-DEVICE-CREDENTIAL-SECRET"
+          $env:DESKLINK_SIGNAL_AUTH_SECRET = "CI-DIAGNOSTICS-SIGNAL-SECRET"
+          $env:DESKLINK_TURN_SECRET = "CI-DIAGNOSTICS-TURN-SECRET"
+
+          Push-Location $workDirectory
+          try {
+            & $agent --diagnostics
+            if ($LASTEXITCODE -ne 0) {
+              throw "desklink-agent --diagnostics failed with exit code $LASTEXITCODE"
+            }
+
+            $archivePath = Join-Path $workDirectory "desklink-diagnostics.zip"
+            if (-not (Test-Path $archivePath)) {
+              throw "desklink-agent --diagnostics did not create desklink-diagnostics.zip"
+            }
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
+            try {
+              $expectedEntries = @(
+                "desklink.json",
+                "logs.json",
+                "manifest.json",
+                "media.json",
+                "network.json",
+                "service.json",
+                "session.json",
+                "system.json"
+              )
+              $actualEntries = @($archive.Entries.FullName | Sort-Object)
+              if (Compare-Object $expectedEntries $actualEntries) {
+                throw "diagnostics CLI archive entries differ from the fixed contract"
+              }
+
+              $manifestEntry = $archive.GetEntry("manifest.json")
+              $reader = [System.IO.StreamReader]::new($manifestEntry.Open())
+              try {
+                $manifest = $reader.ReadToEnd() | ConvertFrom-Json
+              } finally {
+                $reader.Dispose()
+              }
+              if (-not $manifest.local_export_only -or
+                  $manifest.auto_upload -or
+                  $manifest.redaction -ne "DiagnosticsRedactor") {
+                throw "diagnostics CLI manifest lost the local-only safety contract"
+              }
+            } finally {
+              $archive.Dispose()
+            }
+
+            $archiveText = [System.Text.Encoding]::UTF8.GetString(
+              [System.IO.File]::ReadAllBytes($archivePath)
+            )
+            foreach ($secret in @(
+              $env:DESKLINK_ACCESS_CODE,
+              $env:DESKLINK_DEVICE_CREDENTIAL,
+              $env:DESKLINK_SIGNAL_AUTH_SECRET,
+              $env:DESKLINK_TURN_SECRET
+            )) {
+              if ($archiveText.Contains($secret)) {
+                throw "diagnostics CLI archive leaked a protected environment value"
+              }
+            }
+
+            $originalSize = (Get-Item $archivePath).Length
+            $secondRun = Start-Process -FilePath $agent -ArgumentList "--diagnostics" -Wait -PassThru
+            if ($secondRun.ExitCode -eq 0 -or (Get-Item $archivePath).Length -ne $originalSize) {
+              throw "diagnostics CLI must refuse to overwrite an existing archive"
+            }
+          } finally {
+            Pop-Location
+            Remove-Item -LiteralPath $workDirectory -Recurse -Force
+          }
       - name: Validate DPAPI protected secrets
         shell: pwsh
         run: |
