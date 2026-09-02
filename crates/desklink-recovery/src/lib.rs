@@ -70,6 +70,9 @@ impl RecoveryCoordinator {
     }
 
     pub fn begin_with_level(&mut self, level: RecoveryLevel) -> Option<RecoveryAttempt> {
+        if level == RecoveryLevel::Natural {
+            return None;
+        }
         if let Some(active) = self.active_lease {
             if !active.can_replace(level) {
                 return None;
@@ -83,6 +86,10 @@ impl RecoveryCoordinator {
             _ => RecoveryKind::Transport,
         };
 
+        // Escalation transfers the single recovery authority. Any completion
+        // from the superseded attempt becomes stale immediately.
+        self.active_signaling = None;
+        self.active_transport = None;
         let attempt = self.begin_internal(kind);
         self.active_lease = Some(RecoveryLease::new(self.session, attempt.operation, level));
         Some(attempt)
@@ -140,6 +147,35 @@ impl RecoveryCoordinator {
         }
 
         recovered
+    }
+
+    /// Completes the current attempt without resetting its backoff counter.
+    /// A later request at the same level may retry, while stale completions
+    /// cannot clear the authority of a newer or escalated operation.
+    pub fn mark_failed(&mut self, session: SessionGeneration, attempt: RecoveryAttempt) -> bool {
+        if session != self.session
+            || self
+                .active_lease
+                .is_none_or(|lease| lease.operation != attempt.operation)
+        {
+            return false;
+        }
+
+        let failed = match attempt.kind {
+            RecoveryKind::Signaling if self.active_signaling == Some(attempt.operation) => {
+                self.active_signaling = None;
+                true
+            }
+            RecoveryKind::Transport if self.active_transport == Some(attempt.operation) => {
+                self.active_transport = None;
+                true
+            }
+            _ => false,
+        };
+        if failed {
+            self.active_lease = None;
+        }
+        failed
     }
 }
 
