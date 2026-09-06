@@ -36,6 +36,8 @@ jobs:
         run: rustup toolchain install 1.85.1 --profile minimal --component rustfmt,clippy
       - name: Check formatting
         run: cargo fmt --check
+      - name: Chaos runner contract
+        run: cargo test -p desklink-chaos --test runner_contract
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Tests

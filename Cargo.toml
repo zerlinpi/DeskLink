@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/desklink-chaos",
     "crates/desklink-core-ffi",
     "crates/desklink-diagnostics",
     "crates/desklink-protocol",
