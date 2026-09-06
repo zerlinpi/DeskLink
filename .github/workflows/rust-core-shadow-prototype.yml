@@ -8,9 +8,11 @@ on:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - crates/desklink-protocol/**
-      - crates/desklink-session/**
       - crates/desklink-core-ffi/**
+      - crates/desklink-diagnostics/**
+      - crates/desklink-protocol/**
+      - crates/desklink-recovery/**
+      - crates/desklink-session/**
       - apps/windows-agent/CMakeLists.txt
       - apps/windows-agent/src/rust_core_shadow.cpp
       - apps/windows-agent/src/rust_core_shadow.h
@@ -65,7 +67,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         shell: pwsh
-        run: rustup toolchain install 1.85.1 --profile minimal
+        run: rustup toolchain install 1.85.1 --profile minimal --component rustfmt --component clippy
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Lint full Rust workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test full Rust workspace
+        run: cargo test --workspace --all-targets --locked
       - name: Configure shadow build
         run: cmake -S apps/windows-agent -B build/windows-agent-shadow -A x64 -DDESKLINK_ENABLE_RUST_CORE_SHADOW=ON -DOPENSSL_USE_STATIC_LIBS=TRUE -DOPENSSL_MSVC_STATIC_RT=TRUE
       - name: Build native shadow contract first
