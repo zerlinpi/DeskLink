@@ -185,7 +185,11 @@ checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+checksum = "460fbee9c2c2f33933d720ca6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
+name = "desklink-chaos"
+version = "0.0.0"
 
 [[package]]
 name = "desklink-core-ffi"
@@ -244,7 +248,7 @@ dependencies = [
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+checksum = "da7c62ceae207d37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fnv"
@@ -292,7 +296,7 @@ dependencies = [
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+checksum = "300e883d756b2e69c799f85e97da1ab5b7910be3c1c80223"
 dependencies = [
  "cfg-if",
  "libc",
