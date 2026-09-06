@@ -37,7 +37,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Chaos runner contract
-        run: cargo test -p desklink-chaos --test runner_contract
+        run: cargo test --locked -p desklink-chaos --test runner_contract
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Tests
