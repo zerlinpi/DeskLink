@@ -1,6 +1,4 @@
-use desklink_chaos::{
-    ChaosOutcome, ChaosRunner, ChaosScenario, FaultInjector,
-};
+use desklink_chaos::{ChaosOutcome, ChaosRunner, ChaosScenario, FaultInjector};
 
 #[derive(Default)]
 struct RecordingInjector {
