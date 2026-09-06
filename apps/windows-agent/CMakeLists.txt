@@ -98,11 +98,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(libdatachannel)
 
 add_executable(desklink-agent
+  src/agent_cli_main.cpp
   src/main.cpp
   src/clipboard_win32.cpp
   src/clipboard_win32.h
   src/desktop_capture.cpp
   src/desktop_capture.h
+  src/diagnostics_bundle.cpp
+  src/diagnostics_bundle.h
   src/file_transfer_receiver.cpp
   src/file_transfer_receiver.h
   src/file_transfer_chunk_policy.h
@@ -142,6 +145,12 @@ add_executable(desklink-agent
   "${CMAKE_CURRENT_BINARY_DIR}/desklink-agent-version.rc"
 )
 
+set_source_files_properties(
+  src/main.cpp
+  PROPERTIES
+    COMPILE_DEFINITIONS "wmain=DeskLinkAgentMain"
+)
+
 target_compile_definitions(
   desklink-agent
   PRIVATE
@@ -149,6 +158,7 @@ target_compile_definitions(
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
+    DESKLINK_VERSION_STRING="${DESKLINK_VERSION}"
     DESKLINK_ENABLE_RUST_CORE_SHADOW=$<BOOL:${DESKLINK_ENABLE_RUST_CORE_SHADOW}>
 )
 target_compile_options(desklink-agent PRIVATE /W4 /permissive-)
