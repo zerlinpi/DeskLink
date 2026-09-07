@@ -233,3 +233,31 @@ fn peer_replacement_preserves_operation_generation_high_water() {
     );
     assert_eq!(machine.current_operation(), Some(operation3));
 }
+
+#[test]
+fn peer_replacement_ignores_timeout_from_revoked_operation() {
+    let (mut machine, session, peer1, _control) = connected_machine();
+    let peer2 = peer1.next().expect("replacement peer generation");
+    let operation = OperationGeneration::initial();
+
+    machine
+        .apply(SessionEvent::OperationStarted { session, operation })
+        .unwrap();
+    assert_eq!(machine.current_operation(), Some(operation));
+
+    machine
+        .apply(SessionEvent::PeerReplaced {
+            session,
+            peer: peer2,
+        })
+        .unwrap();
+    assert_eq!(machine.current_operation(), None);
+
+    assert_eq!(
+        machine
+            .apply(SessionEvent::OperationTimedOut { session, operation })
+            .unwrap(),
+        vec![SessionCommand::IgnoreStaleEvent]
+    );
+    assert_eq!(machine.current_operation(), None);
+}
