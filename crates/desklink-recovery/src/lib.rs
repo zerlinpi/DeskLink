@@ -23,6 +23,14 @@ pub struct RecoveryAttempt {
     pub delay: Duration,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoverySnapshot {
+    pub session: SessionGeneration,
+    pub signaling_attempts: u32,
+    pub transport_attempts: u32,
+    pub active_lease: Option<RecoveryLease>,
+}
+
 #[derive(Debug)]
 pub struct RecoveryCoordinator {
     session: SessionGeneration,
@@ -49,6 +57,15 @@ impl RecoveryCoordinator {
 
     pub const fn current_session(&self) -> SessionGeneration {
         self.session
+    }
+
+    pub const fn snapshot(&self) -> RecoverySnapshot {
+        RecoverySnapshot {
+            session: self.session,
+            signaling_attempts: self.signaling_attempts,
+            transport_attempts: self.transport_attempts,
+            active_lease: self.active_lease,
+        }
     }
 
     pub fn rotate_session(&mut self, session: SessionGeneration) -> bool {
