@@ -39,6 +39,37 @@ fn stale_recovery_cannot_change_new_session() {
 }
 
 #[test]
+fn repeated_session_rotation_keeps_latest_recovery_authority() {
+    let session1 = SessionGeneration::initial();
+    let session2 = session1.next().expect("second session generation");
+    let session3 = session2.next().expect("third session generation");
+    let mut coordinator = RecoveryCoordinator::new(session1);
+
+    let stale1 = coordinator
+        .begin_with_level(RecoveryLevel::IceRestart)
+        .expect("start first recovery");
+    assert!(coordinator.rotate_session(session2));
+
+    let stale2 = coordinator
+        .begin_with_level(RecoveryLevel::SignalReconnect)
+        .expect("start second recovery");
+    assert!(coordinator.rotate_session(session3));
+
+    let current = coordinator
+        .begin_with_level(RecoveryLevel::DataChannelRebuild)
+        .expect("start current recovery");
+    let current_lease = coordinator.active_lease().expect("current recovery lease");
+
+    assert!(!coordinator.mark_recovered(session1, stale1));
+    assert!(!coordinator.mark_failed(session2, stale2));
+    assert_eq!(coordinator.current_session(), session3);
+    assert_eq!(coordinator.active_lease(), Some(current_lease));
+
+    assert!(coordinator.mark_recovered(session3, current));
+    assert!(coordinator.active_lease().is_none());
+}
+
+#[test]
 fn escalation_revokes_the_previous_attempt() {
     let session = SessionGeneration::initial();
     let mut coordinator = RecoveryCoordinator::new(session);
