@@ -163,7 +163,10 @@ fn snapshot_exposes_recovery_state_without_taking_authority() {
 
     assert_eq!(snapshot.session, session);
     assert_eq!(snapshot.active_lease, coordinator.active_lease());
-    assert_eq!(snapshot.active_lease.expect("active lease").operation, attempt.operation);
+    assert_eq!(
+        snapshot.active_lease.expect("active lease").operation,
+        attempt.operation
+    );
     assert_eq!(snapshot.transport_attempts, 1);
     assert_eq!(snapshot.signaling_attempts, 0);
 
