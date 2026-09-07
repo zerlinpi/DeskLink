@@ -1,5 +1,6 @@
 use desklink_protocol::{
-    ControlChannelGeneration, PeerGeneration, PointerChannelGeneration, SessionGeneration,
+    ControlChannelGeneration, OperationGeneration, PeerGeneration, PointerChannelGeneration,
+    SessionGeneration,
 };
 use desklink_session::{RemoteSessionStateMachine, SessionCommand, SessionEvent, SessionState};
 
@@ -175,4 +176,60 @@ fn stale_channel_callbacks_cannot_reclaim_or_poison_replacement_peer_authority()
     );
     assert_eq!(machine.current_control(), Some(control2));
     assert_eq!(machine.current_pointer(), Some(pointer2));
+}
+
+#[test]
+fn peer_replacement_preserves_operation_generation_high_water() {
+    let (mut machine, session, peer1, _control) = connected_machine();
+    let peer2 = peer1.next().expect("replacement peer generation");
+    let operation1 = OperationGeneration::initial();
+    let operation2 = operation1.next().expect("second operation generation");
+    let operation3 = operation2.next().expect("third operation generation");
+
+    machine
+        .apply(SessionEvent::OperationStarted {
+            session,
+            operation: operation2,
+        })
+        .unwrap();
+    assert_eq!(machine.current_operation(), Some(operation2));
+
+    machine
+        .apply(SessionEvent::PeerReplaced {
+            session,
+            peer: peer2,
+        })
+        .unwrap();
+    assert_eq!(machine.current_operation(), None);
+
+    machine
+        .apply(SessionEvent::PeerConnected {
+            session,
+            peer: peer2,
+        })
+        .unwrap();
+
+    for stale in [operation1, operation2] {
+        assert_eq!(
+            machine
+                .apply(SessionEvent::OperationStarted {
+                    session,
+                    operation: stale,
+                })
+                .unwrap(),
+            vec![SessionCommand::IgnoreStaleEvent]
+        );
+        assert_eq!(machine.current_operation(), None);
+    }
+
+    assert_eq!(
+        machine
+            .apply(SessionEvent::OperationStarted {
+                session,
+                operation: operation3,
+            })
+            .unwrap(),
+        Vec::new()
+    );
+    assert_eq!(machine.current_operation(), Some(operation3));
 }
