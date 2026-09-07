@@ -70,6 +70,36 @@ fn repeated_session_rotation_keeps_latest_recovery_authority() {
 }
 
 #[test]
+fn escalation_then_session_rotation_keeps_new_session_authority() {
+    let session1 = SessionGeneration::initial();
+    let session2 = session1.next().expect("next session generation");
+    let mut coordinator = RecoveryCoordinator::new(session1);
+
+    let transport = coordinator
+        .begin_with_level(RecoveryLevel::IceRestart)
+        .expect("start transport recovery");
+    let escalated = coordinator
+        .begin_with_level(RecoveryLevel::SignalReconnect)
+        .expect("escalate recovery");
+
+    assert!(!coordinator.mark_recovered(session1, transport));
+    assert!(coordinator.rotate_session(session2));
+
+    let current = coordinator
+        .begin_with_level(RecoveryLevel::DataChannelRebuild)
+        .expect("start new session recovery");
+    let current_lease = coordinator.active_lease().expect("new session lease");
+
+    assert!(!coordinator.mark_failed(session1, transport));
+    assert!(!coordinator.mark_recovered(session1, escalated));
+    assert_eq!(coordinator.current_session(), session2);
+    assert_eq!(coordinator.active_lease(), Some(current_lease));
+
+    assert!(coordinator.mark_recovered(session2, current));
+    assert!(coordinator.active_lease().is_none());
+}
+
+#[test]
 fn escalation_revokes_the_previous_attempt() {
     let session = SessionGeneration::initial();
     let mut coordinator = RecoveryCoordinator::new(session);
