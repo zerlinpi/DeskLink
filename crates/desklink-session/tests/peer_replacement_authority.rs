@@ -261,3 +261,137 @@ fn peer_replacement_ignores_timeout_from_revoked_operation() {
     );
     assert_eq!(machine.current_operation(), None);
 }
+
+#[test]
+fn repeated_peer_replacement_keeps_operation_generation_monotonic() {
+    let (mut machine, session, peer1, _control) = connected_machine();
+    let peer2 = peer1.next().expect("second peer generation");
+    let peer3 = peer2.next().expect("third peer generation");
+    let operation1 = OperationGeneration::initial();
+    let operation2 = operation1.next().expect("second operation generation");
+    let operation3 = operation2.next().expect("third operation generation");
+    let operation4 = operation3.next().expect("fourth operation generation");
+
+    machine
+        .apply(SessionEvent::OperationStarted {
+            session,
+            operation: operation2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::PeerReplaced {
+            session,
+            peer: peer2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::PeerConnected {
+            session,
+            peer: peer2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::OperationStarted {
+            session,
+            operation: operation3,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::PeerReplaced {
+            session,
+            peer: peer3,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::PeerConnected {
+            session,
+            peer: peer3,
+        })
+        .unwrap();
+
+    for stale in [operation1, operation2, operation3] {
+        assert_eq!(
+            machine
+                .apply(SessionEvent::OperationStarted {
+                    session,
+                    operation: stale,
+                })
+                .unwrap(),
+            vec![SessionCommand::IgnoreStaleEvent]
+        );
+        assert_eq!(
+            machine
+                .apply(SessionEvent::OperationTimedOut {
+                    session,
+                    operation: stale,
+                })
+                .unwrap(),
+            vec![SessionCommand::IgnoreStaleEvent]
+        );
+        assert_eq!(machine.current_operation(), None);
+    }
+
+    assert_eq!(
+        machine
+            .apply(SessionEvent::OperationStarted {
+                session,
+                operation: operation4,
+            })
+            .unwrap(),
+        Vec::new()
+    );
+    assert_eq!(machine.current_operation(), Some(operation4));
+}
+
+#[test]
+fn new_session_resets_operation_generation_scope() {
+    let (mut machine, session1, _peer1, _control) = connected_machine();
+    let operation1 = OperationGeneration::initial();
+    let operation2 = operation1.next().expect("second operation generation");
+
+    machine
+        .apply(SessionEvent::OperationStarted {
+            session: session1,
+            operation: operation2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::CloseRequested { session: session1 })
+        .unwrap();
+    machine
+        .apply(SessionEvent::Closed { session: session1 })
+        .unwrap();
+    assert_eq!(machine.state(), SessionState::Idle);
+
+    let session2 = session1.next().expect("second session generation");
+    let peer2 = PeerGeneration::initial();
+    machine
+        .apply(SessionEvent::Start { session: session2 })
+        .unwrap();
+    machine
+        .apply(SessionEvent::SignalConnected { session: session2 })
+        .unwrap();
+    machine
+        .apply(SessionEvent::AuthenticationAccepted {
+            session: session2,
+            peer: peer2,
+        })
+        .unwrap();
+    machine
+        .apply(SessionEvent::PeerConnected {
+            session: session2,
+            peer: peer2,
+        })
+        .unwrap();
+
+    assert_eq!(
+        machine
+            .apply(SessionEvent::OperationStarted {
+                session: session2,
+                operation: operation1,
+            })
+            .unwrap(),
+        Vec::new()
+    );
+    assert_eq!(machine.current_operation(), Some(operation1));
+}
