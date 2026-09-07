@@ -115,6 +115,32 @@ fn escalation_revokes_the_previous_attempt() {
 }
 
 #[test]
+fn repeated_escalation_keeps_only_latest_recovery_authority() {
+    let session = SessionGeneration::initial();
+    let mut coordinator = RecoveryCoordinator::new(session);
+
+    let transport = coordinator
+        .begin_with_level(RecoveryLevel::IceRestart)
+        .expect("start transport recovery");
+    let signaling = coordinator
+        .begin_with_level(RecoveryLevel::SignalReconnect)
+        .expect("escalate to signaling recovery");
+    let rebuild = coordinator
+        .begin_with_level(RecoveryLevel::SessionRebuild)
+        .expect("escalate to session rebuild");
+    let current_lease = coordinator.active_lease().expect("session rebuild lease");
+
+    assert_eq!(current_lease.operation, rebuild.operation);
+    assert_eq!(current_lease.level, RecoveryLevel::SessionRebuild);
+    assert!(!coordinator.mark_recovered(session, transport));
+    assert!(!coordinator.mark_failed(session, signaling));
+    assert_eq!(coordinator.active_lease(), Some(current_lease));
+
+    assert!(coordinator.mark_recovered(session, rebuild));
+    assert!(coordinator.active_lease().is_none());
+}
+
+#[test]
 fn natural_recovery_does_not_take_recovery_authority() {
     let session = SessionGeneration::initial();
     let mut coordinator = RecoveryCoordinator::new(session);
