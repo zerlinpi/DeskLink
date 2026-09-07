@@ -421,7 +421,14 @@ impl RemoteSessionStateMachine {
                         self.operation = None;
                         Ok(Vec::new())
                     }
-                    _ => self.invalid(),
+                    Some(Ordering::Greater) => self.invalid(),
+                    None => match self
+                        .operation_high_water
+                        .map(|latest| operation.cmp(&latest))
+                    {
+                        Some(Ordering::Less | Ordering::Equal) => Self::ignore_stale(),
+                        Some(Ordering::Greater) | None => self.invalid(),
+                    },
                 }
             }
             SessionEvent::CloseRequested { session } => match self.session_ordering(session) {
