@@ -3,3 +3,7 @@ name = "desklink-chaos"
 version = "0.0.0"
 edition = "2021"
 publish = false
+
+[dev-dependencies]
+desklink-protocol = { path = "../desklink-protocol" }
+desklink-session = { path = "../desklink-session" }
