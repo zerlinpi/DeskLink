@@ -41,10 +41,8 @@ fn runner_injects_once_and_reports_not_executed_without_observer() {
 
 #[test]
 fn runner_uses_evaluator_after_fault_injection() {
-    let mut runner = ChaosRunner::with_evaluator(
-        RecordingInjector::default(),
-        RecordingEvaluator::default(),
-    );
+    let mut runner =
+        ChaosRunner::with_evaluator(RecordingInjector::default(), RecordingEvaluator::default());
 
     let result = runner.run(ChaosScenario::PeerReplace);
 
