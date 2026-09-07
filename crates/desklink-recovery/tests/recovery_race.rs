@@ -150,3 +150,25 @@ fn natural_recovery_does_not_take_recovery_authority() {
         .is_none());
     assert!(coordinator.active_lease().is_none());
 }
+
+#[test]
+fn snapshot_exposes_recovery_state_without_taking_authority() {
+    let session = SessionGeneration::initial();
+    let mut coordinator = RecoveryCoordinator::new(session);
+    let attempt = coordinator
+        .begin_with_level(RecoveryLevel::IceRestart)
+        .expect("start transport recovery");
+
+    let snapshot = coordinator.snapshot();
+
+    assert_eq!(snapshot.session, session);
+    assert_eq!(snapshot.active_lease, coordinator.active_lease());
+    assert_eq!(snapshot.active_lease.expect("active lease").operation, attempt.operation);
+    assert_eq!(snapshot.transport_attempts, 1);
+    assert_eq!(snapshot.signaling_attempts, 0);
+
+    assert!(coordinator.mark_failed(session, attempt));
+    let after_failure = coordinator.snapshot();
+    assert!(after_failure.active_lease.is_none());
+    assert_eq!(after_failure.transport_attempts, 1);
+}
