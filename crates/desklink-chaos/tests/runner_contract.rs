@@ -25,6 +25,14 @@ impl ChaosEvaluator for RecordingEvaluator {
     }
 }
 
+struct FailedEvaluator;
+
+impl ChaosEvaluator for FailedEvaluator {
+    fn evaluate(&mut self, _scenario: &ChaosScenario) -> ChaosEvaluation {
+        ChaosEvaluation::failed(Some("session-rebuild".to_string()), 7, 4)
+    }
+}
+
 #[test]
 fn runner_injects_once_and_reports_not_executed_without_observer() {
     let mut runner = ChaosRunner::new(RecordingInjector::default());
@@ -53,4 +61,18 @@ fn runner_uses_evaluator_after_fault_injection() {
     assert_eq!(result.recovery_attempts, 2);
     assert_eq!(runner.injector().calls, vec![ChaosScenario::PeerReplace]);
     assert_eq!(runner.evaluator().calls, vec![ChaosScenario::PeerReplace]);
+}
+
+#[test]
+fn runner_preserves_failed_evaluator_telemetry() {
+    let mut runner = ChaosRunner::with_evaluator(RecordingInjector::default(), FailedEvaluator);
+
+    let result = runner.run(ChaosScenario::ServiceRestart);
+
+    assert_eq!(result.scenario, ChaosScenario::ServiceRestart);
+    assert_eq!(result.outcome, ChaosOutcome::Failed);
+    assert_eq!(result.recovery_level.as_deref(), Some("session-rebuild"));
+    assert_eq!(result.stale_events, 7);
+    assert_eq!(result.recovery_attempts, 4);
+    assert_eq!(runner.injector().calls, vec![ChaosScenario::ServiceRestart]);
 }
