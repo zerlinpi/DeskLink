@@ -190,6 +190,12 @@ impl RemoteSessionStateMachine {
         self.operation_high_water = None;
     }
 
+    fn reset_peer_scoped_authority(&mut self) {
+        self.clear_active_authority();
+        self.control_high_water = None;
+        self.pointer_high_water = None;
+    }
+
     pub fn apply(&mut self, event: SessionEvent) -> Result<Vec<SessionCommand>, SessionError> {
         match event {
             SessionEvent::Start { session } if self.state == SessionState::Idle => {
@@ -255,7 +261,7 @@ impl RemoteSessionStateMachine {
                         ) =>
                     {
                         self.peer = Some(peer);
-                        self.reset_scoped_authority();
+                        self.reset_peer_scoped_authority();
                         self.state = SessionState::Negotiating;
                         Ok(vec![SessionCommand::BeginNegotiation])
                     }
